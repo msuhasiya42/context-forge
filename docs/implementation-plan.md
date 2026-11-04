@@ -477,6 +477,27 @@ Counting: estimate with a tokenizer before the call; record actual provider usag
 
 Test, in phase 1: run a request with the cap set artificially low so compaction fires repeatedly; check that exclusions, citations and `nextAction` survive.
 
+### 8.7 Data types: where each lives and how it comes back
+
+Recorded 4 November 2026. Every path to bytes goes through a tool with a cap or a locator; nothing in object storage is read whole into the model. Numbers are always answered by SQL, never by vector search over spreadsheets.
+
+| Type | Stored as | Location | How retrieved |
+|---|---|---|---|
+| xlsx or csv upload | original bytes, unchanged | S3 (local disk before phase 9); Artifact `kind=upload` | never read by the model; kept for re-ingestion and download |
+| Dataset from a spreadsheet | typed Parquet table, one row per transaction, `row_id` added | S3; Artifact `kind=dataset` with `derivedFromArtifactId` | SQL via DuckDB (`sql_query`), read-only, 50-row cap, exact aggregates in SQL |
+| PDF upload | original bytes | S3; Artifact `kind=upload` | page slice on demand via `read_artifact(id, page)` |
+| PDF chunks | text chunks with page number, chunk index, artifact id | S3 Vectors (Bedrock Titan embeddings) with the chunk text alongside; `indexStatus` on the Artifact | hybrid: BM25 keyword match plus vector top-k, merged, reranked, top 5 returned with page refs (`search_chunks`); owner filter applied before ranking |
+| Email, Drive file | not stored | the provider, through the MCP server with the user's OAuth connection | the integration's own tool, chosen by lexical tool search over the catalog; results bounded by the tool |
+| Query output over 50 rows | JSON lines, full result | S3; Artifact `kind=raw_result` | row slice on demand via `read_artifact(id, rows)`; the stub in context names the artifact and the omitted count |
+| Generated file (xlsx, csv) | bytes | S3; Artifact `kind=deliverable`, linked from the report | download via signed URL; not read back by the model |
+| Working brief | LangGraph state, JSON | checkpointer tables: SQLite locally, DynamoDB from phase 9 | loaded whole into every call; `messages` compacted when over budget; nothing searched |
+| Task results | structured JSON, no row sets | DynamoDB `REQ#<id> / TASK#<id>` | by dependency only: a task gets its dependencies' summaries, about 400 tokens each |
+| Messages and reports | JSON records | DynamoDB `CHAT#<id> / MSG#<id>` | listed by chat in ULID order; prior reports go into the planner's prior-context section |
+| Standing instructions, preferences | text and small JSON on the User record | DynamoDB `USER#<id> / PROFILE` | always loaded, memory section of every call |
+| `agent-memory.md` | versioned file | repository, `prompts/` | always loaded, first system block, cached |
+| Learned facts and episodes (phase 6) | `AgentMemoryRecord`, one fact per record with provenance and expiry | DynamoDB under `USER#<id>` | keyword or embedding match on the record text, top-k |
+| Integration tool catalog | name, description, input schema per tool | DynamoDB `INT#<id> / TOOL#<name>` | lexical rank on name and description, top 3 to 5 schemas loaded into the call |
+
 ## 9. Model split and worked calls
 
 | Stage | Model on Bedrock | Why |
