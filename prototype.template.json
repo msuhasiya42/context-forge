@@ -1,0 +1,317 @@
+{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Description": "Learning-only ResearchJob -> Streams -> Lambda -> SQS. No model calls or public endpoints.",
+  "Resources": {
+    "ResearchJob": {
+      "Type": "AWS::DynamoDB::Table",
+      "Properties": {
+        "TableName": "ResearchJob",
+        "BillingMode": "PROVISIONED",
+        "TableClass": "STANDARD",
+        "ProvisionedThroughput": {
+          "ReadCapacityUnits": 1,
+          "WriteCapacityUnits": 1
+        },
+        "AttributeDefinitions": [
+          {
+            "AttributeName": "jobId",
+            "AttributeType": "S"
+          }
+        ],
+        "KeySchema": [
+          {
+            "AttributeName": "jobId",
+            "KeyType": "HASH"
+          }
+        ],
+        "StreamSpecification": {
+          "StreamViewType": "NEW_IMAGE"
+        },
+        "TimeToLiveSpecification": {
+          "AttributeName": "expireAt",
+          "Enabled": true
+        },
+        "SSESpecification": {
+          "SSEEnabled": false
+        },
+        "Tags": [
+          {
+            "Key": "Project",
+            "Value": "EnterpriseResearchAgent"
+          },
+          {
+            "Key": "Environment",
+            "Value": "learning"
+          }
+        ]
+      }
+    },
+    "JobQueue": {
+      "Type": "AWS::SQS::Queue",
+      "Properties": {
+        "QueueName": "research-jobs-prototype",
+        "SqsManagedSseEnabled": true,
+        "MessageRetentionPeriod": 86400,
+        "VisibilityTimeout": 60,
+        "ReceiveMessageWaitTimeSeconds": 20,
+        "Tags": [
+          {
+            "Key": "Project",
+            "Value": "EnterpriseResearchAgent"
+          },
+          {
+            "Key": "Environment",
+            "Value": "learning"
+          }
+        ]
+      }
+    },
+    "StreamFailures": {
+      "Type": "AWS::SQS::Queue",
+      "Properties": {
+        "QueueName": "research-stream-failures-prototype",
+        "SqsManagedSseEnabled": true,
+        "MessageRetentionPeriod": 1209600,
+        "Tags": [
+          {
+            "Key": "Project",
+            "Value": "EnterpriseResearchAgent"
+          },
+          {
+            "Key": "Environment",
+            "Value": "learning"
+          }
+        ]
+      }
+    },
+    "BridgeLogGroup": {
+      "Type": "AWS::Logs::LogGroup",
+      "Properties": {
+        "LogGroupName": "/aws/lambda/research-job-stream-bridge",
+        "RetentionInDays": 3,
+        "Tags": [
+          {
+            "Key": "Project",
+            "Value": "EnterpriseResearchAgent"
+          },
+          {
+            "Key": "Environment",
+            "Value": "learning"
+          }
+        ]
+      }
+    },
+    "BridgeRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "lambda.amazonaws.com"
+              },
+              "Action": "sts:AssumeRole"
+            }
+          ]
+        },
+        "Policies": [
+          {
+            "PolicyName": "ReadOneStreamSendTwoQueuesWriteOwnLogs",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "dynamodb:DescribeStream",
+                    "dynamodb:GetRecords",
+                    "dynamodb:GetShardIterator"
+                  ],
+                  "Resource": {
+                    "Fn::GetAtt": [
+                      "ResearchJob",
+                      "StreamArn"
+                    ]
+                  }
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": "dynamodb:ListStreams",
+                  "Resource": "*"
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": "sqs:SendMessage",
+                  "Resource": [
+                    {
+                      "Fn::GetAtt": [
+                        "JobQueue",
+                        "Arn"
+                      ]
+                    },
+                    {
+                      "Fn::GetAtt": [
+                        "StreamFailures",
+                        "Arn"
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "logs:CreateLogStream",
+                    "logs:PutLogEvents"
+                  ],
+                  "Resource": {
+                    "Fn::GetAtt": [
+                      "BridgeLogGroup",
+                      "Arn"
+                    ]
+                  }
+                }
+              ]
+            }
+          }
+        ],
+        "Tags": [
+          {
+            "Key": "Project",
+            "Value": "EnterpriseResearchAgent"
+          },
+          {
+            "Key": "Environment",
+            "Value": "learning"
+          }
+        ]
+      }
+    },
+    "StreamBridge": {
+      "Type": "AWS::Lambda::Function",
+      "DependsOn": "BridgeLogGroup",
+      "Properties": {
+        "FunctionName": "research-job-stream-bridge",
+        "Runtime": "python3.13",
+        "Handler": "index.handler",
+        "Role": {
+          "Fn::GetAtt": [
+            "BridgeRole",
+            "Arn"
+          ]
+        },
+        "MemorySize": 128,
+        "Timeout": 10,
+        "Architectures": [
+          "arm64"
+        ],
+        "Environment": {
+          "Variables": {
+            "QUEUE_URL": {
+              "Ref": "JobQueue"
+            }
+          }
+        },
+        "Code": {
+          "ZipFile": "\"\"\"DynamoDB INSERT -> SQS reference envelope. Duplicate delivery is expected.\"\"\"\nimport json\nimport logging\nimport os\n\nimport boto3\nfrom botocore.config import Config\n\nlogger = logging.getLogger(__name__)\nlogger.setLevel(logging.INFO)\nsqs = boto3.client(\"sqs\", config=Config(\n    connect_timeout=2, read_timeout=2,\n    retries={\"mode\": \"standard\", \"total_max_attempts\": 2},\n))\n\n\ndef handler(event, context):\n    for record in event.get(\"Records\", []):\n        # Defense in depth: status changes and TTL deletes must not enqueue work.\n        if record.get(\"eventName\") != \"INSERT\":\n            continue\n        image = record[\"dynamodb\"].get(\"NewImage\", {})\n        if image.get(\"status\", {}).get(\"S\") != \"QUEUED\":\n            continue\n        sequence = record[\"dynamodb\"][\"SequenceNumber\"]\n        try:\n            job_id = image[\"jobId\"][\"S\"]\n            version = int(image[\"jobVersion\"][\"N\"])\n            if not job_id or version < 1:\n                raise ValueError(\"invalid job identity\")\n            message = {\n                \"schemaVersion\": 1,\n                \"type\": \"research.job.requested\",\n                \"eventId\": record[\"eventID\"],\n                \"jobId\": job_id,\n                \"jobVersion\": version,\n                \"idempotencyKey\": f\"{job_id}:{version}\",\n                \"sourceRegion\": record[\"awsRegion\"],\n            }\n            response = sqs.send_message(\n                QueueUrl=os.environ[\"QUEUE_URL\"],\n                MessageBody=json.dumps(message, separators=(\",\", \":\")),\n            )\n            logger.info(json.dumps({\"eventId\": record[\"eventID\"],\n                                    \"messageId\": response[\"MessageId\"]}))\n        except Exception as error:\n            # Do not log prompts, full records, or exception payloads.\n            logger.error(\"Forward failed: %s\", type(error).__name__)\n            # Stop here: stream checkpoints resume from this sequence number.\n            return {\"batchItemFailures\": [{\"itemIdentifier\": sequence}]}\n    return {\"batchItemFailures\": []}\n"
+        },
+        "Tags": [
+          {
+            "Key": "Project",
+            "Value": "EnterpriseResearchAgent"
+          },
+          {
+            "Key": "Environment",
+            "Value": "learning"
+          }
+        ]
+      }
+    },
+    "StreamMapping": {
+      "Type": "AWS::Lambda::EventSourceMapping",
+      "Properties": {
+        "EventSourceArn": {
+          "Fn::GetAtt": [
+            "ResearchJob",
+            "StreamArn"
+          ]
+        },
+        "FunctionName": {
+          "Ref": "StreamBridge"
+        },
+        "Enabled": true,
+        "StartingPosition": "TRIM_HORIZON",
+        "BatchSize": 5,
+        "MaximumBatchingWindowInSeconds": 0,
+        "ParallelizationFactor": 1,
+        "MaximumRetryAttempts": 3,
+        "MaximumRecordAgeInSeconds": 3600,
+        "BisectBatchOnFunctionError": true,
+        "FunctionResponseTypes": [
+          "ReportBatchItemFailures"
+        ],
+        "FilterCriteria": {
+          "Filters": [
+            {
+              "Pattern": "{\"eventName\": [\"INSERT\"], \"dynamodb\": {\"NewImage\": {\"status\": {\"S\": [\"QUEUED\"]}}}}"
+            }
+          ]
+        },
+        "DestinationConfig": {
+          "OnFailure": {
+            "Destination": {
+              "Fn::GetAtt": [
+                "StreamFailures",
+                "Arn"
+              ]
+            }
+          }
+        }
+      }
+    }
+  },
+  "Outputs": {
+    "TableName": {
+      "Value": {
+        "Ref": "ResearchJob"
+      }
+    },
+    "QueueUrl": {
+      "Value": {
+        "Ref": "JobQueue"
+      }
+    },
+    "FailureQueueUrl": {
+      "Value": {
+        "Ref": "StreamFailures"
+      }
+    },
+    "FunctionName": {
+      "Value": {
+        "Ref": "StreamBridge"
+      }
+    },
+    "StreamArn": {
+      "Value": {
+        "Fn::GetAtt": [
+          "ResearchJob",
+          "StreamArn"
+        ]
+      }
+    },
+    "BridgeRoleArn": {
+      "Value": {
+        "Fn::GetAtt": [
+          "BridgeRole",
+          "Arn"
+        ]
+      }
+    },
+    "MappingId": {
+      "Value": {
+        "Ref": "StreamMapping"
+      }
+    }
+  }
+}
