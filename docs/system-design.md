@@ -321,6 +321,7 @@ Dated decisions that later work must not silently reverse.
 | 4 Nov 2026 | SSE: three persisted event types carrying full records, heartbeat, close on terminal or WAITING_USER, no replay, refetch on reconnect, API polls the repository per second | Simplest correct design at one user; no pub/sub infrastructure |
 | 4 Nov 2026 | `decision` field added to action_response Messages; Chat gains ARCHIVED | Decisions must be machine-readable; archive instead of delete |
 | 4 Nov 2026 | Phases reordered for learning value: evals to phase 2, spreadsheet before UI, thin UI in phase 4, PDF retrieval with hybrid and metrics in 5, memory 6, MCP client and server in 7, stress and cost in 8, AWS in 9, writes and hosting in 10; journal entry per phase | Interview readiness is the priority; cross-checked against the ranked top-20 list in Box |
+| 4 Nov 2026 | Eight defaults confirmed: tooling (Python 3.12, uv, pytest, ruff, mypy), local runtime until phase 9, fake model first then Bedrock, compaction numbers as config, 60-row fixture, `Chat.lastRequestStatus`, transient `activity` SSE event, `User.instructions` | Unblocks phase 1; the three new fields each have a user expectation behind them |
 
 ## 14. Implementation phases
 

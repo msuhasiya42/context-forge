@@ -40,8 +40,10 @@ Usage                 null when the provider did not report usage; unknown is ne
 | email | yes | Account identification; refreshed from the identity token on each login |
 | displayName | no | Chat UI; refreshed on login |
 | preferences | no | `{ currency, timezone, locale }`. Applied by the Context Builder. Kept small; a growing profile becomes error-prone |
+| instructions | no | Standing instructions the user edits (procedural memory), injected into the memory section of every call; plain text, capped at 2,000 characters. Decided 4 Nov 2026 with expectation 22 |
 | status | yes | ACTIVE, DISABLED |
 | createdAt | yes | Audit |
+| updatedAt | yes | Last preferences or instructions change |
 
 Not included: lastSeenAt, roles, any credential, learned facts (later `AgentMemoryRecord`).
 
@@ -55,6 +57,7 @@ Not included: lastSeenAt, roles, any credential, learned facts (later `AgentMemo
 | status | yes | ACTIVE, ARCHIVED |
 | createdAt | yes | Audit |
 | updatedAt | yes | Chat list ordering; any write moves it |
+| lastRequestStatus | no | Status of the newest request Message, written by the worker on every request status change; the chat list shows a waiting marker without reading Messages. Decided 4 Nov 2026 with expectation 8 |
 
 Removed: lastActivityAt, attachment list (query Artifacts by chatId), summary, message count or preview.
 
@@ -707,23 +710,23 @@ Numbered as agreed in review. "Model change" marks items that add a field or eve
 | 3 | All artifacts attached to this chat, on the right | E11 | v1 |
 | 4 | Each request is a collapsible timeline: clarification, my answer, tasks with status and a one-line result, proposed action and my decision, outcome, report at the bottom. Live over SSE, identical after reload | E5, E8, E3 | v1 |
 | 5 | Upload pdf, xlsx, csv to a chat; remove when not needed | E9, E10, E13 | v1 |
-| 6 | Procedural memory: standing instructions for the whole app | E14; see 22 | decide |
+| 6 | Procedural memory: standing instructions for the whole app | E14; see 22 | phase 6 |
 | 7 | New chat, rename, delete (archive) | E1, E15, E16 | v1 |
-| 8 | Waiting badge on chats whose latest request is WAITING_USER | needs `lastRequestStatus` on Chat, written by the worker | decide, model change |
+| 8 | Waiting badge on chats whose latest request is WAITING_USER | `Chat.lastRequestStatus`, written by the worker | phase 6, model change |
 | 9 | Follow-up requests build on earlier reports in the same chat | context builder includes prior reports; no endpoint | v1 |
 | 10 | Timeline persists: every step is a stored Message or Task | section 3 | v1 |
 | 11 | Answer clarifications and decide approvals inline | E7 | v1 |
 | 12 | Cancel a running request | E6 | v1 |
 | 13 | Failures explained: failureReason on request, task, proposed_action | section 3 | v1 |
 | 14 | Reconnect without loss | section 11.5 | v1 |
-| 15 | Activity granularity: task level stored; optional transient tool-call text | `activity` SSE event, not persisted | decide |
+| 15 | Activity granularity: task level stored; optional transient tool-call text | `activity` SSE event, not persisted | phase 4 |
 | 16 | Tokens and estimated cost per request | E5 `usage` | v1 |
 | 17 | Citation click opens the excerpt and the source locator | E12 plus EvidenceRef.locator; PDF page view in the PDF phase | v1 for dataset rows |
 | 18 | Download deliverables named in a report | E12 | v1 |
 | 19 | Upload status: UPLOADING, processing, ready, failed with reason | Artifact.status and indexStatus; derived Artifact appears in E11 | v1 |
 | 20 | Remove sets DELETED on the upload and its derived dataset; refused while a running request lists it as input | E13 | v1 |
 | 21 | Reuse a file from another chat without re-uploading | GSI1, access pattern 7 | later, PDF retrieval phase |
-| 22 | Preferences (currency, timezone) and standing instructions editable | E14; `instructions` text on User, injected into the memory section of every call | decide, model change |
+| 22 | Preferences (currency, timezone) and standing instructions editable | E14; `User.instructions`, injected into the memory section of every call | phase 6, model change |
 | 23 | Sign in, sign out, who am I | blocked on the identity decision | v1 once decided |
 | 24 | Connect Gmail or Drive, list and disconnect accounts | connection endpoints | later, MCP phase |
 
@@ -916,7 +919,7 @@ DELETE /chats/c1                                       204
 | `request` | The full request Message | Every status change |
 | `task` | The full Task | Every Task status change, including the result on completion |
 | `message` | The full assistant Message | A new clarification, proposed_action, report or text |
-| `activity` | `{ "taskId", "text" }` | Transient tool-call progress; not persisted; only if expectation 15 is accepted |
+| `activity` | `{ "taskId", "text" }` | Transient tool-call progress; not persisted; lost on reconnect by design |
 
 Each event carries the whole record so the client upserts by id and never merges partial state.
 
@@ -950,8 +953,8 @@ Rules:
 | Change | Reason |
 |---|---|
 | `decision` (approve, reject) on action_response Messages | Free text cannot be parsed safely for the decision; content stays as the optional note |
-| `Chat.lastRequestStatus`, if expectation 8 is accepted | The chat list cannot afford one request read per chat |
-| `User.instructions`, if expectation 22 is accepted | Procedural memory the user edits; the system file `agent-memory.md` stays ours |
+| `Chat.lastRequestStatus` | The chat list cannot afford one request read per chat |
+| `User.instructions` and `User.updatedAt` | Procedural memory the user edits; the system file `agent-memory.md` stays ours |
 | Chat status gains ARCHIVED | E16 |
 
 ## 12. Repository layout and tooling
