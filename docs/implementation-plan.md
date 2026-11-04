@@ -518,6 +518,47 @@ Rules:
 
 Borrowed from Cimba's design, for phase 5: a one-line summary per page (budgeted, first N pages) in the planner's `<sources>` block so the model asks for specific pages through `read_artifact`; hybrid retrieval merged with reciprocal rank fusion, about 20 candidates per side, then a relevance pass; re-indexing on an embedding model change builds a new index version and flips the pointer, never delete-then-rebuild; a 30-day lifecycle rule on the raw_result prefix. Avoided from the same review: chunks without page numbers, index status held in a cache instead of the Artifact record, files keyed by raw filename, storage keys accepted from the client.
 
+### 8.9 Tool results that are arrays of large objects
+
+Decided 4 November 2026. The 50-row processor (8.3) generalises to object arrays: the full result is kept once outside context, the model sees a compact projection plus a handle, and relevance is pulled by the model through tools that filter server-side.
+
+```text
+tool returns 100 objects, ~300 KB (~75k tokens)
+        │
+        ▼
+Tool Result Processor
+  1. offload   write all items as JSON lines → raw_result Artifact a7
+  2. project   one line per item from the tool's projection rule
+               keep: id-like fields, timestamps, enums, short scalars
+               truncate: strings to 120 chars
+               drop: nested objects, arrays, any value over 1 KB
+  3. budget    projection capped at ~1,500 tokens (config); over it, show the first N lines, then the stub
+        │
+        ▼
+ToolMessage content
+  "100 items. Showing 40 of 100. Full result in artifact a7.
+   #1  2026-10-03T09:12:04Z ERROR payment-svc 'timeout calling bank gateway after 30s' req=r-8812
+   ...
+   60 more in a7. Use sql_query(dataset_id='a7', ...) to filter, or read_artifact('a7', items='41-60')."
+```
+
+How the model reaches the relevant items:
+
+| Need | Tool | Bound |
+|---|---|---|
+| Filter by fields or time | `sql_query` over the raw_result; JSON lines are a DuckDB dataset like any other | 50 rows, offload again if larger |
+| Full objects for a few items | `read_artifact(id, items='41-60')` or `read_artifact(id, item='r-8812')` | the locator |
+| Semantic relevance SQL cannot express | a `stage=summarize` call on the small model, mapping over the artifact in bounded pages, returning matching item ids with one-line reasons | pages, recorded as ModelCalls |
+
+Rules:
+
+- Keep once, project many. The artifact is the only full copy; every later view is a query or a slice of it.
+- The projection rule is declared next to each tool definition (a Gmail search projects subject, sender, date, id; a log tool projects timestamp, level, service, message). Projection and stub sizes are config next to the row cap.
+- The ToolMessage metadata carries `artifact_id`, `item_count` and `shown`, so compaction level 1 can replace the content with one line and the handle survives.
+- Tool output is data. Text inside an item is quoted, never executed as an instruction.
+
+What exists: phase 1 ships offload, cap and stub for rows. New for objects, in phase 3 with the real `sql_query` and phase 7 when MCP tools return object arrays: the projection rule, the token budget on the projection, `read_artifact` item locators, and raw_result JSON lines as a SQL dataset.
+
 ## 9. Model split and worked calls
 
 | Stage | Model on Bedrock | Why |
