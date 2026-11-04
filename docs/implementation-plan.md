@@ -498,6 +498,26 @@ Recorded 4 November 2026. Every path to bytes goes through a tool with a cap or 
 | Learned facts and episodes (phase 6) | `AgentMemoryRecord`, one fact per record with provenance and expiry | DynamoDB under `USER#<id>` | keyword or embedding match on the record text, top-k |
 | Integration tool catalog | name, description, input schema per tool | DynamoDB `INT#<id> / TOOL#<name>` | lexical rank on name and description, top 3 to 5 schemas loaded into the call |
 
+### 8.8 Chunking policy for PDFs (phase 5)
+
+Decided 4 November 2026 after reviewing Cimba's file storage design: a fixed window (Cimba uses 2,000 characters with 200 overlap) cuts through every document the same way and is the fallback only. The chunker is chosen by the structure of each page, boundaries follow that structure, and every chunk carries artifact id, page, section path and chunk index so a citation always lands on a page.
+
+| Page structure | Unit of meaning | Split rule | Destination |
+|---|---|---|---|
+| Tabular: transaction lists in a card or bank statement | one row | table extraction to rows with page and row index | a dataset Artifact, queried by SQL; never embedded |
+| Summary boxes: total due, due date, minimum due | one labelled field | key-value extraction per page | a `facts` section attached to that page's chunk; the page stays retrievable |
+| Heading-structured text: contracts, policies, reports | one section | split at headings; a section over the maximum size is split at paragraph boundaries; the heading path is the preamble ("Fees > Late payment") | embedded, with page range |
+| Plain prose, no headings | paragraph groups | fixed window with overlap, the fallback only | embedded, with page |
+| Scanned | the page | OCR, then the rules above; chunk flagged as OCR | embedded |
+
+Rules:
+
+- A structure detector classifies each page as tabular, headed, prose or scanned. Version 1 is rules over the extractor's output (pdfplumber or Docling): a detected table means tabular, font-size steps mean headed, otherwise prose; no text layer means scanned.
+- Maximum chunk size and overlap exist only as limits inside the section splitter and in the prose fallback; they are config, not the strategy.
+- The phase 5 retrieval eval scores each chunker separately on known answers (recall@k, MRR). A chunker that underperforms is replaced on that evidence.
+
+Borrowed from Cimba's design, for phase 5: a one-line summary per page (budgeted, first N pages) in the planner's `<sources>` block so the model asks for specific pages through `read_artifact`; hybrid retrieval merged with reciprocal rank fusion, about 20 candidates per side, then a relevance pass; re-indexing on an embedding model change builds a new index version and flips the pointer, never delete-then-rebuild; a 30-day lifecycle rule on the raw_result prefix. Avoided from the same review: chunks without page numbers, index status held in a cache instead of the Artifact record, files keyed by raw filename, storage keys accepted from the client.
+
 ## 9. Model split and worked calls
 
 | Stage | Model on Bedrock | Why |
