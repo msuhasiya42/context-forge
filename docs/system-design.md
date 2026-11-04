@@ -227,7 +227,7 @@ LangGraph coordinates nodes, branches, dependencies, retries, checkpointing and 
 
 - Transient retries, semantic corrections and replanning are distinct. Accepted outputs are preserved; a replayed saved output is never counted as a fresh model call.
 - Checkpoint resume does not guarantee exactly-once external writes. A node interrupted for approval can restart from its beginning. Resume verifies the actor, the pending state and the payload before continuing.
-- All integrations are read-only until phase 9. A WRITE or DESTRUCTIVE tool requires a proposed_action Message; approval is distinct from execution; a failed write becomes UNCERTAIN and the model reads to verify before any retry.
+- All integrations are read-only until phase 10. A WRITE or DESTRUCTIVE tool requires a proposed_action Message; approval is distinct from execution; a failed write becomes UNCERTAIN and the model reads to verify before any retry.
 - Deadlines, maximum steps and tool calls, concurrency and spend limits are enforced in code. Per-request budget is the sum of ModelCall usage.
 
 ## 9. Dispatch, files and API outline
@@ -236,8 +236,8 @@ LangGraph coordinates nodes, branches, dependencies, retries, checkpointing and 
 - Streams, Lambda and SQS are at least once. Submission uses a client idempotency key held in a short-TTL record; execution uses conditional status transitions so duplicate delivery resolves to existing work. Neither sender filtering nor ordinary status writes may start new work.
 - Paused work is persisted and acknowledged; continuation is scheduled, not held on a queue for days.
 - Uploads: the API registers the Artifact and returns a signed S3 URL; the client uploads; the API confirms completion, validates type and size, and ingestion produces a typed dataset Artifact for spreadsheets or an embedding index entry for PDFs. SQL execution is isolated from API and agent credentials, receives only the selected dataset, and has time, memory and output limits. Regex checks for SELECT are not a security boundary.
-- Candidate API resources: Chats and their Messages; request status, cancel and resume addressed as `/chats/{chatId}/requests/{messageId}`; Artifact upload registration and completion; proposed_action decision; IntegrationConnection setup. Identity comes from verified server-side authentication, never a submitted userId.
-- SSE streams progress and answer updates per request; regular endpoints submit requests and resolve clarifications and approvals. Disconnecting does not cancel execution. Reopening loads saved Messages and status and reconnects; missed updates need server-side replay or a state refresh.
+- The API contract is implementation-plan section 11: sixteen endpoints over plural resources (`/chats`, `/chats/{chatId}/messages`, `/chats/{chatId}/requests/{messageId}`, `/chats/{chatId}/artifacts`, `/me`), one error shape, cursor paging. Identity comes from verified server-side authentication, never a submitted userId.
+- SSE streams progress and answer updates per request (events `request`, `task`, `message`); regular endpoints submit requests and resolve clarifications and approvals. Disconnecting does not cancel execution. The stream closes on a terminal status or WAITING_USER; on reconnect the client refetches state, there is no server-side replay. The API learns about progress by polling the repository once per second per open stream.
 
 ## 10. Observability and evaluation
 
@@ -260,7 +260,7 @@ Required evaluation scenarios:
 - Own-account transfer excluded; card purchase and settlement not double counted.
 - Equal-amount payment to another destination does not prove this bill was paid.
 - A promised refund without a corresponding credit remains unresolved.
-- A newer statement invalidates results derived from its older version (phase 4, with `supersedesArtifactId`).
+- A newer statement invalidates results derived from its older version (spreadsheet phase 3 extension, with `supersedesArtifactId`).
 - Oversized outputs are offloaded before they enter a model request.
 - Forced compaction preserves exclusions, uncertainty, original goal and next action; originals can be retrieved.
 - User memory works across Chats but not across owners; corrections, deletions and concurrent edits behave predictably.
@@ -311,29 +311,42 @@ Dated decisions that later work must not silently reverse.
 | 4 Nov 2026 | ProposedAction and Report folded into Message kinds | Same pattern as the request Message; report versioning dropped |
 | 4 Nov 2026 | KnowledgeBase dropped; `indexStatus` on Artifact; embedding config in application config | One corpus, one embedding configuration, one user |
 | 4 Nov 2026 | Field name `sender` not `from`; category fields named `kind` | `from` is a Python keyword |
-| 4 Nov 2026 | Artifact: no contentHash, no supersedesArtifactId, no requestMessageId until phase 4; datasets are separate records linked by `derivedFromArtifactId` | No current requirement; forward references already exist |
+| 4 Nov 2026 | Artifact: no contentHash, no supersedesArtifactId, no requestMessageId until needed; datasets are separate records linked by `derivedFromArtifactId` | No current requirement; forward references already exist |
 | 4 Nov 2026 | Stay with DynamoDB over RDS | Relations are all parent-child; nine access patterns are all single-partition reads; idle cost is zero; NoSQL modeling is a learning goal. Repository layer is the hedge |
 | 4 Nov 2026 | One table, one sparse GSI, on-demand, Streams on, PITR on; request URLs chat-scoped; `integrationToolId` derived from `integrationId:name`; `Artifact.chatId` required | Access-pattern-first design |
 | 4 Nov 2026 | Working brief is typed LangGraph state, not an entity; no budget counter in state | Budget from ModelCall records |
 | 4 Nov 2026 | Integration rules adopted from a reviewed production design: pre-flight schema validation before a proposed_action; approval identity is the argument hash; failed writes become UNCERTAIN; missing tools after re-sync are disabled, not deleted | Proven in production |
 | 4 Nov 2026 | Understand and plan are one model call; it returns a plan or a clarification | Fewer calls; the planner sees the sources |
+| 4 Nov 2026 | API: plural resources, sixteen endpoints, one `replies` endpoint for both clarification answers and approval decisions, `artifactIds` on submit validated not stored, `/me` singular | Collections take ids; both replies are "answer the pending interrupt and resume" |
+| 4 Nov 2026 | SSE: three persisted event types carrying full records, heartbeat, close on terminal or WAITING_USER, no replay, refetch on reconnect, API polls the repository per second | Simplest correct design at one user; no pub/sub infrastructure |
+| 4 Nov 2026 | `decision` field added to action_response Messages; Chat gains ARCHIVED | Decisions must be machine-readable; archive instead of delete |
+| 4 Nov 2026 | Phases reordered for learning value: evals to phase 2, spreadsheet before UI, thin UI in phase 4, PDF retrieval with hybrid and metrics in 5, memory 6, MCP client and server in 7, stress and cost in 8, AWS in 9, writes and hosting in 10; journal entry per phase | Interview readiness is the priority; cross-checked against the ranked top-20 list in Box |
 
 ## 14. Implementation phases
 
-| Phase | Deliverable | Done when |
-|---|---|---|
-| 0. Design contracts | This document, the implementation plan, the entity model, access patterns and ownership | One worked request has unambiguous inputs, state, evidence and output contracts |
-| 1. LangGraph foundation | Small Python graph, fake read-only tool, explicit model and context boundary, persistent checkpoint proof | A request completes; restart and resume work; duplicate delivery cannot start duplicate active work |
-| 2. LangSmith | Nested traces, ids, model usage, redacted payload policy | Each task's calls, errors and timing are visible; usage is not double counted |
-| 3. Chat and AWS persistence | React chat list, FastAPI Messages and request execution, private upload flow, DynamoDB and S3, minimal queue bridge | Two Chats stay isolated, uploads are owner-scoped, execution survives process restart |
-| 4. Spreadsheet slice | Typed ingestion, isolated SQL, exact sums, context and result contracts, report evidence | September and October fixture totals and exclusions match known answers |
-| 5. Agent memory | Versioned procedural file and explicit context loading; then review learned memory separately | Same instructions apply across Chats; restart preserves the selected version; rollback and version tracing work |
-| 6. PDF retrieval and tool discovery | Chunk and embedding retrieval, page citations, permission-filtered tool selection | Relevant passages and tools are recalled without loading the whole corpus or catalog |
-| 7. Read-only Gmail and Drive MCP | OAuth connections, scoped catalog, bill and refund investigation | Model and tool versions verified; evidence reconciled; revocation and missing access behave correctly |
-| 8. Advanced context evaluation | Reviewed episodes, forced compression, stale-source and conflict tests | Quality survives bounded context; offloaded details are recoverable; cost and latency measured |
-| 9. External writes and hosting | Approval and execution reconciliation, selected AWS deployment | Only exact approved actions execute; uncertain outcomes reconcile; hosting cost and auth reviewed |
+Revised 4 November 2026. The ordering goal is learning and interview readiness for AI engineering roles, so the AI concepts come first and the UI and cloud work arrive only as thick as a concept needs. Question codes (F1, P3, A5) refer to the ranked top-20 AI engineer interview list kept in Box ("Top 20 AI Engineer and AI Platform Engineer Interview Questions, 2025 to 2026", Golden Resources folder). Expectation numbers refer to implementation-plan section 11.1.
 
-Memory foundations and correlation ids are designed from phase 1. LangSmith follows the first graph, not the end. Mocks and local emulation precede every billable call; cloud acceptance needs a bounded live smoke check. No calendar estimates before the first slice. Do not build the whole system before learning from one complete small flow.
+| Phase | Build | Concepts you can then explain | Interview questions it answers | Expectations and endpoints |
+|---|---|---|---|---|
+| 0 Design | Done | | | |
+| 1 Engine, local | LangGraph graph, typed state, SQLite checkpoints, interrupts, structured planner output, idempotent dispatch, the execute loop written by hand inside a node (model, tool, model) | Agent versus workflow, state versus transcript, human in the loop, resume, at-least-once versus exactly-once, structured output | F3, P1, P5 (structured output half), P6 | 10, 13; no endpoints |
+| 2 Real model, tracing, first eval | Model adapter with bounded retries, backoff with jitter and timeouts; LangSmith; ModelCall usage; model split; a ten-request eval harness: deterministic checks first, LLM judge with a rubric for fuzzy qualities, judge checked against your own labels, run before every prompt or model change | Observability, token accounting, retries, model routing, golden sets, judge bias, regression gates | P2, P3, P10 (the habit) | 16; no endpoints |
+| 3 Spreadsheet slice | DuckDB `sql_query` tool, tool result processor, evidence refs, abstention through `uncertainties`, cite stage as a verifier pass, compaction on real data, deliverables | Tool design, result truncation and offload, grounding, citations, confident-wrong mitigation, compaction policy, tool output as untrusted data | P4, P5 (injection half), A5 (compaction) | no endpoints |
+| 4 Thin API and UI | E1 to E8 and SSE, timeline, inline replies, cancel, in-process worker, dev login; minimal React, no polish | Streaming to a client, the interrupt round trip through an API, idempotent submit, what happens between prompt and streamed output | F2 (application side), P6 | 1, 2, 4, 7, 9, 11, 12, 14, 15, 23 (dev) |
+| 5 PDF retrieval | Chunking, Bedrock embeddings, S3 Vectors, BM25 plus vector hybrid, reranker, page citations, owner-scoped retrieval, retrieval eval with recall@k and MRR on known answers | RAG end to end and where it fails, chunk size tradeoffs, hybrid and rerank, retrieval metrics, permission-scoped retrieval, when not to use RAG | F1, F5, A1 | 17 (PDF), 21 |
+| 6 Memory | `User.instructions`, versioned `agent-memory.md`, then `AgentMemoryRecord` for learned facts and episodes with provenance and expiry | Procedural, semantic, episodic; short versus long term; what the model may write; memory pollution | A5 (memory) | 6, 22, 8; E14 |
+| 7 MCP both ways | Gmail and Drive read-only as an MCP client with OAuth and catalog sync; our own tools (`sql_query`, `search_chunks`, `read_artifact`) exposed as an MCP server; lexical tool retrieval; pre-flight schema validation; injection tests on tool output | MCP versus function calling, building and securing a server, tool search, least privilege | P9, P5 | 24; connection endpoints |
+| 8 Context stress, cost, latency, incident | Forced compression tests, conflict and stale-source cases, prompt caching, cost per request, time to first token versus total time, an incident drill: break something, find it in the trace, fix, write it up | Context rot, caching economics, cost and quality tradeoffs, latency levers, incident narrative | P7, P8, P10, A5 (cheap) | none |
+| 9 AWS persistence | DynamoDB, S3, Streams to Lambda to SQS, DynamoDBSaver, real identity, per-user budgets at the adapter | Single-table design, event-driven dispatch, serverless cost model, tenancy boundaries | A3 (partly) | 23 (real), 3, 5, 19, 20; E9 to E13, E15, E16 |
+| 10 Writes and hosting | Proposed actions on real tools, approval identity by argument hash, reconciliation, UNCERTAIN handling, deployment, cost review | Guardrails, escalation, blast radius, failed-write verification | A2 | 11 (real writes) |
+
+Not taught by this project, reading only: transformer and inference internals (F2 model side, A4), fine-tuning and LoRA (F4), timed data-structure problems. Keep them on the study list; do not add them to the build.
+
+Rules that hold across phases:
+
+- Evals exist from phase 2 and every later phase reports a number from them.
+- At the end of each phase, write a one-page journal entry outside the repository: what was built, the choice and its alternative, what broke, and the answers to that phase's questions in your own words. By phase 10 the interview preparation is written.
+- Memory foundations and correlation ids are designed from phase 1. Mocks and local emulation precede every billable call; cloud acceptance needs a bounded live smoke check. No calendar estimates before the first slice. Do not build the whole system before learning from one complete small flow.
 
 ## 15. Mental model
 

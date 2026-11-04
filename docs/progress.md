@@ -15,7 +15,8 @@ Decided and documented:
 - Context flow, compaction policy, tool result processing (implementation-plan section 8).
 - Model split and worked planner and execute calls (implementation-plan section 9).
 - Stage prompts v1 (implementation-plan section 10).
-- Phase 1 task list with done criteria (implementation-plan section 12).
+- API and SSE contract with the 24 user expectations (implementation-plan section 11).
+- Phase 1 task list with done criteria (implementation-plan section 13).
 
 ## Open decisions awaiting confirmation
 
@@ -24,31 +25,37 @@ Recommended defaults are in place; building proceeds on them unless changed.
 | # | Decision | Recommended default |
 |---|---|---|
 | 1 | Repository and tooling | Python 3.12, `uv` with lockfile, `pytest`, `ruff`, `mypy`; packages `core`, `worker`, `api` |
-| 2 | What phase 1 runs against | SQLite checkpointer and in-memory repositories; no AWS until phase 3 |
+| 2 | What phases 1 to 8 run against | SQLite checkpointer, in-memory repositories, local disk storage; no AWS until phase 9 |
 | 3 | First model provider | Scripted fake model in phase 1; then Bedrock after verifying model access in the account and region, or the Anthropic API directly to avoid account work |
 | 4 | Compaction numbers | Task subgraphs isolated; 40k cap per call; last 6 messages verbatim; all config |
 | 5 | First fixture | 60-row synthetic dataset, two transfers and one card settlement planted; the spending request |
+| 6 | Waiting badge on the chat list (expectation 8) | Add `Chat.lastRequestStatus`, worker-written; cheap, one attribute |
+| 7 | Tool-call-level activity in the timeline (expectation 15) | Transient `activity` SSE event, not persisted; task level is the stored truth |
+| 8 | Standing instructions (expectation 22) | `User.instructions` text, injected into the memory section; `agent-memory.md` stays system-owned |
 
-Other items still open, not blocking phase 1: AWS compute and hosting choice; identity service; credential store for connections (secret manager versus KMS-encrypted attribute); the first twenty evaluation requests (needed by phase 4); LangSmith key (phase 2); region reverification, $5 usage alert and MFA before any AWS provisioning.
+Other items still open, not blocking phase 1: AWS compute and hosting choice; identity service; credential store for connections (secret manager versus KMS-encrypted attribute); the first ten evaluation requests and LangSmith key (both phase 2); region reverification, $5 usage alert and MFA before any AWS provisioning.
 
 ## Phase checklist
+
+Phases are defined in system-design section 14 (revised 4 Nov 2026 for learning value).
 
 | Phase | Status |
 |---|---|
 | 0. Design contracts | Done 4 Nov 2026 |
-| 1. LangGraph foundation | Not started. Tasks 1 to 10 in implementation-plan section 12 |
-| 2. LangSmith | Not started |
-| 3. Chat and AWS persistence | Not started |
-| 4. Spreadsheet slice | Not started |
-| 5. Agent memory | Not started |
-| 6. PDF retrieval and tool discovery | Not started |
-| 7. Read-only Gmail and Drive MCP | Not started |
-| 8. Advanced context evaluation | Not started |
-| 9. External writes and hosting | Not started |
+| 1. Engine, local | Not started. Tasks 1 to 10 in implementation-plan section 13 |
+| 2. Real model, tracing, first eval | Not started |
+| 3. Spreadsheet slice | Not started |
+| 4. Thin API and UI | Not started |
+| 5. PDF retrieval | Not started |
+| 6. Memory | Not started |
+| 7. MCP both ways | Not started |
+| 8. Context stress, cost, latency, incident | Not started |
+| 9. AWS persistence | Not started |
+| 10. Writes and hosting | Not started |
 
 ## Legacy files
 
-`bridge.py`, `build_template.py`, `test_bridge.py`, `verify_delivery.py` and `prototype.template.json` are an earlier, narrow DynamoDB-to-SQS event-delivery prototype using the old Job terminology. They are not the application and are not integrated. Keep them as reference until phase 3 deliberately replaces or removes them. `evidence/budget-created.jpg` records the $5 AWS usage alert.
+`bridge.py`, `build_template.py`, `test_bridge.py`, `verify_delivery.py` and `prototype.template.json` are an earlier, narrow DynamoDB-to-SQS event-delivery prototype using the old Job terminology. They are not the application and are not integrated. Keep them as reference until phase 9 deliberately replaces or removes them. `evidence/budget-created.jpg` records the $5 AWS usage alert.
 
 ## Rules for whoever picks this up
 
@@ -61,3 +68,4 @@ Other items still open, not blocking phase 1: AWS compute and hosting choice; id
 ## Log
 
 - **4 Nov 2026.** Design review completed over one long session. Entity list settled at nine after dropping TranscriptMessage and KnowledgeBase and folding Report and ProposedAction into Message. Fields reviewed one by one. DynamoDB chosen over RDS; physical design written. Working brief, compaction policy, context flow and worked prompt examples written. Cimba integration design reviewed in Box; four rules adopted. Repository initialized; nine design documents consolidated into three. Next: confirm the five open decisions, then start phase 1 task 1.
+- **4 Nov 2026, later.** API and SSE contract written (implementation-plan section 11) with the 24 user expectations; `decision` added to action_response. Phases reordered for interview readiness after checking the ranked top-20 question list in Box; evals moved to phase 2, AWS to phase 9. Open decisions 6 to 8 added. Next: confirm open decisions 1 to 8, then phase 1 task 1.

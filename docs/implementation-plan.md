@@ -102,7 +102,7 @@ Shape `kind=proposed_action`, sender assistant. Created before any WRITE or DEST
 | status | yes | PROPOSED, APPROVED, REJECTED, EXPIRED, EXECUTING, EXECUTED, FAILED, UNCERTAIN |
 | failureReason | when FAILED or UNCERTAIN | User-facing |
 
-The decision is a separate `kind=action_response` Message with `inReplyToMessageId`; its createdAt, userId and content are the immutable record of who decided, when, and why. The pending tool call itself lives in the checkpoint.
+The decision is a separate `kind=action_response` Message with `inReplyToMessageId` and `decision` (approve, reject); its createdAt, userId, decision and content are the immutable record of who decided, when, and why. `decision` was added with the API contract (section 11.6) because free text cannot be parsed safely. The pending tool call itself lives in the checkpoint.
 
 Who writes what: the API writes request, clarification_response and action_response. The worker writes clarification, proposed_action, report and text, and updates status, failureReason and updatedAt.
 
@@ -180,7 +180,7 @@ A replayed saved output never creates a ModelCall. Removed: attempt, promptVersi
 
 A spreadsheet upload produces two records: the original (`kind=upload`) and the normalized Parquet dataset (`kind=dataset`) pointing back. SQL tasks read datasets only. Embedding model and chunking are versioned application config; a model change re-indexes everything.
 
-Removed: contentHash (no dedupe or version-pinning requirement; S3 handles transfer integrity), supersedesArtifactId (returns in phase 4), requestMessageId (Task.result.artifactRefs and report.deliverables point the other way), producedByTaskId, datasetSchemaVersion, context_snapshot kind.
+Removed: contentHash (no dedupe or version-pinning requirement; S3 handles transfer integrity), supersedesArtifactId (returns with the newer-statement scenario), requestMessageId (Task.result.artifactRefs and report.deliverables point the other way), producedByTaskId, datasetSchemaVersion, context_snapshot kind.
 
 ### 3.7 Integration
 
@@ -366,7 +366,7 @@ REQ#m1      CALL#k1       stage=plan  model=bedrock/…  usage={inputTokens:4200
 
 ### 7.8 Repository rule
 
-No code outside the storage module builds a key string. Every entity exposes `save`, `get` and `list_by_parent`, e.g. `messages.list_by_chat(chatId)`. The interface has an in-memory implementation for tests and phase 1, and a DynamoDB implementation from phase 3. A new index, or a move to another store, touches one module.
+No code outside the storage module builds a key string. Every entity exposes `save`, `get` and `list_by_parent`, e.g. `messages.list_by_chat(chatId)`. The interface has an in-memory implementation for tests and phase 1, and a DynamoDB implementation from phase 9. A new index, or a move to another store, touches one module.
 
 ### 7.9 Postgres equivalents, for orientation
 
@@ -692,14 +692,276 @@ concluded from each result. Keep anything you are unsure about. Do not restate t
 constraints or facts; they are provided separately.
 ```
 
-## 11. Repository layout and tooling
+## 11. API and SSE contract
+
+Decided 4 November 2026. Resources are plural collections; an id selects one member. Identity comes from the authenticated session, never from a body field. The API types are the Pydantic entities from section 3 with storage keys stripped; there is no second schema layer.
+
+### 11.1 User expectations the API must serve
+
+Numbered as agreed in review. "Model change" marks items that add a field or event not in section 3.
+
+| # | Expectation | Served by | Status |
+|---|---|---|---|
+| 1 | Chat list on the left | E2 | v1 |
+| 2 | Messages load by cursor, never the whole chat | E3, newest page first | v1 |
+| 3 | All artifacts attached to this chat, on the right | E11 | v1 |
+| 4 | Each request is a collapsible timeline: clarification, my answer, tasks with status and a one-line result, proposed action and my decision, outcome, report at the bottom. Live over SSE, identical after reload | E5, E8, E3 | v1 |
+| 5 | Upload pdf, xlsx, csv to a chat; remove when not needed | E9, E10, E13 | v1 |
+| 6 | Procedural memory: standing instructions for the whole app | E14; see 22 | decide |
+| 7 | New chat, rename, delete (archive) | E1, E15, E16 | v1 |
+| 8 | Waiting badge on chats whose latest request is WAITING_USER | needs `lastRequestStatus` on Chat, written by the worker | decide, model change |
+| 9 | Follow-up requests build on earlier reports in the same chat | context builder includes prior reports; no endpoint | v1 |
+| 10 | Timeline persists: every step is a stored Message or Task | section 3 | v1 |
+| 11 | Answer clarifications and decide approvals inline | E7 | v1 |
+| 12 | Cancel a running request | E6 | v1 |
+| 13 | Failures explained: failureReason on request, task, proposed_action | section 3 | v1 |
+| 14 | Reconnect without loss | section 11.5 | v1 |
+| 15 | Activity granularity: task level stored; optional transient tool-call text | `activity` SSE event, not persisted | decide |
+| 16 | Tokens and estimated cost per request | E5 `usage` | v1 |
+| 17 | Citation click opens the excerpt and the source locator | E12 plus EvidenceRef.locator; PDF page view in the PDF phase | v1 for dataset rows |
+| 18 | Download deliverables named in a report | E12 | v1 |
+| 19 | Upload status: UPLOADING, processing, ready, failed with reason | Artifact.status and indexStatus; derived Artifact appears in E11 | v1 |
+| 20 | Remove sets DELETED on the upload and its derived dataset; refused while a running request lists it as input | E13 | v1 |
+| 21 | Reuse a file from another chat without re-uploading | GSI1, access pattern 7 | later, PDF retrieval phase |
+| 22 | Preferences (currency, timezone) and standing instructions editable | E14; `instructions` text on User, injected into the memory section of every call | decide, model change |
+| 23 | Sign in, sign out, who am I | blocked on the identity decision | v1 once decided |
+| 24 | Connect Gmail or Drive, list and disconnect accounts | connection endpoints | later, MCP phase |
+
+### 11.2 Conventions
+
+- JSON, camelCase, ISO 8601 UTC timestamps, ULID ids.
+- A chat the caller does not own returns 404, never 403, so ids cannot be probed.
+- One error shape everywhere: `{ "error": { "code": "...", "message": "..." } }`. Codes: `validation` 400, `unauthenticated` 401, `not_found` 404, `invalid_state` 409, `not_pending` 409, `payload_too_large` 413, `upload_mismatch` 422. Messages are user-facing; no stack traces.
+- List endpoints take `limit` and `cursor` and return `{ "items": [...], "nextCursor": "..." | null }`. The cursor is an opaque encoding of DynamoDB's `LastEvaluatedKey`. DynamoDB has no offset paging; a Query returns a page and the key to continue from, and the API passes that key back to the client opaquely.
+- Writes that start or resume work return the Message they created, so the client never guesses ids.
+
+### 11.3 Endpoints
+
+| # | Endpoint | Does | Status codes |
+|---|---|---|---|
+| E1 | `POST /chats` | Create a Chat; `title` optional, defaults to the first request text truncated | 201 |
+| E2 | `GET /chats` | My Chats, most recently updated first, paged | 200 |
+| E3 | `GET /chats/{chatId}/messages` | Messages in the chat, paged, newest page first | 200, 404 |
+| E4 | `POST /chats/{chatId}/requests` | Submit a request Message; header `Idempotency-Key`; optional `artifactIds` validated as AVAILABLE in this chat, not stored | 202, 400, 404 |
+| E5 | `GET /chats/{chatId}/requests/{messageId}` | The request Message, its Tasks, summed usage | 200, 404 |
+| E6 | `POST /chats/{chatId}/requests/{messageId}/cancel` | ACCEPTED, RUNNING or WAITING_USER to CANCELLED | 200, 409 |
+| E7 | `POST /chats/{chatId}/requests/{messageId}/replies` | Answer the pending clarification or decide the pending proposed_action; the server derives the Message kind from the target | 201, 400, 404, 409 |
+| E8 | `GET /chats/{chatId}/requests/{messageId}/events` | SSE stream, section 11.5 | 200, 404 |
+| E9 | `POST /chats/{chatId}/artifacts` | Register an upload; returns the Artifact at UPLOADING and a signed PUT URL | 201, 400, 413 |
+| E10 | `POST /chats/{chatId}/artifacts/{artifactId}/complete` | Verify the object, set AVAILABLE, start ingestion | 200, 409, 422 |
+| E11 | `GET /chats/{chatId}/artifacts` | The chat's Artifacts, paged | 200 |
+| E12 | `GET /chats/{chatId}/artifacts/{artifactId}` | Metadata plus a signed GET URL when AVAILABLE | 200, 404 |
+| E13 | `DELETE /chats/{chatId}/artifacts/{artifactId}` | Set DELETED on the upload and its derived Artifacts; 409 while a non-terminal request lists it as input | 204, 404, 409 |
+| E14 | `GET`, `PATCH /me` | Preferences and standing instructions; singular because there is exactly one | 200, 400 |
+| E15 | `PATCH /chats/{chatId}` | Rename | 200, 404 |
+| E16 | `DELETE /chats/{chatId}` | Archive: Chat status ARCHIVED, hidden from E2; objects kept | 204, 404 |
+
+Not included on purpose: separate approve and reject routes (E7 covers both), a resume endpoint (replies resume), a single-message read (E3 covers it), integration and connection endpoints (MCP phase). Who writes what is unchanged from section 3.3: the API writes request, clarification_response and action_response; the worker writes everything else and owns every status except CANCELLED.
+
+### 11.4 Payloads and responses
+
+Worked with user u1, chat c1, request m1, upload a1, matching the sample items in 7.7. Ids are shortened; real ids are ULIDs.
+
+```http
+POST /chats
+{ "title": "Compare Oct vs Sep spend" }
+
+201
+{ "chatId": "c1", "userId": "u1", "title": "Compare Oct vs Sep spend",
+  "status": "ACTIVE", "createdAt": "2026-11-04T10:00:00Z", "updatedAt": "2026-11-04T10:00:00Z" }
+```
+
+```http
+GET /chats?limit=20&cursor=eyJ...
+
+200
+{ "items": [ { ...Chat }, { ...Chat } ], "nextCursor": "eyJ..." | null }
+```
+
+```http
+GET /chats/c1/messages?limit=50&cursor=...
+
+200
+{ "items": [
+    { "messageId": "m1", "chatId": "c1", "userId": "u1", "sender": "user", "kind": "request",
+      "content": "Compare October spend to September, excluding transfers", "status": "WAITING_USER",
+      "failureReason": null, "createdAt": "...", "updatedAt": "..." },
+    { "messageId": "m2", "chatId": "c1", "userId": "u1", "sender": "assistant", "kind": "clarification",
+      "requestMessageId": "m1", "content": "Should the HDFC card bill payment count as a transfer?",
+      "createdAt": "...", "updatedAt": "..." }
+  ],
+  "nextCursor": null }
+```
+
+Each item is the Message shape for its kind from section 3.3, unchanged.
+
+```http
+POST /chats/c1/requests
+Idempotency-Key: 7f3c...                      # client UUID per submit attempt
+{ "content": "Compare October spend to September, excluding transfers",
+  "artifactIds": ["a1"] }                     # optional; each must be AVAILABLE in this chat, else 400
+
+202
+{ "messageId": "m1", "chatId": "c1", "userId": "u1", "sender": "user", "kind": "request",
+  "content": "Compare October spend to September, excluding transfers", "status": "ACCEPTED",
+  "failureReason": null, "createdAt": "...", "updatedAt": "..." }
+```
+
+A replay with the same key returns 202 and the same body (section 7.5). `artifactIds` is validation only; the planner reads the chat's Artifacts.
+
+```http
+GET /chats/c1/requests/m1
+
+200
+{ "request": { ...request Message, "status": "RUNNING" },
+  "tasks": [
+    { "taskId": "t1", "requestMessageId": "m1", "kind": "sql_analysis",
+      "goal": "Total spend per month by category, excluding transfers", "inputArtifactIds": ["a2"],
+      "dependsOnTaskIds": [], "status": "RUNNING", "attempt": 1, "result": null, "failureReason": null,
+      "createdAt": "...", "updatedAt": "..." },
+    { "taskId": "t2", "requestMessageId": "m1", "kind": "reconcile", "goal": "...",
+      "inputArtifactIds": [], "dependsOnTaskIds": ["t1"], "status": "PLANNED", "attempt": 0,
+      "result": null, "failureReason": null, "createdAt": "...", "updatedAt": "..." }
+  ],
+  "usage": { "inputTokens": 4200, "outputTokens": 610, "estimatedCostUsd": 0.0183, "modelCalls": 1 } }
+```
+
+`usage` sums ModelCall records (access pattern 9). Individual ModelCalls are not returned; LangSmith is where they are inspected.
+
+```http
+POST /chats/c1/requests/m1/cancel
+
+200  { ...request Message, "status": "CANCELLED" }
+409  { "error": { "code": "invalid_state", "message": "Request is COMPLETED" } }
+```
+
+```http
+POST /chats/c1/requests/m1/replies
+{ "inReplyToMessageId": "m2", "content": "Yes, treat the card bill as a transfer" }
+
+201
+{ "messageId": "m3", "chatId": "c1", "userId": "u1", "sender": "user", "kind": "clarification_response",
+  "requestMessageId": "m1", "inReplyToMessageId": "m2", "content": "Yes, treat the card bill as a transfer",
+  "createdAt": "...", "updatedAt": "..." }
+```
+
+```http
+POST /chats/c1/requests/m1/replies
+{ "inReplyToMessageId": "m6", "decision": "approve", "content": "Go ahead" }   # content optional on decisions
+
+201
+{ "messageId": "m7", ..., "kind": "action_response", "inReplyToMessageId": "m6",
+  "decision": "approve", "content": "Go ahead", ... }
+```
+
+Rules: 404 if the target is not in this request; 409 `not_pending` unless the request is WAITING_USER on that exact Message; 400 if `decision` is missing for a proposed_action or present for a clarification. On success the API writes the Message, moves the request to RUNNING, and sends the resume to SQS. The worker moves the proposed_action to APPROVED or REJECTED when it resumes, because the worker owns that status.
+
+```http
+POST /chats/c1/artifacts
+{ "name": "october.xlsx", "sizeBytes": 48211,
+  "mediaType": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" }
+
+201
+{ "artifact": { "artifactId": "a1", "userId": "u1", "chatId": "c1", "kind": "upload", "name": "october.xlsx",
+                "mediaType": "...", "sizeBytes": 48211, "storageRef": "s3://contextforge-u1/c1/a1",
+                "status": "UPLOADING", "indexStatus": "NOT_INDEXED", "derivedFromArtifactId": null,
+                "createdAt": "..." },
+  "upload": { "method": "PUT", "url": "https://s3....?X-Amz-Signature=...", "expiresAt": "..." } }
+
+413 when sizeBytes exceeds the limit; 400 when mediaType is not xlsx, csv or pdf
+```
+
+The client PUTs bytes to the signed URL. The API never proxies file content.
+
+```http
+POST /chats/c1/artifacts/a1/complete
+
+200  { ...Artifact a1, "status": "AVAILABLE" }
+409  { "error": { "code": "invalid_state", "message": "Artifact is AVAILABLE" } }
+422  { "error": { "code": "upload_mismatch", "message": "Object size 51200 does not match declared 48211" } }
+```
+
+The server runs HeadObject, compares size and type, then flips status with the conditional write in 7.5. Ingestion then produces the dataset Artifact a2 with `derivedFromArtifactId: "a1"`, which appears in E11.
+
+```http
+GET /chats/c1/artifacts            200  { "items": [ { ...a1 }, { ...a2 } ], "nextCursor": null }
+
+GET /chats/c1/artifacts/a1         200  { "artifact": { ...a1 }, "download": { "url": "https://s3....", "expiresAt": "..." } }
+
+DELETE /chats/c1/artifacts/a1      204
+                                   409  { "error": { "code": "invalid_state", "message": "Request m9 is using this file" } }
+```
+
+`download` is present only when status is AVAILABLE. Deleting a1 also sets DELETED on a2.
+
+```http
+GET /me
+200  { "userId": "u1", "email": "...", "preferences": { "currency": "INR", "timezone": "Asia/Kolkata" },
+       "instructions": "Always exclude transfers unless I say otherwise", "updatedAt": "..." }
+
+PATCH /me
+{ "preferences": { "currency": "INR" }, "instructions": "..." }     # either field; merged
+200  { ...User }
+
+PATCH /chats/c1     { "title": "October review" }     200  { ...Chat }
+DELETE /chats/c1                                       204
+```
+
+### 11.5 SSE contract
+
+`GET /chats/{chatId}/requests/{messageId}/events`, `Content-Type: text/event-stream`.
+
+| Event | Data | When |
+|---|---|---|
+| `request` | The full request Message | Every status change |
+| `task` | The full Task | Every Task status change, including the result on completion |
+| `message` | The full assistant Message | A new clarification, proposed_action, report or text |
+| `activity` | `{ "taskId", "text" }` | Transient tool-call progress; not persisted; only if expectation 15 is accepted |
+
+Each event carries the whole record so the client upserts by id and never merges partial state.
+
+```text
+: heartbeat                                   # comment line every 15 seconds
+
+event: task
+data: { ...Task t1, "status": "RUNNING" }
+
+event: task
+data: { ...Task t1, "status": "COMPLETED", "result": { "summary": "...", "structuredData": {...}, "evidenceRefs": [...] } }
+
+event: message
+data: { ...Message m8, "kind": "report", "report": { "claims": [...], ... } }
+
+event: request
+data: { ...request Message m1, "status": "COMPLETED" }
+
+(server closes)
+```
+
+Rules:
+
+- The server closes the stream after the `request` event that carries COMPLETED, FAILED, CANCELLED or WAITING_USER. Nothing happens while waiting on the user; the client reopens after replying.
+- If the request is already closed when the stream opens, the server sends that one `request` event and closes, so the client has one code path.
+- No server-side replay and no `Last-Event-ID`. On reconnect the client calls E5 and E3, then reopens the stream. Any event missed in the gap is covered by the refetch.
+- Source of events: the handler polls the repository once per second, reading the request partition and the chat's Messages for that request, and emits records whose `updatedAt` moved since the last poll. The same code runs against the in-memory repository in phase 1 and DynamoDB later. One open stream per user is one small read per second. A pub/sub hop can replace the poll behind the same handler if it ever matters.
+
+### 11.6 Model changes introduced by this contract
+
+| Change | Reason |
+|---|---|
+| `decision` (approve, reject) on action_response Messages | Free text cannot be parsed safely for the decision; content stays as the optional note |
+| `Chat.lastRequestStatus`, if expectation 8 is accepted | The chat list cannot afford one request read per chat |
+| `User.instructions`, if expectation 22 is accepted | Procedural memory the user edits; the system file `agent-memory.md` stays ours |
+| Chat status gains ARCHIVED | E16 |
+
+## 12. Repository layout and tooling
 
 Recommended defaults, pending confirmation in progress.md.
 
 ```text
 context-forge/
   core/            Pydantic entities, value types, RequestState, PlannerOutput, TaskResult per kind
-                   repositories: interface + in-memory + (phase 3) dynamodb
+                   repositories: interface + in-memory + (phase 9) dynamodb
                    model boundary: interface + fake + bedrock adapter
                    context builder, tool result processor, compaction
   worker/          LangGraph graph: plan node, plan gate, task subgraphs, reconcile, cite, report
@@ -712,9 +974,9 @@ context-forge/
   docs/            system-design.md, implementation-plan.md, progress.md
 ```
 
-Python 3.12, `uv` with a committed lockfile, `pytest`, `ruff`, `mypy`. Tests before implementation for every behavior in section 12. No AWS resources before phase 3; SQLite checkpointer and in-memory repositories until then.
+Python 3.12, `uv` with a committed lockfile, `pytest`, `ruff`, `mypy`. Tests before implementation for every behavior in section 13. No AWS resources before phase 9; SQLite checkpointer, in-memory repositories and local disk storage until then.
 
-## 12. Phase 1 task list
+## 13. Phase 1 task list
 
 Each task is small enough to test on its own and ends with its test passing.
 
@@ -733,11 +995,11 @@ Each task is small enough to test on its own and ends with its test passing.
 
 Phase 1 ends when a request completes end to end on the fake model and fake tool, restart and resume work, and duplicate delivery cannot start duplicate work.
 
-## 13. Later extensions, not in the current build
+## 14. Later extensions, not in the current build
 
 - `AgentMemoryRecord` for learned semantic and episodic memory, keyed by userId.
-- Artifact `supersedesArtifactId` and `contentHash` at phase 4 for the newer-statement scenario.
+- Artifact `supersedesArtifactId` and `contentHash` for the newer-statement scenario, after phase 3.
 - Report versioning only if revisions must coexist.
 - Tool retrieval aids (tags, aliases, companions, embeddings) only after measured recall failures.
-- Batched multi-action approval cards at phase 9 if multi-write turns appear.
+- Batched multi-action approval cards at phase 10 if multi-write turns appear.
 - A Chat summary field only when a long chat measurably loses context.
