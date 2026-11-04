@@ -1090,25 +1090,58 @@ Rules:
 
 ## 12. Repository layout and tooling
 
-Recommended defaults, pending confirmation in progress.md.
+Revised 4 November 2026 after the LLD review. Layering rule: `core` imports nothing of ours; `api`, `worker` and `infra` import `core`; anything that touches a network or a disk is a Protocol in `core` with an in-memory implementation beside it and an AWS implementation in `infra`, selected by settings. Phases 1 to 8 run on the in-memory and local-disk implementations.
 
 ```text
 context-forge/
-  core/            Pydantic entities, value types, RequestState, PlannerOutput, TaskResult per kind
-                   repositories: interface + in-memory + (phase 9) dynamodb
-                   model boundary: interface + fake + bedrock adapter
-                   context builder, tool result processor, compaction
-  worker/          LangGraph graph: plan node, plan gate, task subgraphs, reconcile, cite, report
-                   tools: sql_query (DuckDB), search_chunks, read_artifact
-  api/             FastAPI: chats, messages, requests, artifacts, SSE
-  prompts/         agent-memory.md, plan.1.md, execute.1.md, compress.1.md
-  config/          integrations.yaml, embedding.yaml, budgets.yaml
-  fixtures/        synthetic dataset + the first request
-  tests/
-  docs/            system-design.md, implementation-plan.md, progress.md
+  pyproject.toml  uv.lock  .python-version  .env.example
+  config/
+    budgets.yaml          cap, allowance, margin, keep-last, row cap, facts cap
+    models.yaml           stage -> Bedrock model id, effort, max tokens
+    embedding.yaml        model id, chunk limits (phase 5)
+    integrations.yaml     Integration records (phase 7)
+  prompts/                agent-memory.md  plan.1.md  execute.1.md  cite.1.md  compress.1.md
+  fixtures/               transactions_sep_oct.csv  request.txt  statements/ (phase 5)
+  evals/                  cases/  judge.md  run_evals.py (phase 2)
+  src/contextforge/
+    core/
+      ids.py  values.py  settings.py  logging.py          ULIDs, value types, typed settings, request/task context vars
+      entities/                                           one file per entity; lifecycles.py holds the transition tables
+      planner.py  state.py                                PlannerOutput; RequestState and TaskState (the working brief)
+      repositories/base.py  memory.py                     Protocols; in-memory implementations
+      storage.py  queue.py                                BlobStore and Queue Protocols with in-process implementations
+      models/base.py  scripted.py  recording.py           ModelRequest/Response, ModelClient; scripted fake; ModelCall recorder
+      tools/base.py                                       Tool Protocol, ToolContext, ToolResult, projection rule
+      context/budgets.py  tokens.py  prompts.py           config, estimates, prompt loading and versions
+      context/builder.py  tool_results.py  compaction.py  eight sections; cap, offload, project, stub; levels 1 and 3
+      services/submit.py  replies.py  artifacts.py  usage.py   idempotent submit; interrupt verification; upload and delete rules; usage sums
+    worker/
+      deps.py  graph.py  runner.py  consumer.py           wiring; plan -> (await_user | plan_gate) -> run_tasks -> cite -> report; start/resume/cancel; queue loop
+      nodes/plan.py  execute.py  cite.py  report.py  stubs.py  guards.py
+      tools/sql_query.py  read_artifact.py  search_chunks.py  mcp.py  registry.py
+    api/
+      app.py  deps.py  auth.py  errors.py                 app factory, dependency wiring, session, one error shape
+      routes/chats.py  messages.py  requests.py  events.py  artifacts.py  me.py
+    infra/
+      dynamodb/  s3.py  bedrock.py  sqs.py  langsmith.py  ingestion/{spreadsheet.py, pdf.py, chunkers/}
+  tests/                  conftest.py  helpers.py  core/  worker/  api/  infra/  e2e/
+  scripts/                run_local.py  seed_fixture.py
+  infra-aws/              CDK (phase 9)
+  docker/                 Dockerfile.api  Dockerfile.worker  compose.yaml (phase 9)
+  docs/                   system-design.md  implementation-plan.md  progress.md  superpowers/plans/
 ```
 
-Python 3.12, `uv` with a committed lockfile, `pytest`, `ruff`, `mypy`. Tests before implementation for every behavior in section 13. No AWS resources before phase 9; SQLite checkpointer, in-memory repositories and local disk storage until then.
+Rules fixed by the LLD review:
+
+- An interrupt lives in its own node (`await_user`) whose only statement is `interrupt()`. LangGraph re-runs a node from its start on resume, so a node that also calls the model would pay that call twice.
+- Writes inside replayable nodes are idempotent: raw_result artifact ids derive from `(taskId, toolCallId)`; clarification Message ids derive from the request and attempt; the task loop skips Tasks already COMPLETED or SKIPPED in the repository. Later, one node per task through `Send` replaces the loop and adds parallel branches.
+- Cancellation is cooperative: nodes read the request status before every model call and before each task and stop on CANCELLED. The API sets the status; the worker honours it.
+- The SSE handler and the API read Messages and Tasks only; nothing in `RequestState` is shown to the user.
+- Every log line carries `requestMessageId` and, inside a task, `taskId`; the LangSmith run id joins them when present. LangSmith is a wrapper on the graph entry and on `ModelClient.invoke`, with `thread_id = requestMessageId`, and a single masking hook in `infra/langsmith.py`. Budget checks never read LangSmith.
+- The transient `activity` SSE event works only while API and worker share a process (phases 4 to 8). In phase 9 it is dropped, or carried by a short-TTL DynamoDB item if it proves worth keeping.
+- Routes call services; services hold the rules and are tested without HTTP.
+
+Python 3.12, `uv` with a committed lockfile, `pytest`, `ruff`, `mypy` strict. Tests before implementation for every behavior in section 13. No AWS resources before phase 9; SQLite checkpointer, in-memory repositories and local disk storage until then.
 
 ## 13. Phase 1 task list
 

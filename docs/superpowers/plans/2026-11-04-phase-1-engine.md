@@ -23,6 +23,11 @@
 - A planner result has 2 to 6 tasks; task kinds are exactly `sql_analysis`, `pdf_lookup`, `source_search`, `reconcile`.
 - Tests before implementation for every task. Commit after every task.
 - No paid model calls, no network, no AWS in this phase.
+- Interrupts live in their own node (`await_user`) whose only statement is `interrupt()`; a model call never shares a node with an interrupt, because LangGraph re-runs a node from its start on resume.
+- Every write that can happen inside a replayed node is idempotent: raw_result artifact ids derive from `(task_id, tool_call_id)`; the task loop skips Tasks already COMPLETED or SKIPPED in the repository.
+- Cooperative cancellation: before every model call and before starting each task, nodes read the request status; on CANCELLED they stop with `next_action = "cancelled"`.
+- SSE and the API read Messages and Tasks only; nothing in `RequestState` is shown to the user.
+- Every log line carries `request_message_id` and, when inside a task, `task_id`, via a context variable in `core/logging.py`.
 
 ## Review Focus
 
@@ -31,6 +36,7 @@
 3. Exactly 50 rows must not offload; 51 rows must offload and the stub must say "1 more row" (Task 7).
 4. Compaction keep-boundary landing between a tool call and its result: the boundary must move earlier so both stay verbatim (Task 11).
 5. The scripted model running out of responses or returning output that fails the schema: the request ends FAILED with a reason, the ModelCall records outcome ERROR, and resume does not loop (Task 9).
+6. A process restart after task t2 completed: the resumed run must not re-execute t1 or t2, must not write a second ModelCall for them, and must not create a second raw_result artifact for a replayed tool call (Task 10).
 
 ---
 
@@ -40,6 +46,7 @@
 pyproject.toml                      project, deps, ruff, mypy, pytest config
 uv.lock
 config/budgets.yaml                 compaction numbers
+config/models.yaml                  stage -> model id, effort, max tokens (scripted in phase 1)
 prompts/agent-memory.md             v1 text from spec 10.1
 prompts/plan.1.md                   spec 10.2
 prompts/execute.1.md                spec 10.3
@@ -61,6 +68,9 @@ src/contextforge/core/state.py                RequestState, TaskState, PlanEntry
 src/contextforge/core/repositories/base.py    Protocols + StaleStatusError
 src/contextforge/core/repositories/memory.py  in-memory implementations
 src/contextforge/core/storage.py              BlobStore Protocol + MemoryBlobStore
+src/contextforge/core/queue.py                Queue Protocol + InProcessQueue (resume and start messages)
+src/contextforge/core/logging.py              request/task context vars, JSON log formatter
+src/contextforge/core/tools/base.py           Tool Protocol, ToolContext, ToolResult
 src/contextforge/core/models/base.py          ModelRequest, ModelResponse, ToolCall, ToolSpec, ModelClient
 src/contextforge/core/models/scripted.py      ScriptedModel, ScriptExhausted
 src/contextforge/core/models/recording.py     RecordingModelClient
@@ -71,11 +81,12 @@ src/contextforge/core/context/builder.py      ContextInputs, BuiltContext, build
 src/contextforge/core/context/tool_results.py ProcessedRows, process_rows
 src/contextforge/core/context/compaction.py   stub_old_tool_results, summarize_messages, compact
 src/contextforge/core/services/submit.py      submit_request
-src/contextforge/worker/tools/sql_query.py    SQL_QUERY_TOOL spec, CsvSqlQuery
+src/contextforge/worker/tools/sql_query.py    SqlQueryTool implementing Tool over the fixture CSV
 src/contextforge/worker/deps.py               WorkerDeps dataclass
-src/contextforge/worker/nodes/plan.py         plan_node, plan_gate
+src/contextforge/worker/nodes/plan.py         plan_node, await_user_node, plan_gate
 src/contextforge/worker/nodes/execute.py      build_task_subgraph, execute_node
-src/contextforge/worker/nodes/stubs.py        reconcile_stub, cite_stub, skipped_executor
+src/contextforge/worker/nodes/stubs.py        reconcile_stub, skipped_reason
+src/contextforge/worker/nodes/cite.py         cite_node stub: passes facts through unchanged in phase 1
 src/contextforge/worker/nodes/report.py       report_node
 src/contextforge/worker/graph.py              build_graph
 src/contextforge/worker/runner.py             RequestRunner
@@ -91,7 +102,7 @@ tests/                                        one test module per task, named be
 - Test: `tests/test_skeleton.py`
 
 **Interfaces:**
-- Produces: importable package `contextforge`; prompt files whose text is exactly spec sections 10.1 to 10.4; `config/budgets.yaml` with keys `capInputTokens: 40000`, `responseAllowanceTokens: 4000`, `marginFraction: 0.10`, `keepLastMessages: 6`, `toolResultRowCap: 50`, `factsCap: 30`.
+- Produces: importable package `contextforge`; prompt files whose text is exactly spec sections 10.1 to 10.4; `config/budgets.yaml` with keys `capInputTokens: 40000`, `responseAllowanceTokens: 4000`, `marginFraction: 0.10`, `keepLastMessages: 6`, `toolResultRowCap: 50`, `factsCap: 30`; `config/models.yaml` mapping each stage to `{ model, effort, maxTokens }` with `model: scripted` for every stage in phase 1 and the Bedrock ids in comments (`anthropic.claude-opus-5-5` plan and cite, `anthropic.claude-haiku-5-5` execute and compress).
 
 - [ ] **Step 1: Write the failing test**
 
@@ -112,6 +123,11 @@ def test_budgets_yaml_has_spec_values() -> None:
     assert b == {"capInputTokens": 40000, "responseAllowanceTokens": 4000,
                  "marginFraction": 0.10, "keepLastMessages": 6,
                  "toolResultRowCap": 50, "factsCap": 30}
+
+def test_models_yaml_covers_every_stage() -> None:
+    m = yaml.safe_load(Path("config/models.yaml").read_text())
+    assert set(m) >= {"plan", "execute", "cite", "compress"}
+    assert all(v["model"] == "scripted" for v in m.values())
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -128,7 +144,7 @@ Write the four prompt files with the exact text of spec 10.1 to 10.4 (no heading
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `uv run pytest -v && uv run ruff check . && uv run mypy src`
-Expected: 3 passed; ruff and mypy report no issues.
+Expected: 4 passed; ruff and mypy report no issues.
 
 - [ ] **Step 5: Commit**
 
@@ -321,6 +337,8 @@ git commit -m "feat: PlannerOutput schema and RequestState working brief"
   - `ArtifactRepository`: `save(artifact)`, `get(chat_id, artifact_id)`, `list_by_chat(chat_id)`, `update_status(chat_id, artifact_id, expected, new)`.
   - `ChatRepository`: `save`, `get(user_id, chat_id)`, `list_by_user(user_id)` newest `updated_at` first.
   - `storage.BlobStore` Protocol: `put(key: str, data: bytes) -> str` returning the `storage_ref` (`mem://<key>`), `get(ref: str) -> bytes`; `MemoryBlobStore`.
+  - `queue.WorkMessage(kind: Literal["start","resume"], chat_id: str, message_id: str, reply_message_id: str | None = None)`; `queue.Queue` Protocol: `send(msg: WorkMessage) -> None`, `receive() -> WorkMessage | None`; `queue.InProcessQueue` backed by `collections.deque`.
+  - `logging.request_context(request_message_id: str, task_id: str | None = None)` context manager setting context vars; `logging.configure()` installing a JSON formatter that includes them on every record.
   - `memory.py`: `InMemoryMessages`, `InMemoryTasks`, `InMemoryModelCalls`, `InMemoryArtifacts`, `InMemoryChats` implementing the above with plain dicts; `Repositories` dataclass bundling the five.
   - `services/submit.py`: `submit_request(repos: Repositories, *, client_key: str, chat_id: str, user_id: str, content: str) -> RequestMessage` which builds a `RequestMessage` at `ACCEPTED` with a new ULID and calls `create_request`.
 
@@ -356,6 +374,13 @@ def test_lists_are_in_ulid_order() -> None:
     ids = [submit_request(repos, client_key=f"k{i}", chat_id="c1", user_id="u1", content="x").message_id for i in range(3)]
     assert [m.message_id for m in repos.messages.list_by_chat("c1")] == sorted(ids)
 
+def test_queue_round_trip_and_empty() -> None:
+    from contextforge.core.queue import InProcessQueue, WorkMessage
+    q = InProcessQueue()
+    assert q.receive() is None
+    q.send(WorkMessage(kind="start", chat_id="c1", message_id="m1"))
+    assert q.receive() == WorkMessage(kind="start", chat_id="c1", message_id="m1")
+
 def test_sum_usage_is_none_when_unknown() -> None:
     repos = Repositories.in_memory()
     repos.model_calls.save(ModelCall(model_call_id="k1", request_message_id="m1", stage="plan", model="fake",
@@ -379,12 +404,12 @@ Expected: FAIL, `ModuleNotFoundError: contextforge.core.repositories`.
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `uv run pytest tests/test_repositories.py -v && uv run mypy src`
-Expected: 4 passed, clean.
+Expected: 5 passed, clean.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/contextforge/core/repositories src/contextforge/core/storage.py src/contextforge/core/services tests/test_repositories.py
+git add src/contextforge/core/repositories src/contextforge/core/storage.py src/contextforge/core/queue.py src/contextforge/core/logging.py src/contextforge/core/services tests/test_repositories.py
 git commit -m "feat: repository interfaces, in-memory store, idempotent submit"
 ```
 
@@ -446,7 +471,7 @@ git commit -m "feat: 60-row fixture with planted transfers and card settlement"
 ### Task 6: Model boundary, scripted model, recording client
 
 **Files:**
-- Create: `src/contextforge/core/models/__init__.py`, `base.py`, `scripted.py`, `recording.py`; `src/contextforge/core/context/__init__.py`, `prompts.py`
+- Create: `src/contextforge/core/models/__init__.py`, `base.py`, `scripted.py`, `recording.py`; `src/contextforge/core/context/__init__.py`, `prompts.py`; `src/contextforge/core/tools/__init__.py`, `base.py`
 - Test: `tests/test_models.py`
 
 **Interfaces:**
@@ -458,6 +483,7 @@ git commit -m "feat: 60-row fixture with planted transfers and card settlement"
   - `base.ModelClient` Protocol: `invoke(request: ModelRequest) -> ModelResponse`.
   - `scripted.ScriptExhausted(Exception)`; `scripted.ScriptedModel(script: dict[str, list[ModelResponse]])` keyed by stage value (`"plan"`, `"execute"`, `"compress"`), consuming each list in order; raises `ScriptExhausted` when a key is missing or empty.
   - `recording.RecordingModelClient(inner: ModelClient, model_calls: ModelCallRepository, request_message_id: str, memory_version: str)` whose `invoke` writes one `ModelCall` per call with `stage`, `model`, `task_id`, `context_version = f"mem:{memory_version}|prompt:{prompt_version(stage)}"`, `usage`, `outcome COMPLETED`, `started_at`, `ended_at`; writes `outcome ERROR` with `failure_reason = str(exc)` and re-raises when `inner.invoke` raises; writes nothing when the response has `replayed=True`.
+  - `tools/base.py`: `ToolContext(chat_id: str, user_id: str, request_message_id: str, task_id: str, tool_call_id: str)`; `ToolResult(rows: list[dict[str, Any]] | None = None, text: str | None = None)`; `Tool` Protocol with attributes `spec: ToolSpec`, `permission: Literal["READ","WRITE","DESTRUCTIVE"]` and method `run(arguments: dict[str, Any], ctx: ToolContext) -> ToolResult`. Phase 1 has one implementation (Task 9).
   - `prompts.load_prompt(name: str) -> str` reading `prompts/<name>.md`; `prompts.prompt_version(stage: Stage) -> str` mapping `plan -> "plan.1"`, `execute -> "execute.1"`, `compress -> "compress.1"`, others `-> "none"`; `prompts.MEMORY_VERSION = "1"`.
 
 - [ ] **Step 1: Write the failing tests**
@@ -515,7 +541,7 @@ Expected: 3 passed, clean.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/contextforge/core/models src/contextforge/core/context tests/test_models.py
+git add src/contextforge/core/models src/contextforge/core/context src/contextforge/core/tools tests/test_models.py
 git commit -m "feat: model boundary with scripted fake and ModelCall recording"
 ```
 
@@ -534,7 +560,7 @@ git commit -m "feat: model boundary with scripted fake and ModelCall recording"
   - `builder.SourceLine(artifact_id, kind, name, detail: str)`; `builder.ContextInputs(memory: str, stage_prompt: str, request: RequestMessage | None, preferences: dict[str, str], constraints: list[str], facts: list[Fact], open_questions: list[OpenQuestion], next_action: str, dependency_summaries: list[str], evidence_slices: list[str], tools: list[ToolSpec], sources: list[SourceLine], prior_messages: list[Message], loop_messages: list[AnyMessage])`.
   - `builder.BuiltContext(system: list[str], user_text: str, messages: list[AnyMessage], sections: list[tuple[str, int]], fixed_tokens: int)` where `sections` lists the eight section names in spec 8.2 order with their token estimates and `system == [memory, stage_prompt]`.
   - `builder.build_context(inputs: ContextInputs, budgets: Budgets) -> BuiltContext`. `user_text` renders the spec 9.1 tags in order: `<request message_id=...>`, `<user_preferences>`, `<constraints>`, `<sources chat_id=...>`, `<prior_context>`; when `facts` exceed `facts_cap`, only the newest `facts_cap` are rendered.
-  - `tool_results.ProcessedRows(rows: list[dict[str, Any]], total_rows: int, artifact_id: str | None, text: str)`; `tool_results.process_rows(rows, *, cap: int, artifacts: ArtifactRepository, blobs: BlobStore, chat_id, user_id, name: str) -> ProcessedRows`: at most `cap` rows kept; when `len(rows) > cap` the full rows are written as JSON lines to the blob store, a `raw_result` Artifact at `AVAILABLE` is saved, and `text` ends with `f"{len(rows) - cap} more row(s) in artifact {artifact_id}"`; when `len(rows) <= cap`, `artifact_id is None` and `text` ends with `f"{len(rows)} row(s)"`.
+  - `tool_results.ProcessedRows(rows: list[dict[str, Any]], total_rows: int, artifact_id: str | None, text: str)`; `tool_results.process_rows(rows, *, cap: int, artifacts: ArtifactRepository, blobs: BlobStore, chat_id, user_id, name: str, artifact_id: str) -> ProcessedRows`: the caller passes `artifact_id` derived as `raw_result_id(task_id, tool_call_id)` (a ULID-shaped deterministic hash, `tool_results.raw_result_id`) so a replayed tool call overwrites rather than duplicates; at most `cap` rows kept; when `len(rows) > cap` the full rows are written as JSON lines to the blob store, a `raw_result` Artifact at `AVAILABLE` is saved (upsert), and `text` ends with `f"{len(rows) - cap} more row(s) in artifact {artifact_id}"`; when `len(rows) <= cap`, `artifact_id is None` and `text` ends with `f"{len(rows)} row(s)"`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -572,10 +598,13 @@ def test_facts_are_capped_to_newest() -> None:
 def test_process_rows_boundary_at_cap() -> None:
     repos, blobs = Repositories.in_memory(), MemoryBlobStore()
     fifty = [{"i": i} for i in range(50)]
-    r = process_rows(fifty, cap=50, artifacts=repos.artifacts, blobs=blobs, chat_id="c1", user_id="u1", name="q")
+    r = process_rows(fifty, cap=50, artifacts=repos.artifacts, blobs=blobs, chat_id="c1", user_id="u1", name="q", artifact_id="a6")
     assert r.artifact_id is None and len(r.rows) == 50 and r.text.endswith("50 row(s)")
     r2 = process_rows(fifty + [{"i": 50}], cap=50, artifacts=repos.artifacts, blobs=blobs,
-                      chat_id="c1", user_id="u1", name="q")
+                      chat_id="c1", user_id="u1", name="q", artifact_id="a7")
+    r3 = process_rows(fifty + [{"i": 50}], cap=50, artifacts=repos.artifacts, blobs=blobs,
+                      chat_id="c1", user_id="u1", name="q", artifact_id="a7")   # replay: same id, one artifact
+    assert r3.artifact_id == "a7" and len(repos.artifacts.list_by_chat("c1")) == 1
     assert r2.artifact_id and len(r2.rows) == 50 and r2.text.endswith(f"1 more row(s) in artifact {r2.artifact_id}")
     art = repos.artifacts.get("c1", r2.artifact_id)
     assert art and art.kind == "raw_result" and art.status == "AVAILABLE"
@@ -584,7 +613,7 @@ def test_process_rows_boundary_at_cap() -> None:
 def test_process_rows_1240_rows_keeps_50() -> None:
     repos, blobs = Repositories.in_memory(), MemoryBlobStore()
     r = process_rows([{"i": i} for i in range(1240)], cap=50, artifacts=repos.artifacts, blobs=blobs,
-                     chat_id="c1", user_id="u1", name="q")
+                     chat_id="c1", user_id="u1", name="q", artifact_id="a8")
     assert len(r.rows) == 50 and r.total_rows == 1240 and "1190 more row(s)" in r.text
 ```
 
@@ -614,14 +643,16 @@ git commit -m "feat: context builder with eight sections and tool result process
 ### Task 8: Plan node and plan gate
 
 **Files:**
-- Create: `src/contextforge/worker/deps.py`, `src/contextforge/worker/nodes/__init__.py`, `src/contextforge/worker/nodes/plan.py`
+- Create: `src/contextforge/worker/deps.py`, `src/contextforge/worker/nodes/__init__.py`, `src/contextforge/worker/nodes/plan.py`, `src/contextforge/worker/nodes/guards.py`
 - Test: `tests/test_plan_node.py`
 
 **Interfaces:**
 - Consumes: `ModelClient`, `Repositories`, `Budgets`, `build_context`, `PlannerOutput`, `RequestState`.
 - Produces:
-  - `deps.WorkerDeps(repos: Repositories, blobs: BlobStore, model: ModelClient, budgets: Budgets, planner_model: str = "scripted", executor_model: str = "scripted")` dataclass.
-  - `plan.plan_node(state: RequestState, deps: WorkerDeps) -> dict`: builds context from the request Message, the chat's AVAILABLE artifacts as sources, the user's preferences, prior Messages in the chat; invokes the model with `stage=plan`, `output_schema=PlannerOutput`; parses `response.structured` into `PlannerOutput`. On `kind == "plan"` returns state updates `goal, constraints, open_questions (as OpenQuestion), next_action` plus a private key `planner_output` (the dumped PlannerOutput) for the gate. On `kind == "clarification"`: saves a `ClarificationMessage` (sender assistant, `request_message_id`, content = question), moves the request to `WAITING_USER`, returns `pending_interrupt={"kind": "clarification", "message_id": <new id>}` and then calls `interrupt({"kind": "clarification", "message_id": ...})`. On a schema failure or `ScriptExhausted`, raises `PlanFailed(reason)`.
+  - `deps.WorkerDeps(repos: Repositories, blobs: BlobStore, model: ModelClient, budgets: Budgets, tools: dict[str, Tool], queue: Queue, planner_model: str = "scripted", executor_model: str = "scripted")` dataclass.
+  - `guards.check_not_cancelled(state: RequestState, deps: WorkerDeps) -> None` raising `Cancelled` when the request Message status is CANCELLED; called by every node before a model call and by the task loop before each task. `guards.Cancelled(Exception)`.
+  - `plan.plan_node(state: RequestState, deps: WorkerDeps) -> dict`: builds context from the request Message, the chat's AVAILABLE artifacts as sources, the user's preferences, prior Messages in the chat; invokes the model with `stage=plan`, `output_schema=PlannerOutput`; parses `response.structured` into `PlannerOutput`. On `kind == "plan"` returns state updates `goal, constraints, open_questions (as OpenQuestion), next_action` plus a private key `planner_output` (the dumped PlannerOutput) for the gate. On `kind == "clarification"`: saves a `ClarificationMessage` (sender assistant, `request_message_id`, content = question) with an id derived from `(request_message_id, "clarification", attempt)` so a replay cannot write a second one, moves the request to `WAITING_USER`, and returns `pending_interrupt={"kind": "clarification", "message_id": <id>}`. It never calls `interrupt()` itself. On a schema failure or `ScriptExhausted`, raises `PlanFailed(reason)`.
+  - `plan.await_user_node(state: RequestState) -> dict`: the only statement is `answer = interrupt(state["pending_interrupt"])`; it returns `constraints = state["constraints"] + [f"User answered '{question}': {answer['content']}"]`, `pending_interrupt=None`. Graph edges: `plan -> await_user` when `pending_interrupt` is set, `await_user -> plan`; `plan -> plan_gate` otherwise. Because the node holds no model call, a resume re-runs only this node.
   - `plan.plan_gate(state: RequestState, deps: WorkerDeps) -> dict`: for each planned task verifies every `input_artifact_id` is an Artifact in `state["chat_id"]` with status `AVAILABLE`, and that `depends_on` refs resolve; on failure raises `PlanFailed("Planned task t2 names artifact a9 that is not in this chat")`; on success creates one `Task` per planned task at `PLANNED` with new ULIDs assigned in plan order, `depends_on_task_ids` mapped from refs, and returns `plan=[PlanEntry...]`.
   - `plan.PlanFailed(Exception)` with `.reason`.
   - `plan.planner_output_from_state(state) -> PlannerOutput` helper for the gate.
@@ -679,7 +710,7 @@ Expected: FAIL, `ModuleNotFoundError: contextforge.worker.nodes`.
 
 - [ ] **Step 3: Implement `deps.py`, `plan.py` and `tests/helpers.py`**
 
-The clarification interrupt path is exercised in Task 10, not here; implement it now so the node is complete. `interrupt` is imported from `langgraph.types`.
+The interrupt round trip is exercised in Task 10; implement `await_user_node` now so the graph in Task 9 can wire it. `interrupt` is imported from `langgraph.types`.
 
 - [ ] **Step 4: Run tests to verify they pass**
 
@@ -690,7 +721,7 @@ Expected: 3 passed, clean.
 
 ```bash
 git add src/contextforge/worker tests/helpers.py tests/test_plan_node.py
-git commit -m "feat: plan node with clarification interrupt and plan gate"
+git commit -m "feat: plan node, await_user interrupt node, plan gate, cancel guard"
 ```
 
 ---
@@ -698,20 +729,20 @@ git commit -m "feat: plan node with clarification interrupt and plan gate"
 ### Task 9: SQL tool, task subgraph, stubs, report node, full graph
 
 **Files:**
-- Create: `src/contextforge/worker/tools/__init__.py`, `sql_query.py`; `src/contextforge/worker/nodes/execute.py`, `stubs.py`, `report.py`; `src/contextforge/worker/graph.py`
+- Create: `src/contextforge/worker/tools/__init__.py`, `sql_query.py`; `src/contextforge/worker/nodes/execute.py`, `stubs.py`, `cite.py`, `report.py`; `src/contextforge/worker/graph.py`
 - Test: `tests/test_graph.py`
 
 **Interfaces:**
 - Consumes: Task 7 `process_rows`, `build_context`; Task 8 nodes; `TaskState`.
 - Produces:
-  - `sql_query.SQL_QUERY_TOOL: ToolSpec` with the exact name, description and `input_schema` from spec 9.2.
-  - `sql_query.CsvSqlQuery(artifacts: ArtifactRepository, blobs: BlobStore)` with `run(chat_id: str, dataset_id: str, sql: str) -> list[dict[str, Any]]`: loads the Artifact, reads its CSV bytes from the blob store into a DuckDB in-memory connection as table `t` (`read_csv_auto`), rejects any statement that is not a single `SELECT` (DuckDB `EXPLAIN` parse plus a first-token check; the spec says this is not a security boundary, it is a convenience guard for phase 1), returns rows as dicts.
-  - `execute.build_task_subgraph(deps: WorkerDeps, tool: CsvSqlQuery) -> CompiledStateGraph` over `TaskState` with two nodes: `call_model` (builds context with the execute prompt, the task goal, constraints, the dataset source line with columns, dependency summaries and `[SQL_QUERY_TOOL]`; invokes `stage=execute`; appends an `AIMessage` with `tool_calls` or, on `end_turn`, parses `response.structured` into `TaskResult`, calls `validate_structured_data`, sets `result`) and `run_tools` (for each tool call runs the tool, passes rows through `process_rows` with `cap=budgets.tool_result_row_cap`, appends a `ToolMessage` whose content is `ProcessedRows.text` plus the kept rows as JSON). Edges: `call_model -> run_tools` when the last message has tool calls, else `END`; `run_tools -> call_model`. A model error or schema failure sets `error` and ends.
+  - `sql_query.SqlQueryTool(artifacts: ArtifactRepository, blobs: BlobStore)` implementing `Tool`: `spec` is the exact name, description and `input_schema` from spec 9.2; `permission = "READ"`; `run(arguments, ctx)` loads the Artifact `arguments["dataset_id"]` in `ctx.chat_id`, reads its CSV bytes from the blob store into a DuckDB in-memory connection as table `t` (`read_csv_auto`), rejects any statement that is not a single `SELECT` (DuckDB `EXPLAIN` parse plus a first-token check; a convenience guard, not a security boundary), returns `ToolResult(rows=...)`.
+  - `execute.build_task_subgraph(deps: WorkerDeps) -> CompiledStateGraph` over `TaskState` with two nodes: `call_model` (calls `check_not_cancelled`; builds context with the execute prompt, the task goal, constraints, the dataset source line with columns, dependency summaries and the specs of the tools allowed for the task kind; invokes `stage=execute`; appends an `AIMessage` with `tool_calls` or, on `end_turn`, parses `response.structured` into `TaskResult`, calls `validate_structured_data`, sets `result`) and `run_tools` (for each tool call looks the tool up in `deps.tools` by name, runs it with a `ToolContext`, passes rows through `process_rows` with `cap=budgets.tool_result_row_cap` and `artifact_id=raw_result_id(task_id, tool_call_id)`, appends a `ToolMessage` whose content is `ProcessedRows.text` plus the kept rows as JSON and whose `additional_kwargs` carry `tool_name`, `arguments`, `row_count`, `artifact_id`). Edges: `call_model -> run_tools` when the last message has tool calls, else `END`; `run_tools -> call_model`. A model error or schema failure sets `error` and ends.
   - `stubs.reconcile_stub(task: Task, dependency_results: list[TaskResult]) -> TaskResult`: summary joins dependency summaries with `"; "`, `structured_data={"reconciled": False}`, `uncertainties=["reconcile is a stub in phase 1"]`, `evidence_refs` = union of dependencies' refs.
   - `stubs.skipped_reason(kind: TaskKind) -> str` = `f"{kind} is not implemented in phase 1"`.
-  - `execute.run_tasks_node(state: RequestState, deps: WorkerDeps) -> dict`: iterates Tasks for the request in `task_id` order, sequentially, running a task only when every dependency is `COMPLETED`; for `sql_analysis` transitions `PLANNED -> RUNNING`, invokes the subgraph with a fresh `TaskState`, on `result` transitions to `COMPLETED` with the result and appends up to 6 `Fact`s built from `result.summary` (split on sentences) with the result's `evidence_refs`, on `error` transitions to `FAILED`; for `reconcile` uses `reconcile_stub`; for `pdf_lookup` and `source_search` transitions `PLANNED -> SKIPPED` with `failure_reason = skipped_reason(kind)`. Returns `facts`, `plan` (statuses refreshed), `next_action="write report"`.
+  - `execute.run_tasks_node(state: RequestState, deps: WorkerDeps) -> dict`: iterates Tasks for the request in `task_id` order, sequentially; skips any Task whose repository status is already `COMPLETED` or `SKIPPED` (replay safety); calls `check_not_cancelled` before each task; runs a task only when every dependency is `COMPLETED`; for `sql_analysis` transitions `PLANNED -> RUNNING`, invokes the subgraph with a fresh `TaskState`, on `result` transitions to `COMPLETED` with the result and appends up to 6 `Fact`s built from `result.summary` (split on sentences) with the result's `evidence_refs`, on `error` transitions to `FAILED`; for `reconcile` uses `reconcile_stub`; for `pdf_lookup` and `source_search` transitions `PLANNED -> SKIPPED` with `failure_reason = skipped_reason(kind)`. Returns `facts`, `plan` (statuses refreshed), `next_action="write report"`.
   - `report.report_node(state: RequestState, deps: WorkerDeps) -> dict`: builds a `ReportMessage` whose `claims` are one per fact (`claim_id` = ULID, `text`, `evidence_refs`), `inputs_consulted` = every Artifact referenced by any fact, `uncertainties` = union of task result uncertainties plus a line per SKIPPED task, `coverage={"tasks": {"completed": n, "skipped": n, "failed": n}}`; saves it; moves the request to `COMPLETED`; returns `next_action="done"`.
-  - `graph.build_graph(deps: WorkerDeps, checkpointer: BaseCheckpointSaver | None) -> CompiledStateGraph` over `RequestState`: `plan -> plan_gate -> run_tasks -> report -> END`. `PlanFailed` anywhere is caught in a wrapper that moves the request to `FAILED` with `failure_reason = reason` and routes to `END`.
+  - `cite.cite_node(state: RequestState, deps: WorkerDeps) -> dict`: phase 1 stub; returns `next_action="write report"` and leaves `facts` unchanged. Phase 3 replaces the body with the evidence re-read and claim call.
+  - `graph.build_graph(deps: WorkerDeps, checkpointer: BaseCheckpointSaver | None) -> CompiledStateGraph` over `RequestState`: `plan -> (await_user -> plan | plan_gate) -> run_tasks -> cite -> report -> END`. `PlanFailed` is caught in a wrapper that moves the request to `FAILED` with `failure_reason = reason` and routes to `END`; `Cancelled` is caught, sets `next_action="cancelled"` and routes to `END` without changing the status (the API already set CANCELLED).
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -720,16 +751,19 @@ git commit -m "feat: plan node with clarification interrupt and plan gate"
 from contextforge.core.models.base import ModelResponse, ToolCall
 from contextforge.core.models.scripted import ScriptedModel
 from contextforge.worker.graph import build_graph
-from contextforge.worker.tools.sql_query import CsvSqlQuery
+from contextforge.worker.tools.sql_query import SqlQueryTool
+from contextforge.core.tools.base import ToolContext
 from tests.helpers import make_deps, seed_chat_with_dataset, initial_state, six_task_plan, t1_result
 
 def test_csv_sql_query_finds_planted_transfer_pairs() -> None:
     deps = make_deps(ScriptedModel({}))
     req = seed_chat_with_dataset(deps, chat_id="c1", user_id="u1", dataset_id="a2")
-    rows = CsvSqlQuery(deps.repos.artifacts, deps.blobs).run("c1", "a2",
+    ctx = ToolContext(chat_id="c1", user_id="u1", request_message_id=req.message_id, task_id="t1", tool_call_id="x1")
+    rows = SqlQueryTool(deps.repos.artifacts, deps.blobs).run({"dataset_id": "a2", "sql":
         "SELECT d.row_id AS debit_row, c.row_id AS credit_row, d.amount FROM t d JOIN t c "
         "ON d.amount = c.amount AND d.direction='DEBIT' AND c.direction='CREDIT' "
-        "AND d.account_id <> c.account_id AND abs(date_diff('day', d.txn_date, c.txn_date)) <= 2")
+        "AND d.account_id <> c.account_id AND abs(date_diff('day', d.txn_date, c.txn_date)) <= 2"}, ctx).rows
+    assert rows is not None
     assert {(r["debit_row"], r["credit_row"]) for r in rows} >= {(12, 13), (40, 41), (50, 51)}
 
 def test_fixture_request_produces_six_tasks_and_a_report() -> None:
@@ -752,6 +786,20 @@ def test_fixture_request_produces_six_tasks_and_a_report() -> None:
     assert deps.repos.messages.get("c1", req.message_id).status == "COMPLETED"
     assert len(deps.repos.model_calls.list_by_request(req.message_id)) == 5
 
+def test_cancel_between_tasks_stops_the_run() -> None:
+    script = {"plan": [ModelResponse(structured=six_task_plan())],
+              "execute": [ModelResponse(structured=t1_result())] * 3}
+    deps = make_deps(ScriptedModel(script))
+    req = seed_chat_with_dataset(deps, chat_id="c1", user_id="u1", dataset_id="a2")
+    # cancel is set by the API; here we set it right after the plan is written by hooking the task repository
+    deps.repos.tasks.on_save = lambda t: deps.repos.messages.update_request_status(  # type: ignore[attr-defined]
+        "c1", req.message_id, "RUNNING", "CANCELLED") if t.kind == "reconcile" else None
+    build_graph(deps, checkpointer=None).invoke(initial_state(req), config={"configurable": {"thread_id": req.message_id}})
+    tasks = deps.repos.tasks.list_by_request(req.message_id)
+    assert deps.repos.messages.get("c1", req.message_id).status == "CANCELLED"
+    assert not any(t.status in ("RUNNING", "COMPLETED") for t in tasks)
+    assert not [m for m in deps.repos.messages.list_by_chat("c1") if m.kind == "report"]
+
 def test_scripted_exhaustion_fails_request_with_reason() -> None:
     deps = make_deps(ScriptedModel({"plan": [ModelResponse(structured=six_task_plan())]}))
     req = seed_chat_with_dataset(deps, chat_id="c1", user_id="u1", dataset_id="a2")
@@ -770,12 +818,12 @@ Expected: FAIL, `ModuleNotFoundError: contextforge.worker.graph`.
 
 - [ ] **Step 3: Implement the tool, nodes and graph**
 
-Task execution is sequential in phase 1; parallel branches are deferred. The subgraph is compiled without a checkpointer (its transcript is dropped on completion by design, spec 8.6 level 2).
+Task execution is sequential in phase 1; parallel branches are deferred. The subgraph is compiled without a checkpointer (its transcript is dropped on completion by design, spec 8.6 level 2). `InMemoryTasks` gains an optional `on_save` hook used only by tests. `make_deps` registers `{"sql_query": SqlQueryTool(...)}` in `deps.tools` and an `InProcessQueue`.
 
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `uv run pytest tests/test_graph.py -v && uv run mypy src && uv run ruff check .`
-Expected: 3 passed, clean.
+Expected: 4 passed, clean.
 
 - [ ] **Step 5: Commit**
 
@@ -799,7 +847,7 @@ git commit -m "feat: task subgraph with sql_query, stubs, report node and full g
     - `start(chat_id: str, message_id: str) -> RunOutcome`: transitions the request `ACCEPTED -> RUNNING` with the conditional update; on `StaleStatusError` returns `RunOutcome(started=False, reason="already started")` without invoking the graph; otherwise invokes `build_graph(deps, checkpointer)` with `thread_id = message_id` and returns `RunOutcome(started=True, status=<final request status>)`.
     - `resume(chat_id: str, message_id: str, reply: ClarificationResponseMessage | ActionResponseMessage) -> RunOutcome`: loads the checkpoint state for the thread; verifies the request is `WAITING_USER` and `state["pending_interrupt"]["message_id"] == reply.in_reply_to_message_id`, else returns `RunOutcome(started=False, reason="reply does not target the pending interrupt")` and changes nothing; otherwise appends a `constraints` entry from the reply content, transitions `WAITING_USER -> RUNNING`, saves the reply Message, and invokes the graph with `Command(resume={"message_id": reply.message_id, "content": reply.content})`.
     - `RunOutcome(started: bool, status: RequestStatus | None = None, reason: str | None = None)`.
-  - The plan node, on resume, reads the resumed value, appends the answer to `constraints`, clears `pending_interrupt`, and calls the model again (the scripted model's second plan response).
+  - On resume the graph re-runs only `await_user_node`, which returns the answer into `constraints` and clears `pending_interrupt`; the edge back to `plan_node` then makes the second planner call (the scripted model's second plan response). The runner's `resume` also saves the reply Message and sends nothing to the queue in phase 1 (the queue is used by the API service in phase 4).
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -856,6 +904,26 @@ def test_resume_with_wrong_target_is_refused(tmp_path) -> None:
     out = RequestRunner(deps, _saver(db)).resume("c1", req.message_id, reply)
     assert not out.started and deps.repos.messages.get("c1", req.message_id).status == "WAITING_USER"
 
+def test_restart_after_two_tasks_does_not_replay_them(tmp_path) -> None:
+    db = tmp_path / "ckpt.sqlite"
+    script = {"plan": [ModelResponse(structured=six_task_plan())],
+              "execute": [ModelResponse(structured=t1_result())] * 3}
+    deps = make_deps(ScriptedModel(script))
+    req = seed_chat_with_dataset(deps, chat_id="c1", user_id="u1", dataset_id="a2")
+    deps.repos.tasks.on_save = lambda t: (_ for _ in ()).throw(RuntimeError("crash")) if (  # type: ignore[attr-defined]
+        t.kind == "sql_analysis" and t.status == "COMPLETED" and len([x for x in deps.repos.tasks.list_by_request(req.message_id) if x.status == "COMPLETED"]) == 2) else None
+    try:
+        RequestRunner(deps, _saver(db)).start("c1", req.message_id)
+    except RuntimeError:
+        pass
+    deps.repos.tasks.on_save = None  # type: ignore[attr-defined]
+    calls_before = len(deps.repos.model_calls.list_by_request(req.message_id))
+    deps.repos.messages.update_request_status("c1", req.message_id, "RUNNING", "ACCEPTED")  # operator requeue
+    RequestRunner(deps, _saver(db)).start("c1", req.message_id)
+    assert deps.repos.messages.get("c1", req.message_id).status == "COMPLETED"
+    executes_after = [c for c in deps.repos.model_calls.list_by_request(req.message_id) if c.stage == "execute"]
+    assert len(executes_after) == 3 and len(deps.repos.model_calls.list_by_request(req.message_id)) == calls_before + 1
+
 def test_next_action_is_read_first_on_resume(tmp_path) -> None:
     db = tmp_path / "ckpt.sqlite"
     deps = make_deps(ScriptedModel({"plan": [ModelResponse(structured=clarification("Which?"))]}))
@@ -872,14 +940,14 @@ Add `clarification(question: str) -> dict` to `tests/helpers.py` (a `PlannerOutp
 Run: `uv run pytest tests/test_runner.py -v`
 Expected: FAIL, `ModuleNotFoundError: contextforge.worker.runner`.
 
-- [ ] **Step 3: Implement `runner.py` and finish the resume path in `plan_node`**
+- [ ] **Step 3: Implement `runner.py`**
 
-On resume the plan node receives the interrupt's return value from `interrupt(...)`; it appends `f"User answered '{question}': {content}"` to `constraints`, clears `pending_interrupt`, and re-invokes the planner.
+The replay test needs the restart to resume from the checkpoint with `start`: when a checkpoint exists for the thread and the request is ACCEPTED again, `start` invokes the graph with `None` as input so LangGraph continues from the last checkpoint (the `run_tasks` node restarts and skips COMPLETED tasks).
 
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `uv run pytest tests/test_runner.py -v && uv run mypy src`
-Expected: 4 passed, clean.
+Expected: 5 passed, clean.
 
 - [ ] **Step 5: Commit**
 
@@ -1008,3 +1076,4 @@ git commit -m "docs: phase 1 complete"
 - `RequestState` carries `chat_id` and `user_id` in addition to the spec's fields, as identity for writes.
 - `reconcile` is a stub that merges dependency summaries; `pdf_lookup` and `source_search` tasks are SKIPPED with a reason.
 - The resume path appends the clarification answer to `constraints` and re-plans with the same planner call; a separate `clarify` stage is not introduced.
+- Interrupts live in a dedicated `await_user` node; the task loop is idempotent by repository status; raw_result ids are deterministic; cancellation is cooperative. These came from the LLD review of 4 November 2026 and are recorded in the decisions log.

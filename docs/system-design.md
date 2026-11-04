@@ -325,6 +325,8 @@ Dated decisions that later work must not silently reverse.
 | 4 Nov 2026 | PDF chunking is structure-aware per page (tabular rows to a dataset, headed sections, prose fallback, OCR); fixed windows are the fallback only; page number on every chunk | Reviewed Cimba file storage design; one generic chunker cuts across units of meaning |
 | 4 Nov 2026 | Object-array tool results: offload once to a raw_result Artifact, project one line per item under a token budget, model filters via `sql_query` over the JSON lines, `read_artifact` item locators, or a bounded summarize pass | Keep once, project many; relevance is pulled server-side, never by pasting the array |
 | 4 Nov 2026 | AWS throughout: Bedrock for all models (Opus 5.5 plan and cite, Haiku 5.5 execute and compress), Titan Text Embeddings V2, S3 Vectors, DynamoDB, S3; the Anthropic API fallback is dropped | One provider, one bill, one IAM boundary; learning goal |
+| 4 Nov 2026 | LLD review fixes: interrupts in a dedicated `await_user` node; idempotent task loop and deterministic raw_result and clarification ids; cooperative cancellation; `Queue` Protocol in core; SSE reads Messages and Tasks only; `Tool` Protocol from phase 1; logging with request and task ids; `config/models.yaml` | Found by walking one request end to end: a resume would have re-paid the planner call and a restart would have replayed finished tasks |
+| 4 Nov 2026 | Stack additions: `sse-starlette`, `langchain-core` types only (Bedrock through our adapter), in-memory `VectorIndex` locally and S3 Vectors in AWS, no Chroma; Docling or pdfplumber for PDFs with OCR decided at phase 5 | One vector store to evaluate; fewer abstractions between us and the model API |
 
 ## 14. Implementation phases
 
