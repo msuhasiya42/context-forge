@@ -1,18 +1,11 @@
 # ContextForge
 
-AI Research Agent with Context Engineering and Persistent Memory.
+AI Research Agent with Context Engineering and Persistent Memory. A private assistant for spreadsheet analysis, PDF questions, and later Gmail/Drive research, built to learn context engineering, LangGraph, AWS, NoSQL modeling, MCP, observability and evaluations at very low cost.
 
-Start with the [system design and implementation plan](docs/system-design-and-implementation-plan.md).
+Three documents hold everything:
 
-The project is in design/early prototype work. React and FastAPI/Python are fixed; LangGraph is the orchestration core and LangSmith is the selected observability system. AWS is the target for application data and storage, with Bedrock first for models.
+1. [System design](docs/system-design.md): what the system is, fixed choices, vocabulary, architecture, memory and context-engineering design, decisions log, phases.
+2. [Implementation plan](docs/implementation-plan.md): entities and fields, Message shapes, working brief, DynamoDB physical design, context flow and compaction, worked prompt examples, stage prompts, repository layout, phase 1 tasks.
+3. [Progress](docs/progress.md): status, open decisions, phase checklist, session log. Read this first when resuming.
 
-- [Entity model: finalized fields, relationships and lifecycles](docs/entity-model.md)
-- [Entity-model review history](docs/entity-model-handoff.md)
-- [Glossary](GLOSSARY.md)
-- [Decision history](docs/architecture-context-decisions.md)
-- [Memory research](docs/research/memory-design-research.md)
-- [Tool discovery research](docs/research/tool-discovery-research.md)
-- [Agent components research](docs/research/agent-components-research.md)
-
-The existing Python bridge/template scripts are an earlier limited AWS event-delivery prototype, not the complete implemented application.
-
+React, FastAPI/Python, LangGraph and LangSmith are fixed. DynamoDB and S3 hold application data; Bedrock is the first model provider behind an adapter. The Python scripts at the repository root are an earlier event-delivery prototype, not the application.
