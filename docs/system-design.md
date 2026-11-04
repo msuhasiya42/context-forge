@@ -324,6 +324,7 @@ Dated decisions that later work must not silently reverse.
 | 4 Nov 2026 | Eight defaults confirmed: tooling (Python 3.12, uv, pytest, ruff, mypy), local runtime until phase 9, fake model first then Bedrock, compaction numbers as config, 60-row fixture, `Chat.lastRequestStatus`, transient `activity` SSE event, `User.instructions` | Unblocks phase 1; the three new fields each have a user expectation behind them |
 | 4 Nov 2026 | PDF chunking is structure-aware per page (tabular rows to a dataset, headed sections, prose fallback, OCR); fixed windows are the fallback only; page number on every chunk | Reviewed Cimba file storage design; one generic chunker cuts across units of meaning |
 | 4 Nov 2026 | Object-array tool results: offload once to a raw_result Artifact, project one line per item under a token budget, model filters via `sql_query` over the JSON lines, `read_artifact` item locators, or a bounded summarize pass | Keep once, project many; relevance is pulled server-side, never by pasting the array |
+| 4 Nov 2026 | AWS throughout: Bedrock for all models (Opus 5.5 plan and cite, Haiku 5.5 execute and compress), Titan Text Embeddings V2, S3 Vectors, DynamoDB, S3; the Anthropic API fallback is dropped | One provider, one bill, one IAM boundary; learning goal |
 
 ## 14. Implementation phases
 

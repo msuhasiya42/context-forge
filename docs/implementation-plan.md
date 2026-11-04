@@ -723,6 +723,55 @@ Turn 1, model: `tool_use sql_query` joining debits to credits on equal amount, o
 
 Worker: validate against the sql_analysis result schema; write to `REQ#m1 / TASK#t1`, COMPLETED; append six facts and one open question to the brief; two ModelCall records, stage execute, taskId t1; drop t1's messages; t2 becomes runnable with t1's summary and transferPairs (about 400 tokens) in its dependencies block.
 
+### 9.3 One request end to end: every write, every call, the cost
+
+Recorded 4 November 2026. The request is the section 9.1 example. Chat c1 already holds a1 bank-export.xlsx with dataset a2, and card statements a4 and a6, indexed. Models are Bedrock: `anthropic.claude-opus-5-5` for plan and cite, `anthropic.claude-haiku-5-5` for execute and compress, `amazon.titan-embed-text-v2` for indexing.
+
+**1. Submit.** `POST /chats/c1/requests` with `Idempotency-Key` and `{ content, artifactIds: [a2, a4, a6] }`. The API checks the artifacts are AVAILABLE in c1 and writes one transaction; 202 with the Message.
+
+| PK | SK | Written |
+|---|---|---|
+| IDEMP#7f3c | REQ | messageId m1, ttl 24h |
+| CHAT#c1 | MSG#m1 | kind request, status ACCEPTED |
+| USER#u1 | CHAT#c1 | updatedAt, lastRequestStatus ACCEPTED |
+
+**2. Dispatch.** Stream insert of MSG#m1, Lambda filters kind=request, SQS, worker. Conditional ACCEPTED to RUNNING; a duplicate delivery fails the condition and is dropped. The client opens `GET .../requests/m1/events`; the handler polls REQ#m1 and the chat's messages once per second and emits `request RUNNING`.
+
+**3. Call 1, plan, Opus.** Context about 4,500 tokens: memory file (cached), plan prompt, request, preferences, sources block (a2 columns, types, samples, rows, period; a4 and a6 per-page one-line index). Output about 250 tokens: a clarification, "which account ids are yours". Writes MSG#m2 clarification, m1 WAITING_USER, CALL#k1, checkpoint with `pendingInterrupt {clarification, m2}`. SSE emits `message m2`, `request WAITING_USER`, closes.
+
+**4. Reply.** `POST .../requests/m1/replies { inReplyToMessageId: m2, content }`. API verifies m2 is pending, writes MSG#m3, m1 RUNNING, resume to SQS. Worker resumes from the checkpoint, reads `nextAction`, appends the answer to `constraints`. Client reopens SSE.
+
+**5. Call 2, plan, Opus.** About 4,800 in, 900 out. The six-task plan of 9.1. Plan gate verifies inputs and dependencies, writes TASK#t1..t6 PLANNED, CALL#k2. SSE emits six `task` events.
+
+**6. Tasks, Haiku, one subgraph each, sequential in phase 1.** Fixed part of each call about 3,500 tokens (memory cached, execute prompt, constraints, task, inputs, dependency summaries) plus the loop's messages.
+
+| Task | Calls | Loop | Tool result and truncation |
+|---|---|---|---|
+| t1 transfers | 3 | pair query; check rows 801/805; final | 7 rows, 2 rows; under the cap |
+| t2 monthly deltas | 3 | totals excluding t1 pairs; transactions behind increases; final | 12 rows; 312 rows: 50 kept, rest to raw_result a7, stub "262 more rows in a7" |
+| t3 recurring merchants | 2 | query; final | 9 rows |
+| t4 statements | 3 | `search_chunks` a4; a6; final | 4 chunks each, page refs |
+| t5 refund candidates | 2 | query; final | 11 rows |
+| t6 reconcile | 3 | bills against payments; refunds against credits; final | 2 rows, 3 rows |
+
+Per task: RUNNING then COMPLETED with the result; 2 or 3 CALL items with taskId; up to six facts appended to the brief with evidence refs; the task's messages dropped. t2 gets t1's summary and pairs, about 400 tokens. Compaction level 1 fires only if a loop passes its budget; no level 3 call in this run. New Artifact: a7 raw_result. No deliverable.
+
+**7. Calls 19 and 20, cite, Opus.** Input is the brief's facts and open questions. Call 19 reads the exact rows and pages behind each fact through `read_artifact`; call 20 returns claims with evidence refs and uncertainties. About 6k and 11k in, 0.4k and 1.6k out.
+
+**8. Report.** The report node writes MSG#m8 kind report (claims, inputsConsulted a2 a4 a6 a7, uncertainties, coverage with the status-check date). No LLM call. m1 COMPLETED, Chat lastRequestStatus COMPLETED. SSE emits `message m8`, `request COMPLETED`, closes.
+
+Writes for the request: 1 idempotency record, 4 Messages, 6 Tasks, 20 ModelCalls, 1 Artifact, 3 Chat updates.
+
+| Stage | Bedrock model | Calls | Input | Output | Cost |
+|---|---|---|---|---|---|
+| plan | anthropic.claude-opus-5-5 | 2 | 9,300 | 1,150 | $0.06 |
+| execute | anthropic.claude-haiku-5-5 | 16 | 96,000 | 6,400 | $0.013 |
+| cite | anthropic.claude-opus-5-5 | 2 | 17,000 | 2,000 | $0.11 |
+| compress | anthropic.claude-haiku-5-5 | 0 | | | |
+| Total | | 20 | 122,000 | 9,550 | about $0.18 |
+
+With prompt caching on the memory file and stage prompts: about $0.15. Opus is over ninety percent of the cost from four calls. Plan and cite on Sonnet 5.5 would halve it to about $0.09; phase 8 runs that experiment against the eval. Indexing the two statements at ingestion costs under a cent on Titan (about 15k tokens at $0.02 per million). List prices on 4 Nov 2026: Opus 5.5 $4 in, $20 out, cache read $0.20; Haiku 5.5 $0.10, $0.50, $0.01, per million tokens; Bedrock on-demand matches list prices, to be reverified in the account region before phase 2.
+
 ## 10. Stage prompts, version 1
 
 Stored as versioned files under `prompts/`; `contextVersion` on ModelCall records which versions were used.

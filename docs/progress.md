@@ -26,7 +26,7 @@ All eight defaults below were confirmed by Mayur and are recorded in the decisio
 |---|---|---|
 | 1 | Repository and tooling | Python 3.12, `uv` with lockfile, `pytest`, `ruff`, `mypy`; packages `core`, `worker`, `api` |
 | 2 | What phases 1 to 8 run against | SQLite checkpointer, in-memory repositories, local disk storage; no AWS until phase 9 |
-| 3 | First model provider | Scripted fake model in phase 1; then Bedrock after verifying model access in the account and region, or the Anthropic API directly if account work blocks |
+| 3 | First model provider | Scripted fake model in phase 1; then Bedrock only (confirmed 4 Nov 2026: Bedrock, DynamoDB, S3, S3 Vectors, Titan embeddings), after verifying model access in the account and region |
 | 4 | Compaction numbers | Task subgraphs isolated; 40k cap per call; last 6 messages verbatim; all config |
 | 5 | First fixture | 60-row synthetic dataset, two transfers and one card settlement planted; the spending request |
 | 6 | Waiting badge (expectation 8) | `Chat.lastRequestStatus`, worker-written; built in phase 6 |
