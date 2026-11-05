@@ -66,6 +66,11 @@ Agreed names. "Avoid" lists names that were considered and rejected.
 | Context snapshot | The instructions, evidence, messages and tools presented to one ModelCall; observed in LangSmith | A stored record in early phases |
 | Evidence reference | A link to an Artifact plus a locator (page, row, cell, range, message, section) supporting a claim | An unrelated attachment as proof |
 | KnowledgeBase | Not an entity. Searchable sources are Artifacts with an index status; embedding settings are application config | A collection record before a requirement exists |
+| Fact | A statement a Task established, returned by the model in the task result with its own evidence references; at most six per task, at most thirty on the working brief, oldest dropped by code | A sentence split from a summary; a fact without evidence |
+| Prior context | The claims of the last two reports in the same Chat, shown to the planner for follow-up requests | Transcripts or earlier clarifications |
+| Call budget | The maximum number of model calls one Request may make (50); checked before every call | A retry counter as the spend guard |
+| Deadline | Time limits: per model call (60 s Haiku, 120 s Opus) and per Request (15 minutes from RUNNING) | An open-ended run |
+| Reaper | The lazy rule by which any API read of a RUNNING Request past its deadline marks it FAILED | A cron job in early phases; "run" as a noun for one attempt |
 
 ## 4. Architecture
 
@@ -327,6 +332,9 @@ Dated decisions that later work must not silently reverse.
 | 4 Nov 2026 | AWS throughout: Bedrock for all models (Opus 5.5 plan and cite, Haiku 5.5 execute and compress), Titan Text Embeddings V2, S3 Vectors, DynamoDB, S3; the Anthropic API fallback is dropped | One provider, one bill, one IAM boundary; learning goal |
 | 4 Nov 2026 | LLD review fixes: interrupts in a dedicated `await_user` node; idempotent task loop and deterministic raw_result and clarification ids; cooperative cancellation; `Queue` Protocol in core; SSE reads Messages and Tasks only; `Tool` Protocol from phase 1; logging with request and task ids; `config/models.yaml` | Found by walking one request end to end: a resume would have re-paid the planner call and a restart would have replayed finished tasks |
 | 4 Nov 2026 | Stack additions: `sse-starlette`, `langchain-core` types only (Bedrock through our adapter), in-memory `VectorIndex` locally and S3 Vectors in AWS, no Chroma; Docling or pdfplumber for PDFs with OCR decided at phase 5 | One vector store to evaluate; fewer abstractions between us and the model API |
+| 5 Nov 2026 | Grill session, limits: one automatic retry per task then FAILED; 50 model calls per request; 2 to 6 tasks per request; 6 tool calls per task; deadlines 60 s Haiku, 120 s Opus, 15 min per request; $1.00 spend cap with unknown usage charged at the stage estimate; prices in `config/models.yaml`; five tasks in flight | Bounded cost and runaway protection; every limit is config |
+| 5 Nov 2026 | Grill session, behaviour: no retry endpoint (retry from the failure point is a later extension); partial results still produce a report with failed tasks under uncertainties, FAILED only when the plan fails or every task fails; at most two clarifications then plan with stated assumptions; facts cap 30 on the brief dropped oldest by code, Task.result keeps all; planner prior context is the claims of the last two reports; idempotency key scoped per user; no "run" noun | Predictable behaviour the eval can check; code trims structured fields, a model summarises only transcripts |
+| 5 Nov 2026 | Grill session, structure: the model returns `facts` with their own evidence refs in each task result (max six, refs validated against task inputs); LangGraph Functional API for request orchestration (plan, interrupt, dependency-driven parallel tasks, cite, report) with the Graph API for the loop inside one task; report prose assembled by code in phase 1, model narrative from phase 3 with uncertainties and coverage always appended by code; lazy reaper with task status changes as the request heartbeat | Functional API gives parallelism by dependency, per-task replay and interrupt natively, removing the `await_user` node and the skip-on-replay rule; deterministic artifact ids stay because an unfinished task re-runs |
 
 ## 14. Implementation phases
 

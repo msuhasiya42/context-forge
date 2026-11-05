@@ -137,7 +137,7 @@ m9  user       request                  messageId=m9   (new work)
 | dependsOnTaskIds | no | Ordering and branch scheduling |
 | status | yes | PLANNED, RUNNING, COMPLETED, FAILED, SKIPPED, CANCELLED |
 | attempt | yes | Transient retry versus replan; starts at 1 |
-| result | when COMPLETED | `{ summary, structuredData, evidenceRefs[], artifactRefs[], uncertainties[], coverage }` |
+| result | when COMPLETED | `{ summary, facts[{text, evidenceRefs[]}], structuredData, evidenceRefs[], artifactRefs[], uncertainties[], coverage }`. `facts` (max six, refs validated against inputArtifactIds) added 5 Nov 2026; they are what the brief accumulates |
 | failureReason | when FAILED | Evidence-gap evaluation and reporting |
 | createdAt | yes | Audit |
 | updatedAt | yes | Progress and stale-task reconciliation |
