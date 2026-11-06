@@ -19,7 +19,7 @@ Defined once and embedded, never stored as separate records.
 ```text
 EvidenceRef
   artifactId          which stored source; Artifacts are immutable, so the id is the exact version
-  locator             { kind: page | row | cell | range | message | section, value }
+  locator             { kind: page | row | cell | range | message | section | url, value }   url added for web_search (phase 6)
   excerpt?            short quoted text shown to the user
 
 ArtifactRef
@@ -131,7 +131,7 @@ m9  user       request                  messageId=m9   (new work)
 |---|---|---|
 | taskId | yes | Identity; ULID gives planning order |
 | requestMessageId | yes | Owning request |
-| kind | yes | sql_analysis, pdf_lookup, source_search, reconcile. Selects the validator for `result.structuredData` and the tool set |
+| kind | yes | sql_analysis, pdf_lookup, source_search, reconcile; web_search from phase 6. Selects the validator for `result.structuredData` and the tool set |
 | goal | yes | The planner's statement of what the task must establish |
 | inputArtifactIds | yes | Artifacts this task may read, set by the planner; the plan gate verifies each belongs to the request's chat |
 | dependsOnTaskIds | no | Ordering and branch scheduling |
@@ -210,7 +210,7 @@ Not included: isInternal, allowed/enabled auth types, admin settings, sharing, a
 | externalAccountId | yes | Which account, e.g. the Gmail address |
 | grantedScopes | no | May be one coarse value for servers like Box |
 | status | yes | ACTIVE, REVOKED. Revocation surfaces as an error on the next call |
-| credentialRef | yes | Reference to the stored tokens; the store (secret manager or KMS-encrypted attribute) is chosen at phase 7 |
+| credentialRef | yes | Reference to the stored tokens; the store (secret manager or KMS-encrypted attribute) is chosen at phase 8 |
 | createdAt | yes | When connected |
 | updatedAt | yes | Status change |
 
@@ -369,7 +369,7 @@ REQ#m1      CALL#k1       stage=plan  model=bedrock/…  usage={inputTokens:4200
 
 ### 7.8 Repository rule
 
-No code outside the storage module builds a key string. Every entity exposes `save`, `get` and `list_by_parent`, e.g. `messages.list_by_chat(chatId)`. The interface has an in-memory implementation for tests and phase 1, and a DynamoDB implementation from phase 9. A new index, or a move to another store, touches one module.
+No code outside the storage module builds a key string. Every entity exposes `save`, `get` and `list_by_parent`, e.g. `messages.list_by_chat(chatId)`. The interface has an in-memory implementation for tests and phase 1, and a DynamoDB implementation from phase 10. A new index, or a move to another store, touches one module.
 
 ### 7.9 Postgres equivalents, for orientation
 
@@ -483,19 +483,19 @@ Recorded 4 November 2026. Every path to bytes goes through a tool with a cap or 
 
 | Type | Stored as | Location | How retrieved |
 |---|---|---|---|
-| xlsx or csv upload | original bytes, unchanged | S3 (local disk before phase 9); Artifact `kind=upload` | never read by the model; kept for re-ingestion and download |
+| xlsx or csv upload | original bytes, unchanged | S3 (local disk before phase 10); Artifact `kind=upload` | never read by the model; kept for re-ingestion and download |
 | Dataset from a spreadsheet | typed Parquet table, one row per transaction, `row_id` added | S3; Artifact `kind=dataset` with `derivedFromArtifactId` | SQL via DuckDB (`sql_query`), read-only, 50-row cap, exact aggregates in SQL |
 | PDF upload | original bytes | S3; Artifact `kind=upload` | page slice on demand via `read_artifact(id, page)` |
 | PDF chunks | text chunks with page number, chunk index, artifact id | S3 Vectors (Bedrock Titan embeddings) with the chunk text alongside; `indexStatus` on the Artifact | hybrid: BM25 keyword match plus vector top-k, merged, reranked, top 5 returned with page refs (`search_chunks`); owner filter applied before ranking |
 | Email, Drive file | not stored | the provider, through the MCP server with the user's OAuth connection | the integration's own tool, chosen by lexical tool search over the catalog; results bounded by the tool |
 | Query output over 50 rows | JSON lines, full result | S3; Artifact `kind=raw_result` | row slice on demand via `read_artifact(id, rows)`; the stub in context names the artifact and the omitted count |
 | Generated file (xlsx, csv) | bytes | S3; Artifact `kind=deliverable`, linked from the report | download via signed URL; not read back by the model |
-| Working brief | LangGraph state, JSON | checkpointer tables: SQLite locally, DynamoDB from phase 9 | loaded whole into every call; `messages` compacted when over budget; nothing searched |
+| Working brief | LangGraph state, JSON | checkpointer tables: SQLite locally, DynamoDB from phase 10 | loaded whole into every call; `messages` compacted when over budget; nothing searched |
 | Task results | structured JSON, no row sets | DynamoDB `REQ#<id> / TASK#<id>` | by dependency only: a task gets its dependencies' summaries, about 400 tokens each |
 | Messages and reports | JSON records | DynamoDB `CHAT#<id> / MSG#<id>` | listed by chat in ULID order; prior reports go into the planner's prior-context section |
 | Standing instructions, preferences | text and small JSON on the User record | DynamoDB `USER#<id> / PROFILE` | always loaded, memory section of every call |
 | `agent-memory.md` | versioned file | repository, `prompts/` | always loaded, first system block, cached |
-| Learned facts and episodes (phase 6) | `AgentMemoryRecord`, one fact per record with provenance and expiry | DynamoDB under `USER#<id>` | keyword or embedding match on the record text, top-k |
+| Learned facts and episodes (phase 7) | `AgentMemoryRecord`, one fact per record with provenance and expiry | DynamoDB under `USER#<id>` | keyword or embedding match on the record text, top-k |
 | Integration tool catalog | name, description, input schema per tool | DynamoDB `INT#<id> / TOOL#<name>` | lexical rank on name and description, top 3 to 5 schemas loaded into the call |
 
 ### 8.8 Chunking policy for PDFs (phase 5)
@@ -557,7 +557,7 @@ Rules:
 - The ToolMessage metadata carries `artifact_id`, `item_count` and `shown`, so compaction level 1 can replace the content with one line and the handle survives.
 - Tool output is data. Text inside an item is quoted, never executed as an instruction.
 
-What exists: phase 1 ships offload, cap and stub for rows. New for objects, in phase 3 with the real `sql_query` and phase 7 when MCP tools return object arrays: the projection rule, the token budget on the projection, `read_artifact` item locators, and raw_result JSON lines as a SQL dataset.
+What exists: phase 1 ships offload, cap and stub for rows. New for objects, in phase 3 with the real `sql_query` and phase 6 when MCP search tools return object arrays: the projection rule, the token budget on the projection, `read_artifact` item locators, and raw_result JSON lines as a SQL dataset.
 
 ## 9. Model split and worked calls
 
@@ -770,7 +770,7 @@ Writes for the request: 1 idempotency record, 4 Messages, 6 Tasks, 20 ModelCalls
 | compress | anthropic.claude-haiku-5-5 | 0 | | | |
 | Total | | 20 | 122,000 | 9,550 | about $0.18 |
 
-With prompt caching on the memory file and stage prompts: about $0.15. Opus is over ninety percent of the cost from four calls. Plan and cite on Sonnet 5.5 would halve it to about $0.09; phase 8 runs that experiment against the eval. Indexing the two statements at ingestion costs under a cent on Titan (about 15k tokens at $0.02 per million). List prices on 4 Nov 2026: Opus 5.5 $4 in, $20 out, cache read $0.20; Haiku 5.5 $0.10, $0.50, $0.01, per million tokens; Bedrock on-demand matches list prices, to be reverified in the account region before phase 2.
+With prompt caching on the memory file and stage prompts: about $0.15. Opus is over ninety percent of the cost from four calls. Plan and cite on Sonnet 5.5 would halve it to about $0.09; phase 9 runs that experiment against the eval. Indexing the two statements at ingestion costs under a cent on Titan (about 15k tokens at $0.02 per million). List prices on 4 Nov 2026: Opus 5.5 $4 in, $20 out, cache read $0.20; Haiku 5.5 $0.10, $0.50, $0.01, per million tokens; Bedrock on-demand matches list prices, to be reverified in the account region before phase 2.
 
 ## 10. Stage prompts, version 1
 
@@ -841,9 +841,9 @@ Numbered as agreed in review. "Model change" marks items that add a field or eve
 | 3 | All artifacts attached to this chat, on the right | E11 | v1 |
 | 4 | Each request is a collapsible timeline: clarification, my answer, tasks with status and a one-line result, proposed action and my decision, outcome, report at the bottom. Live over SSE, identical after reload | E5, E8, E3 | v1 |
 | 5 | Upload pdf, xlsx, csv to a chat; remove when not needed | E9, E10, E13 | v1 |
-| 6 | Procedural memory: standing instructions for the whole app | E14; see 22 | phase 6 |
+| 6 | Procedural memory: standing instructions for the whole app | E14; see 22 | phase 7 |
 | 7 | New chat, rename, delete (archive) | E1, E15, E16 | v1 |
-| 8 | Waiting badge on chats whose latest request is WAITING_USER | `Chat.lastRequestStatus`, written by the worker | phase 6, model change |
+| 8 | Waiting badge on chats whose latest request is WAITING_USER | `Chat.lastRequestStatus`, written by the worker | phase 7, model change |
 | 9 | Follow-up requests build on earlier reports in the same chat | context builder includes prior reports; no endpoint | v1 |
 | 10 | Timeline persists: every step is a stored Message or Task | section 3 | v1 |
 | 11 | Answer clarifications and decide approvals inline | E7 | v1 |
@@ -857,7 +857,7 @@ Numbered as agreed in review. "Model change" marks items that add a field or eve
 | 19 | Upload status: UPLOADING, processing, ready, failed with reason | Artifact.status and indexStatus; derived Artifact appears in E11 | v1 |
 | 20 | Remove sets DELETED on the upload and its derived dataset; refused while a running request lists it as input | E13 | v1 |
 | 21 | Reuse a file from another chat without re-uploading | GSI1, access pattern 7 | later, PDF retrieval phase |
-| 22 | Preferences (currency, timezone) and standing instructions editable | E14; `User.instructions`, injected into the memory section of every call | phase 6, model change |
+| 22 | Preferences (currency, timezone) and standing instructions editable | E14; `User.instructions`, injected into the memory section of every call | phase 7, model change |
 | 23 | Sign in, sign out, who am I | blocked on the identity decision | v1 once decided |
 | 24 | Connect Gmail or Drive, list and disconnect accounts | connection endpoints | later, MCP phase |
 
@@ -1090,7 +1090,7 @@ Rules:
 
 ## 12. Repository layout and tooling
 
-Revised 4 November 2026 after the LLD review. Layering rule: `core` imports nothing of ours; `api`, `worker` and `infra` import `core`; anything that touches a network or a disk is a Protocol in `core` with an in-memory implementation beside it and an AWS implementation in `infra`, selected by settings. Phases 1 to 8 run on the in-memory and local-disk implementations.
+Revised 4 November 2026 after the LLD review. Layering rule: `core` imports nothing of ours; `api`, `worker` and `infra` import `core`; anything that touches a network or a disk is a Protocol in `core` with an in-memory implementation beside it and an AWS implementation in `infra`, selected by settings. Phases 1 to 9 run on the in-memory and local-disk implementations.
 
 ```text
 context-forge/
@@ -1099,7 +1099,7 @@ context-forge/
     budgets.yaml          cap, allowance, margin, keep-last, row cap, facts cap
     models.yaml           stage -> Bedrock model id, effort, max tokens
     embedding.yaml        model id, chunk limits (phase 5)
-    integrations.yaml     Integration records (phase 7)
+    integrations.yaml     Integration records; public stdio servers with auth kind none (phase 6), OAuth ones (phase 8)
   prompts/                agent-memory.md  plan.1.md  execute.1.md  cite.1.md  compress.1.md
   fixtures/               transactions_sep_oct.csv  request.txt  statements/ (phase 5)
   evals/                  cases/  judge.md  run_evals.py (phase 2)
@@ -1116,8 +1116,8 @@ context-forge/
       context/builder.py  tool_results.py  compaction.py  eight sections; cap, offload, project, stub; levels 1 and 3
       services/submit.py  replies.py  artifacts.py  usage.py   idempotent submit; interrupt verification; upload and delete rules; usage sums
     worker/
-      deps.py  graph.py  runner.py  consumer.py           wiring; plan -> (await_user | plan_gate) -> run_tasks -> cite -> report; start/resume/cancel; queue loop
-      nodes/plan.py  execute.py  cite.py  report.py  stubs.py  guards.py
+      deps.py  workflow.py  runner.py  consumer.py        wiring; the @entrypoint: plan -> interrupt -> gate -> task waves -> cite -> report; start/resume/restart; queue loop
+      stages/plan.py  execute.py  cite.py  report.py  stubs.py  guards.py   plain stage functions, wrapped as @tasks by workflow.py; execute.py holds the Graph API loop for one task
       tools/sql_query.py  read_artifact.py  search_chunks.py  mcp.py  registry.py
     api/
       app.py  deps.py  auth.py  errors.py                 app factory, dependency wiring, session, one error shape
@@ -1126,22 +1126,22 @@ context-forge/
       dynamodb/  s3.py  bedrock.py  sqs.py  langsmith.py  ingestion/{spreadsheet.py, pdf.py, chunkers/}
   tests/                  conftest.py  helpers.py  core/  worker/  api/  infra/  e2e/
   scripts/                run_local.py  seed_fixture.py
-  infra-aws/              CDK (phase 9)
-  docker/                 Dockerfile.api  Dockerfile.worker  compose.yaml (phase 9)
+  infra-aws/              CDK (phase 10)
+  docker/                 Dockerfile.api  Dockerfile.worker  compose.yaml (phase 10)
   docs/                   system-design.md  implementation-plan.md  progress.md  superpowers/plans/
 ```
 
 Rules fixed by the LLD review:
 
-- An interrupt lives in its own node (`await_user`) whose only statement is `interrupt()`. LangGraph re-runs a node from its start on resume, so a node that also calls the model would pay that call twice.
-- Writes inside replayable nodes are idempotent: raw_result artifact ids derive from `(taskId, toolCallId)`; clarification Message ids derive from the request and attempt; the task loop skips Tasks already COMPLETED or SKIPPED in the repository. Later, one node per task through `Send` replaces the loop and adds parallel branches.
+- Orchestration is the LangGraph Functional API (revised 5 and 6 November 2026). The entrypoint re-runs from its first line on resume and completed `@task` results are restored by name and call order, so every model call and repository write lives inside a task, the entrypoint body is deterministic given restored results, and `interrupt()` is called only in the entrypoint. Tasks run in dependency-driven waves, five in flight, futures created and awaited in `taskId` order.
+- Writes a re-run can repeat are idempotent: raw_result artifact ids derive from `(taskId, toolCallId)`, clarification Message ids from the request and attempt, the report Message id from the request; the plan gate and the execute stage return the existing record when the repository already shows the outcome (a crash between a write and its checkpoint). A crashed request is restarted by invoking the same thread with `None`.
 - Cancellation is cooperative: nodes read the request status before every model call and before each task and stop on CANCELLED. The API sets the status; the worker honours it.
 - The SSE handler and the API read Messages and Tasks only; nothing in `RequestState` is shown to the user.
 - Every log line carries `requestMessageId` and, inside a task, `taskId`; the LangSmith run id joins them when present. LangSmith is a wrapper on the graph entry and on `ModelClient.invoke`, with `thread_id = requestMessageId`, and a single masking hook in `infra/langsmith.py`. Budget checks never read LangSmith.
-- The transient `activity` SSE event works only while API and worker share a process (phases 4 to 8). In phase 9 it is dropped, or carried by a short-TTL DynamoDB item if it proves worth keeping.
+- The transient `activity` SSE event works only while API and worker share a process (phases 4 to 9). In phase 10 it is dropped, or carried by a short-TTL DynamoDB item if it proves worth keeping.
 - Routes call services; services hold the rules and are tested without HTTP.
 
-Python 3.12, `uv` with a committed lockfile, `pytest`, `ruff`, `mypy` strict. Tests before implementation for every behavior in section 13. No AWS resources before phase 9; SQLite checkpointer, in-memory repositories and local disk storage until then.
+Python 3.12, `uv` with a committed lockfile, `pytest`, `ruff`, `mypy` strict. Tests before implementation for every behavior in section 13. No AWS resources before phase 10; SQLite checkpointer, in-memory repositories and local disk storage until then.
 
 ## 13. Phase 1 task list
 
@@ -1154,8 +1154,8 @@ Each task is small enough to test on its own and ends with its test passing.
 | 3 | Repository interface and in-memory implementation for Message, Task, ModelCall, Artifact | `list_by_chat`, `list_by_request` return in ULID order; conditional status transition rejects a stale expected status |
 | 4 | Model boundary interface and a scripted fake model that returns canned PlannerOutput and tool calls | A ModelCall record is written per invocation with stage, contextVersion and usage; a replay writes none |
 | 5 | Context Builder: assembles the eight sections in order with token estimates; Tool Result Processor with the 50-row cap and artifact offload | A 1,240-row fake result yields 50 rows plus a raw_result Artifact and a stub |
-| 6 | Graph: plan node, plan gate, one sql_analysis task subgraph with a fake `sql_query` tool, reconcile stub, cite stub, report node | The fixture request produces six Task records and one report Message with claims |
-| 7 | Checkpointing with SQLite; interrupt for clarification; resume by messageId | Kill the process mid-run; resume completes with the same thread id; `nextAction` is read first |
+| 6 | Workflow: plan stage, plan gate, one sql_analysis task loop with the fixture `sql_query` tool, reconcile stub, cite stub, report; tasks in dependency waves | The fixture request produces six Task records and one report Message with claims; independent tasks run concurrently |
+| 7 | Checkpointing with SQLite; interrupt for clarification; resume by messageId; restart after a crash | Kill the process mid-run; the requeued start completes without re-paying finished tasks; a resume answers the pending interrupt and carries `nextAction` |
 | 8 | Duplicate dispatch protection: conditional ACCEPTED to RUNNING transition; idempotent submit | Two deliveries of the same request start one run; two submits with one client key create one Message |
 | 9 | Compaction levels 1 and 3 with a low cap in tests | Constraints, facts and nextAction survive three compactions; no tool call is separated from its result |
 | 10 | Fixture: 60-row synthetic dataset with two transfers and one card settlement planted; the spending request | The fake tool answers t1 from the fixture and the planted pairs appear in the result |
@@ -1168,5 +1168,5 @@ Phase 1 ends when a request completes end to end on the fake model and fake tool
 - Artifact `supersedesArtifactId` and `contentHash` for the newer-statement scenario, after phase 3.
 - Report versioning only if revisions must coexist.
 - Tool retrieval aids (tags, aliases, companions, embeddings) only after measured recall failures.
-- Batched multi-action approval cards at phase 10 if multi-write turns appear.
+- Batched multi-action approval cards at phase 11 if multi-write turns appear.
 - A Chat summary field only when a long chat measurably loses context.

@@ -1,10 +1,10 @@
 # ContextForge: progress and next steps
 
-Updated: 4 November 2026. This is the living status document. Each working session appends to the log at the bottom and updates the checklist. The design is in [system-design.md](system-design.md); the build plan is in [implementation-plan.md](implementation-plan.md).
+Updated: 6 November 2026. This is the living status document. Each working session appends to the log at the bottom and updates the checklist. The design is in [system-design.md](system-design.md); the build plan is in [implementation-plan.md](implementation-plan.md).
 
 ## Where things stand
 
-Phase 0, design contracts, is complete and all open decisions are confirmed. Phase 1 task 1 can start. Nothing has been built: no application code beyond an old prototype, no AWS resources, no git history before 4 November 2026.
+Phase 0, design contracts, is complete and all open decisions are confirmed. The phase 1 plan is final (Functional API) and phase 1 task 1 can start. Nothing has been built: no application code beyond an old prototype. AWS resources exist in Sydney (table below) but phases 1 to 9 do not use them.
 
 Decided and documented:
 
@@ -16,7 +16,8 @@ Decided and documented:
 - Model split and worked planner and execute calls (implementation-plan section 9).
 - Stage prompts v1 (implementation-plan section 10).
 - API and SSE contract with the 24 user expectations (implementation-plan section 11).
-- Phase 1 task list with done criteria (implementation-plan section 13).
+- Phase 1 task list with done criteria (implementation-plan section 13) and the task-by-task plan at `docs/superpowers/plans/2026-11-04-phase-1-engine.md`.
+- The golden request `golden-001` (`evals/cases/golden-001.md`) and the eleven-phase split (system-design section 14).
 
 ## Decisions confirmed 4 November 2026
 
@@ -25,37 +26,38 @@ All eight defaults below were confirmed by Mayur and are recorded in the decisio
 | # | Decision | Confirmed |
 |---|---|---|
 | 1 | Repository and tooling | Python 3.12, `uv` with lockfile, `pytest`, `ruff`, `mypy`; packages `core`, `worker`, `api` |
-| 2 | What phases 1 to 8 run against | SQLite checkpointer, in-memory repositories, local disk storage; no AWS until phase 9 |
+| 2 | What phases 1 to 9 run against | SQLite checkpointer, in-memory repositories, local disk storage; no AWS until phase 10 |
 | 3 | First model provider | Scripted fake model in phase 1; then Bedrock only (confirmed 4 Nov 2026: Bedrock, DynamoDB, S3, S3 Vectors, Titan embeddings), after verifying model access in the account and region |
 | 4 | Compaction numbers | Task subgraphs isolated; 40k cap per call; last 6 messages verbatim; all config |
 | 5 | First fixture | 60-row synthetic dataset, two transfers and one card settlement planted; the spending request |
-| 6 | Waiting badge (expectation 8) | `Chat.lastRequestStatus`, worker-written; built in phase 6 |
+| 6 | Waiting badge (expectation 8) | `Chat.lastRequestStatus`, worker-written; built in phase 7 |
 | 7 | Tool-call activity (expectation 15) | Transient `activity` SSE event, not persisted; built in phase 4 |
-| 8 | Standing instructions (expectation 22) | `User.instructions` injected into the memory section; `agent-memory.md` stays system-owned; built in phase 6 |
+| 8 | Standing instructions (expectation 22) | `User.instructions` injected into the memory section; `agent-memory.md` stays system-owned; built in phase 7 |
 
 Still open, not blocking: AWS compute and hosting choice; identity service; credential store for connections (secret manager versus KMS-encrypted attribute); the first ten evaluation requests and LangSmith key (both phase 2); region reverification, $5 usage alert and MFA before any AWS provisioning.
 
 ## Phase checklist
 
-Phases are defined in system-design section 14 (revised 4 Nov 2026 for learning value).
+Phases are defined in system-design section 14 (revised 4 Nov 2026 for learning value; eleven phases since 6 Nov 2026).
 
 | Phase | Status |
 |---|---|
 | 0. Design contracts | Done 4 Nov 2026 |
-| 1. Engine, local | Not started. Tasks 1 to 10 in implementation-plan section 13 |
+| 1. Engine, local | Not started. Twelve tasks in `docs/superpowers/plans/2026-11-04-phase-1-engine.md` |
 | 2. Real model, tracing, first eval | Not started |
 | 3. Spreadsheet slice | Not started |
 | 4. Thin API and UI | Not started |
 | 5. PDF retrieval | Not started |
-| 6. Memory | Not started |
-| 7. MCP both ways | Not started |
-| 8. Context stress, cost, latency, incident | Not started |
-| 9. AWS persistence | Not started |
-| 10. Writes and hosting | Not started |
+| 6. Public MCP (fetch, DuckDuckGo, time; `web_search`) | Not started |
+| 7. Memory | Not started |
+| 8. OAuth MCP and our own server | Not started |
+| 9. Context stress, cost, latency, incident | Not started |
+| 10. AWS persistence | Not started |
+| 11. Writes and hosting | Not started |
 
 ## AWS resources (created 6 November 2026, Sydney ap-southeast-2)
 
-Account 441186132531, project "Proof of Concept". Mumbai is unavailable on the account's plan; Sydney was chosen instead. Created through the console and CloudShell, to be imported into CDK in phase 10.
+Account 441186132531, project "Proof of Concept". Mumbai is unavailable on the account's plan; Sydney was chosen instead. Created through the console and CloudShell, to be imported into CDK in phase 11.
 
 | Resource | Name | Settings |
 |---|---|---|
@@ -66,11 +68,11 @@ Account 441186132531, project "Proof of Concept". Mumbai is unavailable on the a
 | Bedrock | no setup needed | models auto-enable on first invoke; Claude 5.5 via inference profiles `au.anthropic.claude-opus-5-5`, `au.anthropic.claude-haiku-5-5` (or `global.`); `amazon.titan-embed-text-v2:0` on-demand in-region |
 | IAM policy and user | `contextforge-dev` | created by Mayur in CloudShell; local CLI profile `contextforge` configured; verified read and write access to the table, queue and bucket |
 
-Not created on purpose: the stream-to-SQS Lambda and service roles (phase 10, CDK).
+Not created on purpose: the stream-to-SQS Lambda and service roles (phase 11, CDK).
 
 ## Legacy files
 
-`bridge.py`, `build_template.py`, `test_bridge.py`, `verify_delivery.py` and `prototype.template.json` are an earlier, narrow DynamoDB-to-SQS event-delivery prototype using the old Job terminology. They are not the application and are not integrated. Keep them as reference until phase 9 deliberately replaces or removes them. `evidence/budget-created.jpg` records the $5 AWS usage alert.
+`bridge.py`, `build_template.py`, `test_bridge.py`, `verify_delivery.py` and `prototype.template.json` are an earlier, narrow DynamoDB-to-SQS event-delivery prototype using the old Job terminology. They are not the application and are not integrated. Keep them as reference until phase 10 deliberately replaces or removes them. `evidence/budget-created.jpg` records the $5 AWS usage alert.
 
 ## Rules for whoever picks this up
 
@@ -89,3 +91,4 @@ Not created on purpose: the stream-to-SQS Lambda and service roles (phase 10, CD
 - **5 Nov 2026.** Grill session (grill-with-docs run by hand): sixteen decisions on limits, behaviour and structure recorded in the decisions log; five glossary terms added; `facts` added to Task.result. Orchestration moves to the LangGraph Functional API; phase 1 plan tasks 8 to 10 to be rewritten accordingly before build. Next: backend runtime architecture, then rewrite the plan, then start phase 1.
 - **6 Nov 2026.** AWS setup through Claude in Chrome (Brave) and CloudShell. Mumbai unavailable on the account plan; Sydney chosen. Created the DynamoDB table with GSI1, stream, PITR and deletion protection; two SQS queues; the S3 bucket with the raw_result lifecycle rule. Bedrock needs no model-access step. The IAM policy and user creation was blocked by the Claude Code permission classifier (credential grant), so Mayur runs those commands himself. Next: Mayur creates the IAM user and an access key, configures the `contextforge` CLI profile, then phase 1 task 1.
 - **6 Nov 2026, later.** IAM user created and the `contextforge` profile verified against the table, queue and bucket. Go-ahead given for a paid smoke test (one Titan call, one Haiku call); both were refused by AWS with "your account is currently being verified, normally under 2 hours". No charge. Retry the smoke test before phase 2; phase 1 needs no AWS.
+- **6 Nov 2026, planning closed.** Recorded the eleven-phase split (public credential-free MCP as phase 6 with `web_search`, `auth.kind: none`, `url` locator) and the golden request `golden-001` as the headline case and per-phase yardstick. Rewrote phase 1 plan tasks 8 to 10 around the LangGraph Functional API: stages as plain functions wrapped as tasks, interrupt in the entrypoint only, dependency waves with five in flight, crash restart with `None`, grill limits in `config/budgets.yaml`; added the facts field to TaskResult and seven review-focus items. Bedrock smoke test still pending account verification. Next: phase 1 task 1 (project skeleton) once Mayur says go.

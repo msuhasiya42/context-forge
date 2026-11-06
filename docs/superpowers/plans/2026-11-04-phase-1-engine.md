@@ -4,11 +4,11 @@
 
 **Goal:** One request runs end to end on a scripted model and a fixture dataset through a LangGraph graph, survives a process restart, pauses for a clarification and resumes, and cannot be started twice by duplicate delivery.
 
-**Architecture:** A `core` package holds Pydantic entities, repositories (interface plus in-memory), the model boundary (interface plus scripted fake plus a recorder that writes ModelCall records), the Context Builder, the Tool Result Processor and compaction. A `worker` package holds the LangGraph graph: plan node, plan gate, a sequential task runner that invokes a per-task subgraph with its own `messages`, reconcile and cite stubs, and the report node; plus a runner that owns status transitions and resume verification. No API, no UI, no AWS.
+**Architecture:** A `core` package holds Pydantic entities, repositories (interface plus in-memory), the model boundary (interface plus scripted fake plus a recorder that writes ModelCall records), the Context Builder, the Tool Result Processor and compaction. A `worker` package holds the request workflow written with the LangGraph Functional API: one `@entrypoint` that calls the plan stage, pauses with `interrupt()` for a clarification, validates the plan in code, runs tasks as `@task` calls in dependency-driven waves (five in flight), then cite and report; the loop inside one task (model, tool, model) is a small Graph API StateGraph with its own `messages`. A runner owns status transitions, start, resume and restart. No API, no UI, no AWS.
 
 **Tech Stack:** Python 3.12, `uv`, Pydantic 2, LangGraph 1.x with `langgraph-checkpoint-sqlite`, `langchain-core` message types, DuckDB (in-process, over the fixture CSV only), PyYAML, `python-ulid`, pytest, ruff, mypy strict.
 
-**Spec:** `docs/implementation-plan.md` (sections 1 to 6, 8, 9, 10, 12, 13) and `docs/system-design.md` (sections 6, 8, 14). Read both before any task.
+**Spec:** `docs/implementation-plan.md` (sections 1 to 6, 8, 9, 10, 12, 13) and `docs/system-design.md` (sections 6, 8, 13 grill rows, 14). Read both before any task.
 
 ## Global Constraints
 
@@ -23,20 +23,22 @@
 - A planner result has 2 to 6 tasks; task kinds are exactly `sql_analysis`, `pdf_lookup`, `source_search`, `reconcile`.
 - Tests before implementation for every task. Commit after every task.
 - No paid model calls, no network, no AWS in this phase.
-- Interrupts live in their own node (`await_user`) whose only statement is `interrupt()`; a model call never shares a node with an interrupt, because LangGraph re-runs a node from its start on resume.
-- Every write that can happen inside a replayed node is idempotent: raw_result artifact ids derive from `(task_id, tool_call_id)`; the task loop skips Tasks already COMPLETED or SKIPPED in the repository.
-- Cooperative cancellation: before every model call and before starting each task, nodes read the request status; on CANCELLED they stop with `next_action = "cancelled"`.
+- Request orchestration uses the LangGraph Functional API (`@entrypoint`, `@task`); the per-task model loop uses the Graph API. On resume the entrypoint re-runs from its first line and completed task results are restored by task name and call order, so: every model call and every repository write lives inside a `@task`; the entrypoint body is deterministic given restored results (futures created and awaited in `task_id` order, no clock, no randomness); `interrupt()` is called only in the entrypoint, never inside a task.
+- Writes that a re-run can repeat are idempotent: raw_result artifact ids derive from `(task_id, tool_call_id)`, clarification Message ids from `(request_message_id, attempt)`, the report Message id from the request; the plan gate and the execute stage return existing records instead of creating or re-running when the repository already shows the outcome.
+- Limits from the 5 November grill, all read from `config/budgets.yaml`: 50 model calls per request, 5 tasks in flight, 6 tool calls per task, 1 automatic retry per task, then FAILED. A request is FAILED only when the plan fails or no task completes; otherwise the report lists failed and skipped tasks under uncertainties. At most two clarifications, then the planner is told to plan with stated assumptions.
+- Cooperative cancellation: before every model call and before every wave of tasks, stages read the request status; on CANCELLED the workflow stops and returns `{"status": "CANCELLED"}`.
 - SSE and the API read Messages and Tasks only; nothing in `RequestState` is shown to the user.
 - Every log line carries `request_message_id` and, when inside a task, `task_id`, via a context variable in `core/logging.py`.
 
 ## Review Focus
 
-1. A clarification reply whose `inReplyToMessageId` is not the pending interrupt: the runner must refuse it and leave the request WAITING_USER (Task 10).
+1. A clarification reply whose `inReplyToMessageId` is not the pending interrupt: the runner must refuse it, save nothing, and leave the request WAITING_USER (Task 10).
 2. A plan naming an artifact from another chat: the plan gate must fail the request with a user-facing reason and create no Task records (Task 8).
 3. Exactly 50 rows must not offload; 51 rows must offload and the stub must say "1 more row" (Task 7).
 4. Compaction keep-boundary landing between a tool call and its result: the boundary must move earlier so both stay verbatim (Task 11).
 5. The scripted model running out of responses or returning output that fails the schema: the request ends FAILED with a reason, the ModelCall records outcome ERROR, and resume does not loop (Task 9).
-6. A process restart after task t2 completed: the resumed run must not re-execute t1 or t2, must not write a second ModelCall for them, and must not create a second raw_result artifact for a replayed tool call (Task 10).
+6. A process crash after two tasks completed: the requeued run must not re-execute them or write a second ModelCall for them, must write exactly one report, and must not create a second raw_result artifact for a replayed tool call (Task 10).
+7. A second clarification after the first was answered: the second interrupt must receive the second answer, not the first, and exactly two clarification Messages exist (Task 10).
 
 ---
 
@@ -45,7 +47,7 @@
 ```
 pyproject.toml                      project, deps, ruff, mypy, pytest config
 uv.lock
-config/budgets.yaml                 compaction numbers
+config/budgets.yaml                 compaction numbers, call budget, tasks in flight, tool calls per task, retries
 config/models.yaml                  stage -> model id, effort, max tokens (scripted in phase 1)
 prompts/agent-memory.md             v1 text from spec 10.1
 prompts/plan.1.md                   spec 10.2
@@ -82,14 +84,15 @@ src/contextforge/core/context/tool_results.py ProcessedRows, process_rows
 src/contextforge/core/context/compaction.py   stub_old_tool_results, summarize_messages, compact
 src/contextforge/core/services/submit.py      submit_request
 src/contextforge/worker/tools/sql_query.py    SqlQueryTool implementing Tool over the fixture CSV
-src/contextforge/worker/deps.py               WorkerDeps dataclass
-src/contextforge/worker/nodes/plan.py         plan_node, await_user_node, plan_gate
-src/contextforge/worker/nodes/execute.py      build_task_subgraph, execute_node
-src/contextforge/worker/nodes/stubs.py        reconcile_stub, skipped_reason
-src/contextforge/worker/nodes/cite.py         cite_node stub: passes facts through unchanged in phase 1
-src/contextforge/worker/nodes/report.py       report_node
-src/contextforge/worker/graph.py              build_graph
-src/contextforge/worker/runner.py             RequestRunner
+src/contextforge/worker/deps.py               WorkerDeps dataclass, task semaphore
+src/contextforge/worker/stages/guards.py      Cancelled, check_not_cancelled, CallBudgetExceeded, check_call_budget
+src/contextforge/worker/stages/plan.py        plan_stage, plan_gate, PlanFailed, clarification_id
+src/contextforge/worker/stages/execute.py     build_task_subgraph (Graph API loop), execute_stage
+src/contextforge/worker/stages/stubs.py       reconcile_stub, skipped_reason
+src/contextforge/worker/stages/cite.py        cite_stage stub: passes facts through unchanged in phase 1
+src/contextforge/worker/stages/report.py      write_report
+src/contextforge/worker/workflow.py           build_workflow: the @entrypoint run_request wrapping each stage as a @task
+src/contextforge/worker/runner.py             RequestRunner: start, resume, pending_interrupt
 tests/                                        one test module per task, named below
 ```
 
@@ -102,7 +105,7 @@ tests/                                        one test module per task, named be
 - Test: `tests/test_skeleton.py`
 
 **Interfaces:**
-- Produces: importable package `contextforge`; prompt files whose text is exactly spec sections 10.1 to 10.4; `config/budgets.yaml` with keys `capInputTokens: 40000`, `responseAllowanceTokens: 4000`, `marginFraction: 0.10`, `keepLastMessages: 6`, `toolResultRowCap: 50`, `factsCap: 30`; `config/models.yaml` mapping each stage to `{ model, effort, maxTokens }` with `model: scripted` for every stage in phase 1 and the Bedrock ids in comments (`anthropic.claude-opus-5-5` plan and cite, `anthropic.claude-haiku-5-5` execute and compress).
+- Produces: importable package `contextforge`; prompt files whose text is exactly spec sections 10.1 to 10.4; `config/budgets.yaml` with keys `capInputTokens: 40000`, `responseAllowanceTokens: 4000`, `marginFraction: 0.10`, `keepLastMessages: 6`, `toolResultRowCap: 50`, `factsCap: 30`, `callBudget: 50`, `tasksInFlight: 5`, `toolCallsPerTask: 6`, `taskRetries: 1`; `config/models.yaml` mapping each stage to `{ model, effort, maxTokens }` with `model: scripted` for every stage in phase 1 and the Bedrock ids in comments (`anthropic.claude-opus-5-5` plan and cite, `anthropic.claude-haiku-5-5` execute and compress).
 
 - [ ] **Step 1: Write the failing test**
 
@@ -122,7 +125,8 @@ def test_budgets_yaml_has_spec_values() -> None:
     b = yaml.safe_load(Path("config/budgets.yaml").read_text())
     assert b == {"capInputTokens": 40000, "responseAllowanceTokens": 4000,
                  "marginFraction": 0.10, "keepLastMessages": 6,
-                 "toolResultRowCap": 50, "factsCap": 30}
+                 "toolResultRowCap": 50, "factsCap": 30, "callBudget": 50, "tasksInFlight": 5,
+                 "toolCallsPerTask": 6, "taskRetries": 1}
 
 def test_models_yaml_covers_every_stage() -> None:
     m = yaml.safe_load(Path("config/models.yaml").read_text())
@@ -139,7 +143,7 @@ Expected: FAIL, `ModuleNotFoundError: contextforge` (after `uv init` and `uv add
 
 `pyproject.toml`: name `contextforge`, `requires-python = ">=3.12"`, build backend `hatchling`, packages `src/contextforge`. Dependencies: `pydantic>=2.9`, `langgraph>=1.0`, `langgraph-checkpoint-sqlite>=2.0`, `langchain-core>=0.3`, `duckdb>=1.1`, `pyyaml>=6`, `python-ulid>=3`. Dev group: `pytest>=8`, `ruff>=0.7`, `mypy>=1.13`, `types-PyYAML`. Ruff: line length 100, rules `E,F,I,B,UP`. Mypy: `strict = true`, `plugins = ["pydantic.mypy"]`, `mypy_path = "src"`. Pytest: `testpaths = ["tests"]`, `pythonpath = ["src"]`. `.python-version` is `3.12`. Run `uv lock`.
 
-Write the four prompt files with the exact text of spec 10.1 to 10.4 (no headings added). Write `config/budgets.yaml` with the six keys above.
+Write the four prompt files with the exact text of spec 10.1 to 10.4 (no headings added). Write `config/budgets.yaml` with the ten keys above.
 
 - [ ] **Step 4: Run test to verify it passes**
 
@@ -167,7 +171,7 @@ git commit -m "feat: project skeleton with prompts and budgets config"
   - `values.Locator(kind: LocatorKind, value: str)`, `values.EvidenceRef(artifact_id, locator, excerpt: str | None = None)`, `values.ArtifactRef(artifact_id, role: Literal["input","output"])`, `values.Usage(input_tokens: int, output_tokens: int, cache_read_tokens: int | None = None, cache_write_tokens: int | None = None)`.
   - A shared base `Entity(BaseModel)` with `model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True, extra="forbid")`.
   - `message.py`: `Sender`, `MessageKind`, `RequestStatus`, `ActionStatus`, `Decision` enums; classes `RequestMessage`, `ClarificationMessage`, `ClarificationResponseMessage`, `ProposedActionMessage`, `ActionResponseMessage`, `ReportMessage`, `TextMessage`, each with `kind: Literal[...]`; `Message = Annotated[Union[...], Field(discriminator="kind")]`; `MessageAdapter = TypeAdapter(Message)`; `ReportBody(claims: list[Claim], inputs_consulted: list[ArtifactRef], deliverables: list[ArtifactRef] = [], uncertainties: list[str], coverage: dict[str, Any])`, `Claim(claim_id, text, evidence_refs)`; `ActionPayload(tool, arguments: dict[str, Any], account: str | None)`.
-  - `task.py`: `TaskKind`, `TaskStatus`, `Task`, `TaskResult(summary, structured_data: dict[str, Any], evidence_refs, artifact_refs, uncertainties, coverage: dict[str, Any])`, `validate_structured_data(kind: TaskKind, data: dict[str, Any]) -> None` raising `ValueError` when any list value has more than 50 entries (the "never row sets" rule).
+  - `task.py`: `TaskKind`, `TaskStatus`, `Task`, `TaskResult(summary, facts: list[Fact] = [] (max six, each `{text, evidence_refs}`), structured_data: dict[str, Any], evidence_refs, artifact_refs, uncertainties, coverage: dict[str, Any])`, `validate_structured_data(kind: TaskKind, data: dict[str, Any]) -> None` raising `ValueError` when any list value has more than 50 entries (the "never row sets" rule).
   - `model_call.py`: `Stage`, `Outcome`, `ModelCall`.
   - `artifact.py`: `ArtifactKind`, `ArtifactStatus`, `IndexStatus`, `Artifact`.
   - `chat.py`: `Chat` with `last_request_status: RequestStatus | None = None`. `user.py`: `User` with `instructions: str | None` capped at 2,000 characters. `integration.py`: the three integration entities as in spec 3.7 to 3.9.
@@ -259,8 +263,8 @@ git commit -m "feat: value types and the nine entities with Message union"
 - Produces:
   - `planner.PlannedTask(ref: str, kind: TaskKind, goal: str, input_artifact_ids: list[str], depends_on: list[str] = [])`.
   - `planner.PlannerOutput(kind: Literal["plan","clarification"], goal, constraints: list[str], open_questions: list[str], question: str | None = None, tasks: list[PlannedTask] | None = None, next_action: str)` with a model validator enforcing: clarification requires `question`; plan requires 2 to 6 tasks, unique refs, every `depends_on` entry is another task's ref, no self-dependency.
-  - `state.PlanEntry(TypedDict): task_id, kind, status`; `state.Fact: text, evidence_refs: list[dict]`; `state.OpenQuestion: text, resolved_by: str | None`; `state.PendingInterrupt: kind, message_id`.
-  - `state.RequestState(TypedDict)`: `request_message_id: str`, `chat_id: str`, `user_id: str`, `goal: str`, `constraints: list[str]`, `plan: list[PlanEntry]`, `facts: list[Fact]`, `open_questions: list[OpenQuestion]`, `next_action: str`, `pending_interrupt: PendingInterrupt | None`, `messages: Annotated[list[AnyMessage], add_messages]`. (`chat_id` and `user_id` are carried so nodes can write Messages and Artifacts without a lookup; they are identity, not working memory.)
+  - `state.PlanEntry(TypedDict): task_id, kind, status`; `state.Fact: text, evidence_refs: list[dict]`; `state.OpenQuestion: text, resolved_by: str | None`; `state.PendingInterrupt: kind, message_id, question, next_action` (the payload passed to `interrupt()`; what the runner shows as pending).
+  - `state.RequestState(TypedDict)`: `request_message_id: str`, `chat_id: str`, `user_id: str`, `goal: str`, `constraints: list[str]`, `plan: list[PlanEntry]`, `facts: list[Fact]`, `open_questions: list[OpenQuestion]`, `next_action: str`. A plain dict passed between workflow tasks and checkpointed with their results; it carries no transcript. (`chat_id` and `user_id` are carried so stages can write Messages and Artifacts without a lookup; they are identity, not working memory.)
   - `state.TaskState(TypedDict)`: `task_id`, `request_message_id`, `chat_id`, `user_id`, `constraints`, `dependency_summaries: list[str]`, `messages: Annotated[list[AnyMessage], add_messages]`, `result: dict | None`, `error: str | None`.
 
 - [ ] **Step 1: Write the failing tests**
@@ -306,7 +310,7 @@ Expected: FAIL, `ModuleNotFoundError: contextforge.core.planner`.
 
 - [ ] **Step 3: Implement `planner.py` and `state.py`**
 
-`PlannerOutput` uses the same `Entity` base (camelCase aliases). `state.py` imports `AnyMessage` and `add_messages` from `langgraph.graph.message`.
+`PlannerOutput` uses the same `Entity` base (camelCase aliases). `state.py` imports `AnyMessage` and `add_messages` from `langgraph.graph.message` for `TaskState` only.
 
 - [ ] **Step 4: Run tests to verify they pass**
 
@@ -556,7 +560,7 @@ git commit -m "feat: model boundary with scripted fake and ModelCall recording"
 **Interfaces:**
 - Produces:
   - `tokens.estimate_tokens(text: str) -> int` = `max(1, ceil(len(text) / 4))` (phase 1 heuristic; a tokenizer replaces it in phase 2 behind the same signature).
-  - `budgets.Budgets(cap_input_tokens, response_allowance_tokens, margin_fraction, keep_last_messages, tool_result_row_cap, facts_cap)`; `budgets.load_budgets(path: Path = Path("config/budgets.yaml")) -> Budgets`; method `Budgets.messages_budget(fixed_tokens: int) -> int` = `cap - allowance - ceil(cap * margin) - fixed`.
+  - `budgets.Budgets(cap_input_tokens, response_allowance_tokens, margin_fraction, keep_last_messages, tool_result_row_cap, facts_cap, call_budget, tasks_in_flight, tool_calls_per_task, task_retries)`; `budgets.load_budgets(path: Path = Path("config/budgets.yaml")) -> Budgets`; method `Budgets.messages_budget(fixed_tokens: int) -> int` = `cap - allowance - ceil(cap * margin) - fixed`.
   - `builder.SourceLine(artifact_id, kind, name, detail: str)`; `builder.ContextInputs(memory: str, stage_prompt: str, request: RequestMessage | None, preferences: dict[str, str], constraints: list[str], facts: list[Fact], open_questions: list[OpenQuestion], next_action: str, dependency_summaries: list[str], evidence_slices: list[str], tools: list[ToolSpec], sources: list[SourceLine], prior_messages: list[Message], loop_messages: list[AnyMessage])`.
   - `builder.BuiltContext(system: list[str], user_text: str, messages: list[AnyMessage], sections: list[tuple[str, int]], fixed_tokens: int)` where `sections` lists the eight section names in spec 8.2 order with their token estimates and `system == [memory, stage_prompt]`.
   - `builder.build_context(inputs: ContextInputs, budgets: Budgets) -> BuiltContext`. `user_text` renders the spec 9.1 tags in order: `<request message_id=...>`, `<user_preferences>`, `<constraints>`, `<sources chat_id=...>`, `<prior_context>`; when `facts` exceed `facts_cap`, only the newest `facts_cap` are rendered.
@@ -640,32 +644,31 @@ git commit -m "feat: context builder with eight sections and tool result process
 
 ---
 
-### Task 8: Plan node and plan gate
+### Task 8: Plan stage, plan gate, cancel and budget guards
 
 **Files:**
-- Create: `src/contextforge/worker/deps.py`, `src/contextforge/worker/nodes/__init__.py`, `src/contextforge/worker/nodes/plan.py`, `src/contextforge/worker/nodes/guards.py`
-- Test: `tests/test_plan_node.py`
+- Create: `src/contextforge/worker/deps.py`, `src/contextforge/worker/stages/__init__.py`, `src/contextforge/worker/stages/plan.py`, `src/contextforge/worker/stages/guards.py`
+- Test: `tests/test_plan_stage.py`
 
 **Interfaces:**
-- Consumes: `ModelClient`, `Repositories`, `Budgets`, `build_context`, `PlannerOutput`, `RequestState`.
+- Consumes: `ModelClient`, `Repositories`, `Budgets`, `build_context`, `PlannerOutput`, `RequestState`, `PendingInterrupt`.
 - Produces:
   - `deps.WorkerDeps(repos: Repositories, blobs: BlobStore, model: ModelClient, budgets: Budgets, tools: dict[str, Tool], queue: Queue, planner_model: str = "scripted", executor_model: str = "scripted")` dataclass.
-  - `guards.check_not_cancelled(state: RequestState, deps: WorkerDeps) -> None` raising `Cancelled` when the request Message status is CANCELLED; called by every node before a model call and by the task loop before each task. `guards.Cancelled(Exception)`.
-  - `plan.plan_node(state: RequestState, deps: WorkerDeps) -> dict`: builds context from the request Message, the chat's AVAILABLE artifacts as sources, the user's preferences, prior Messages in the chat; invokes the model with `stage=plan`, `output_schema=PlannerOutput`; parses `response.structured` into `PlannerOutput`. On `kind == "plan"` returns state updates `goal, constraints, open_questions (as OpenQuestion), next_action` plus a private key `planner_output` (the dumped PlannerOutput) for the gate. On `kind == "clarification"`: saves a `ClarificationMessage` (sender assistant, `request_message_id`, content = question) with an id derived from `(request_message_id, "clarification", attempt)` so a replay cannot write a second one, moves the request to `WAITING_USER`, and returns `pending_interrupt={"kind": "clarification", "message_id": <id>}`. It never calls `interrupt()` itself. On a schema failure or `ScriptExhausted`, raises `PlanFailed(reason)`.
-  - `plan.await_user_node(state: RequestState) -> dict`: the only statement is `answer = interrupt(state["pending_interrupt"])`; it returns `constraints = state["constraints"] + [f"User answered '{question}': {answer['content']}"]`, `pending_interrupt=None`. Graph edges: `plan -> await_user` when `pending_interrupt` is set, `await_user -> plan`; `plan -> plan_gate` otherwise. Because the node holds no model call, a resume re-runs only this node.
-  - `plan.plan_gate(state: RequestState, deps: WorkerDeps) -> dict`: for each planned task verifies every `input_artifact_id` is an Artifact in `state["chat_id"]` with status `AVAILABLE`, and that `depends_on` refs resolve; on failure raises `PlanFailed("Planned task t2 names artifact a9 that is not in this chat")`; on success creates one `Task` per planned task at `PLANNED` with new ULIDs assigned in plan order, `depends_on_task_ids` mapped from refs, and returns `plan=[PlanEntry...]`.
+  - `guards.Cancelled(Exception)`; `guards.check_not_cancelled(deps: WorkerDeps, chat_id: str, request_message_id: str) -> None` raising `Cancelled` when the request Message status is `CANCELLED`. Called before every model call and before every wave of tasks.
+  - `guards.CallBudgetExceeded(Exception)`; `guards.check_call_budget(deps: WorkerDeps, request_message_id: str) -> None` raising when `len(deps.repos.model_calls.list_by_request(request_message_id)) >= deps.budgets.call_budget`. Called before every model call.
   - `plan.PlanFailed(Exception)` with `.reason`.
-  - `plan.planner_output_from_state(state) -> PlannerOutput` helper for the gate.
+  - `plan.plan_stage(brief: RequestState, attempt: int, deps: WorkerDeps) -> dict`: a plain function (the workflow wraps it as a task in Task 9). Builds context from the request Message, the chat's AVAILABLE artifacts as sources, the user's preferences and prior Messages in the chat; when `attempt >= 2` appends the constraint `"Do not ask another question; plan with stated assumptions"`; calls `check_not_cancelled` and `check_call_budget`; invokes the model with `stage=plan`, `output_schema=PlannerOutput`; parses `response.structured` into `PlannerOutput`. Returns a JSON-serialisable dict `{"kind", "goal", "constraints", "open_questions", "next_action", "tasks", "pending"}`. On `kind == "plan"`, `pending` is `None` and `tasks` is the dumped task list. On `kind == "clarification"`: when `attempt >= 2` raises `PlanFailed("planner asked a third question")`; otherwise saves a `ClarificationMessage` (sender assistant, `request_message_id`, content = question) whose id is `clarification_id(request_message_id, attempt)` (a deterministic ULID-shaped hash in `plan.py`, so a re-run cannot write a second one), moves the request `RUNNING -> WAITING_USER`, and returns `pending = PendingInterrupt(kind="clarification", message_id=<id>, question=<question>, next_action=<planner next_action>)`. It never calls `interrupt()`. On a schema failure, `ScriptExhausted` or `CallBudgetExceeded`, raises `PlanFailed(reason)`.
+  - `plan.plan_gate(brief: RequestState, planned: dict, deps: WorkerDeps) -> list[PlanEntry]`: for each planned task verifies every `input_artifact_id` is an Artifact in `brief["chat_id"]` with status `AVAILABLE` and that `depends_on` refs resolve; on failure raises `PlanFailed("Planned task t2 names artifact a9 that is not in this chat")` having created nothing; on success creates one `Task` per planned task at `PLANNED` with new ULIDs assigned in plan order and `depends_on_task_ids` mapped from refs, and returns the `PlanEntry` list in the same order. Idempotent: when Tasks already exist for the request (a re-run after a crash between the gate and its checkpoint), returns entries for the existing Tasks and creates none.
 
 - [ ] **Step 1: Write the failing tests**
 
 ```python
-# tests/test_plan_node.py
+# tests/test_plan_stage.py
 import pytest
 from contextforge.core.models.base import ModelResponse
 from contextforge.core.models.scripted import ScriptedModel
-from contextforge.worker.nodes.plan import plan_node, plan_gate, PlanFailed
-from tests.helpers import make_deps, seed_chat_with_dataset, initial_state  # written in this task
+from contextforge.worker.stages.plan import plan_stage, plan_gate, PlanFailed
+from tests.helpers import make_deps, seed_chat_with_dataset, initial_brief  # written in this task
 
 def _plan(ids: list[str]) -> dict:
     return {"kind": "plan", "goal": "g", "constraints": ["Exclude transfers"], "openQuestions": ["q"],
@@ -673,87 +676,132 @@ def _plan(ids: list[str]) -> dict:
                       {"ref": "t2", "kind": "reconcile", "goal": "g2", "inputArtifactIds": [], "dependsOn": ["t1"]}],
             "nextAction": "run t1"}
 
+def _clarification(q: str) -> dict:
+    return {"kind": "clarification", "goal": "g", "constraints": [], "openQuestions": [], "question": q, "nextAction": "wait"}
+
 def test_plan_then_gate_creates_tasks_in_order() -> None:
     deps = make_deps(ScriptedModel({"plan": [ModelResponse(structured=_plan(["a2"]))]}))
     req = seed_chat_with_dataset(deps, chat_id="c1", user_id="u1", dataset_id="a2")
-    state = initial_state(req)
-    state.update(plan_node(state, deps))
-    assert state["constraints"] == ["Exclude transfers"] and state["next_action"] == "run t1"
-    state.update(plan_gate(state, deps))
+    brief = initial_brief(req)
+    planned = plan_stage(brief, 0, deps)
+    assert planned["kind"] == "plan" and planned["constraints"] == ["Exclude transfers"] and planned["next_action"] == "run t1"
+    entries = plan_gate(brief, planned, deps)
     tasks = deps.repos.tasks.list_by_request(req.message_id)
     assert [t.kind for t in tasks] == ["sql_analysis", "reconcile"]
     assert tasks[1].depends_on_task_ids == [tasks[0].task_id]
-    assert [p["task_id"] for p in state["plan"]] == [t.task_id for t in tasks]
+    assert [e["task_id"] for e in entries] == [t.task_id for t in tasks]
+    assert plan_gate(brief, planned, deps) == entries          # re-run creates nothing new
+    assert len(deps.repos.tasks.list_by_request(req.message_id)) == 2
 
 def test_gate_rejects_artifact_from_another_chat() -> None:
     deps = make_deps(ScriptedModel({"plan": [ModelResponse(structured=_plan(["a9"]))]}))
     req = seed_chat_with_dataset(deps, chat_id="c1", user_id="u1", dataset_id="a2")
     seed_chat_with_dataset(deps, chat_id="c2", user_id="u1", dataset_id="a9")
-    state = initial_state(req); state.update(plan_node(state, deps))
+    planned = plan_stage(initial_brief(req), 0, deps)
     with pytest.raises(PlanFailed) as e:
-        plan_gate(state, deps)
+        plan_gate(initial_brief(req), planned, deps)
     assert "a9" in e.value.reason and deps.repos.tasks.list_by_request(req.message_id) == []
+
+def test_clarification_writes_one_message_and_pending_payload() -> None:
+    deps = make_deps(ScriptedModel({"plan": [ModelResponse(structured=_clarification("Which accounts are yours?"))] * 2}))
+    req = seed_chat_with_dataset(deps, chat_id="c1", user_id="u1", dataset_id="a2")
+    deps.repos.messages.update_request_status("c1", req.message_id, "ACCEPTED", "RUNNING")
+    first = plan_stage(initial_brief(req), 0, deps)
+    assert first["kind"] == "clarification" and first["pending"]["kind"] == "clarification"
+    assert first["pending"]["question"] == "Which accounts are yours?" and first["pending"]["next_action"] == "wait"
+    assert deps.repos.messages.get("c1", req.message_id).status == "WAITING_USER"
+    deps.repos.messages.update_request_status("c1", req.message_id, "WAITING_USER", "RUNNING")
+    second = plan_stage(initial_brief(req), 0, deps)            # same attempt re-run = same message id
+    assert second["pending"]["message_id"] == first["pending"]["message_id"]
+    assert len([m for m in deps.repos.messages.list_by_chat("c1") if m.kind == "clarification"]) == 1
+
+def test_third_question_fails_the_plan() -> None:
+    deps = make_deps(ScriptedModel({"plan": [ModelResponse(structured=_clarification("Again?"))]}))
+    req = seed_chat_with_dataset(deps, chat_id="c1", user_id="u1", dataset_id="a2")
+    with pytest.raises(PlanFailed):
+        plan_stage(initial_brief(req), 2, deps)
 
 def test_malformed_planner_output_fails_plainly() -> None:
     deps = make_deps(ScriptedModel({"plan": [ModelResponse(structured={"kind": "plan"})]}))
     req = seed_chat_with_dataset(deps, chat_id="c1", user_id="u1", dataset_id="a2")
     with pytest.raises(PlanFailed):
-        plan_node(initial_state(req), deps)
+        plan_stage(initial_brief(req), 0, deps)
+
+def test_call_budget_stops_the_planner() -> None:
+    deps = make_deps(ScriptedModel({"plan": [ModelResponse(structured=_plan(["a2"]))]}), call_budget=0)
+    req = seed_chat_with_dataset(deps, chat_id="c1", user_id="u1", dataset_id="a2")
+    with pytest.raises(PlanFailed) as e:
+        plan_stage(initial_brief(req), 0, deps)
+    assert "budget" in e.value.reason
 ```
 
-`tests/helpers.py` provides `make_deps(model) -> WorkerDeps` (in-memory repos, `MemoryBlobStore`, `load_budgets()`), `seed_chat_with_dataset(deps, *, chat_id, user_id, dataset_id) -> RequestMessage` (saves a Chat, a `dataset` Artifact at AVAILABLE named `transactions_sep_oct.csv` with `storage_ref` pointing at the fixture CSV copied into the blob store, and a request Message at ACCEPTED with the fixture request text) and `initial_state(req) -> RequestState` (all brief fields empty, `pending_interrupt None`, `messages []`).
+`tests/helpers.py` provides `make_deps(model, *, call_budget: int | None = None, tasks_in_flight: int | None = None) -> WorkerDeps` (in-memory repos, `MemoryBlobStore`, `load_budgets()` with the two overrides applied through `dataclasses.replace`), `seed_chat_with_dataset(deps, *, chat_id, user_id, dataset_id) -> RequestMessage` (saves a Chat, a `dataset` Artifact at AVAILABLE named `transactions_sep_oct.csv` with `storage_ref` pointing at the fixture CSV copied into the blob store, and a request Message at ACCEPTED with the fixture request text) and `initial_brief(req) -> RequestState` (identity fields filled, every brief field empty).
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `uv run pytest tests/test_plan_node.py -v`
-Expected: FAIL, `ModuleNotFoundError: contextforge.worker.nodes`.
+Run: `uv run pytest tests/test_plan_stage.py -v`
+Expected: FAIL, `ModuleNotFoundError: contextforge.worker.stages`.
 
-- [ ] **Step 3: Implement `deps.py`, `plan.py` and `tests/helpers.py`**
+- [ ] **Step 3: Implement `deps.py`, `guards.py`, `plan.py` and `tests/helpers.py`**
 
-The interrupt round trip is exercised in Task 10; implement `await_user_node` now so the graph in Task 9 can wire it. `interrupt` is imported from `langgraph.types`.
+`clarification_id` hashes `f"{request_message_id}:clarification:{attempt}"` the same way `raw_result_id` hashes its key (Task 7); put the shared helper in `core/ids.py` as `derived_id(key: str) -> str` and make `raw_result_id` call it.
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `uv run pytest tests/test_plan_node.py -v && uv run mypy src`
-Expected: 3 passed, clean.
+Run: `uv run pytest tests/test_plan_stage.py -v && uv run mypy src`
+Expected: 6 passed, clean.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/contextforge/worker tests/helpers.py tests/test_plan_node.py
-git commit -m "feat: plan node, await_user interrupt node, plan gate, cancel guard"
+git add src/contextforge/core/ids.py src/contextforge/worker tests/helpers.py tests/test_plan_stage.py
+git commit -m "feat: plan stage with clarification payload, plan gate, cancel and budget guards"
 ```
 
 ---
 
-### Task 9: SQL tool, task subgraph, stubs, report node, full graph
+### Task 9: SQL tool, task subgraph, execute stage, stubs, report, workflow entrypoint
 
 **Files:**
-- Create: `src/contextforge/worker/tools/__init__.py`, `sql_query.py`; `src/contextforge/worker/nodes/execute.py`, `stubs.py`, `cite.py`, `report.py`; `src/contextforge/worker/graph.py`
-- Test: `tests/test_graph.py`
+- Create: `src/contextforge/worker/tools/__init__.py`, `sql_query.py`; `src/contextforge/worker/stages/execute.py`, `stubs.py`, `cite.py`, `report.py`; `src/contextforge/worker/workflow.py`
+- Test: `tests/test_workflow.py`
 
 **Interfaces:**
-- Consumes: Task 7 `process_rows`, `build_context`; Task 8 nodes; `TaskState`.
+- Consumes: Task 7 `process_rows`, `raw_result_id`, `build_context`; Task 8 stages and guards; `TaskState`; `entrypoint`, `task` from `langgraph.func`; `interrupt` from `langgraph.types`.
 - Produces:
   - `sql_query.SqlQueryTool(artifacts: ArtifactRepository, blobs: BlobStore)` implementing `Tool`: `spec` is the exact name, description and `input_schema` from spec 9.2; `permission = "READ"`; `run(arguments, ctx)` loads the Artifact `arguments["dataset_id"]` in `ctx.chat_id`, reads its CSV bytes from the blob store into a DuckDB in-memory connection as table `t` (`read_csv_auto`), rejects any statement that is not a single `SELECT` (DuckDB `EXPLAIN` parse plus a first-token check; a convenience guard, not a security boundary), returns `ToolResult(rows=...)`.
-  - `execute.build_task_subgraph(deps: WorkerDeps) -> CompiledStateGraph` over `TaskState` with two nodes: `call_model` (calls `check_not_cancelled`; builds context with the execute prompt, the task goal, constraints, the dataset source line with columns, dependency summaries and the specs of the tools allowed for the task kind; invokes `stage=execute`; appends an `AIMessage` with `tool_calls` or, on `end_turn`, parses `response.structured` into `TaskResult`, calls `validate_structured_data`, sets `result`) and `run_tools` (for each tool call looks the tool up in `deps.tools` by name, runs it with a `ToolContext`, passes rows through `process_rows` with `cap=budgets.tool_result_row_cap` and `artifact_id=raw_result_id(task_id, tool_call_id)`, appends a `ToolMessage` whose content is `ProcessedRows.text` plus the kept rows as JSON and whose `additional_kwargs` carry `tool_name`, `arguments`, `row_count`, `artifact_id`). Edges: `call_model -> run_tools` when the last message has tool calls, else `END`; `run_tools -> call_model`. A model error or schema failure sets `error` and ends.
-  - `stubs.reconcile_stub(task: Task, dependency_results: list[TaskResult]) -> TaskResult`: summary joins dependency summaries with `"; "`, `structured_data={"reconciled": False}`, `uncertainties=["reconcile is a stub in phase 1"]`, `evidence_refs` = union of dependencies' refs.
+  - `execute.build_task_subgraph(deps: WorkerDeps) -> CompiledStateGraph` over `TaskState` with two nodes. `call_model`: calls `check_not_cancelled` and `check_call_budget`; builds context with the execute prompt, the task goal, constraints, the dataset source line with columns, dependency summaries and the specs of the tools allowed for the task kind; invokes `stage=execute`; appends an `AIMessage` with `tool_calls` or, on `end_turn`, parses `response.structured` into `TaskResult`, calls `validate_structured_data`, drops any fact whose evidence ref names an artifact outside the task's `input_artifact_ids` and keeps at most six, sets `result`. `run_tools`: for each tool call looks the tool up in `deps.tools` by name, runs it with a `ToolContext`, passes rows through `process_rows` with `cap=budgets.tool_result_row_cap` and `artifact_id=raw_result_id(task_id, tool_call_id)`, appends a `ToolMessage` whose content is `ProcessedRows.text` plus the kept rows as JSON and whose `additional_kwargs` carry `tool_name`, `arguments`, `row_count`, `artifact_id`. Edges: `call_model -> run_tools` when the last message has tool calls and fewer than `budgets.tool_calls_per_task` tool calls have been made, `call_model -> END` otherwise; a tool call past the cap sets `error = "tool call budget exhausted"`; `run_tools -> call_model`. A model error, `CallBudgetExceeded` or schema failure sets `error` and ends; `Cancelled` propagates.
+  - `execute.execute_stage(brief: RequestState, task_id: str, deps: WorkerDeps) -> dict`: a plain function wrapped as a task by the workflow; runs under `deps.semaphore` (a `threading.BoundedSemaphore(budgets.tasks_in_flight)` created in `WorkerDeps.__post_init__`). Loads the Task; transitions `PLANNED -> RUNNING`; on `StaleStatusError` returns the Task's stored outcome unchanged when its status is already `COMPLETED`, `SKIPPED` or `FAILED` (a re-run after a crash between the repository write and the checkpoint) and raises otherwise. For `sql_analysis`: invokes the subgraph with a fresh `TaskState` whose `dependency_summaries` are the dependencies' result summaries read from the repository; on `error` invokes it once more with a fresh `TaskState` (the one automatic retry); on `result` transitions `RUNNING -> COMPLETED` with the result, on a second `error` transitions `RUNNING -> FAILED` with `failure_reason = error`. For `reconcile`: `COMPLETED` with `reconcile_stub` when every dependency is `COMPLETED`, else `FAILED` with `failure_reason = "dependency failed"`. For `pdf_lookup` and `source_search`: `SKIPPED` with `failure_reason = skipped_reason(kind)`. Returns `{"task_id", "status", "facts": <result facts or []>, "uncertainties": [...], "summary": str | None}`.
+  - `stubs.reconcile_stub(task: Task, dependency_results: list[TaskResult]) -> TaskResult`: summary joins dependency summaries with `"; "`, `structured_data={"reconciled": False}`, `uncertainties=["reconcile is a stub in phase 1"]`, `evidence_refs` = union of dependencies' refs, `facts=[]`.
   - `stubs.skipped_reason(kind: TaskKind) -> str` = `f"{kind} is not implemented in phase 1"`.
-  - `execute.run_tasks_node(state: RequestState, deps: WorkerDeps) -> dict`: iterates Tasks for the request in `task_id` order, sequentially; skips any Task whose repository status is already `COMPLETED` or `SKIPPED` (replay safety); calls `check_not_cancelled` before each task; runs a task only when every dependency is `COMPLETED`; for `sql_analysis` transitions `PLANNED -> RUNNING`, invokes the subgraph with a fresh `TaskState`, on `result` transitions to `COMPLETED` with the result and appends up to 6 `Fact`s built from `result.summary` (split on sentences) with the result's `evidence_refs`, on `error` transitions to `FAILED`; for `reconcile` uses `reconcile_stub`; for `pdf_lookup` and `source_search` transitions `PLANNED -> SKIPPED` with `failure_reason = skipped_reason(kind)`. Returns `facts`, `plan` (statuses refreshed), `next_action="write report"`.
-  - `report.report_node(state: RequestState, deps: WorkerDeps) -> dict`: builds a `ReportMessage` whose `claims` are one per fact (`claim_id` = ULID, `text`, `evidence_refs`), `inputs_consulted` = every Artifact referenced by any fact, `uncertainties` = union of task result uncertainties plus a line per SKIPPED task, `coverage={"tasks": {"completed": n, "skipped": n, "failed": n}}`; saves it; moves the request to `COMPLETED`; returns `next_action="done"`.
-  - `cite.cite_node(state: RequestState, deps: WorkerDeps) -> dict`: phase 1 stub; returns `next_action="write report"` and leaves `facts` unchanged. Phase 3 replaces the body with the evidence re-read and claim call.
-  - `graph.build_graph(deps: WorkerDeps, checkpointer: BaseCheckpointSaver | None) -> CompiledStateGraph` over `RequestState`: `plan -> (await_user -> plan | plan_gate) -> run_tasks -> cite -> report -> END`. `PlanFailed` is caught in a wrapper that moves the request to `FAILED` with `failure_reason = reason` and routes to `END`; `Cancelled` is caught, sets `next_action="cancelled"` and routes to `END` without changing the status (the API already set CANCELLED).
+  - `cite.cite_stage(brief: RequestState, deps: WorkerDeps) -> list[Fact]`: phase 1 stub returning `brief["facts"]` unchanged. Phase 3 replaces the body with the evidence re-read and claim call.
+  - `report.write_report(brief: RequestState, outcomes: list[dict], deps: WorkerDeps) -> str`: builds a `ReportMessage` with id `derived_id(f"{request_message_id}:report")` whose `claims` are one per fact (`claim_id` = `derived_id(f"{report_id}:{i}")`, `text`, `evidence_refs`), `inputs_consulted` = every Artifact referenced by any fact, `uncertainties` = union of outcome uncertainties plus one line per SKIPPED or FAILED task, `coverage={"tasks": {"completed": n, "skipped": n, "failed": n}}`; saves it (an upsert, so a re-run rewrites the same Message); moves the request `RUNNING -> COMPLETED` when at least one task COMPLETED, else `RUNNING -> FAILED` with `failure_reason = "every task failed"`; returns the final status.
+  - `workflow.build_workflow(deps: WorkerDeps, checkpointer: BaseCheckpointSaver | None) -> Pregel`: wraps each stage once, `plan_t = task(name="plan")(partial(plan_stage, deps=deps))` and likewise `gate_t`, `execute_t`, `cite_t`, `report_t`, then returns `entrypoint(checkpointer=checkpointer)(run_request)` where `run_request(inputs: dict) -> dict` is:
+    1. `brief = initial_brief_from_repo(inputs["chat_id"], inputs["message_id"])` (identity fields, empty brief).
+    2. `attempt = 0`; loop: `planned = plan_t(brief, attempt).result()`; if `planned["kind"] == "plan"` break; `answer = interrupt(planned["pending"])`; `brief["constraints"].append(f"User answered '{planned['pending']['question']}': {answer['content']}")`; `attempt += 1`. The resume payload is `{"message_id", "content"}`. Every statement in this loop is deterministic given restored task results, so the interrupt index is stable across resumes.
+    3. Copy `goal`, `constraints`, `open_questions`, `next_action` from `planned` into `brief`; `brief["plan"] = gate_t(brief, planned).result()`.
+    4. Waves: `done: dict[str, dict] = {}`; while tasks remain, `check_not_cancelled`; `ready` = plan entries not in `done` whose dependencies are all in `done`, in `task_id` order; `futures = [execute_t(brief, e["task_id"]) for e in ready]`; `for f in futures: outcome = f.result(); done[outcome["task_id"]] = outcome; brief["facts"] += outcome["facts"]` (trimmed to the newest `budgets.facts_cap`); refresh `brief["plan"]` statuses. Futures are created in `task_id` order and waited in the same order, so replay restores them by name and call order.
+    5. `brief["facts"] = cite_t(brief).result()`; `status = report_t(brief, list(done.values())).result()`; `return {"status": status}`.
+    `PlanFailed` is caught: the request moves `RUNNING -> FAILED` with `failure_reason = reason` and the entrypoint returns `{"status": "FAILED"}`. `Cancelled` is caught: returns `{"status": "CANCELLED"}` without changing the status (the API already set it). Any other exception propagates so the checkpoint keeps the completed task results for a later `start`.
+  - `workflow.initial_brief_from_repo(deps, chat_id, message_id) -> RequestState`, shared with `tests/helpers.initial_brief`.
 
 - [ ] **Step 1: Write the failing tests**
 
 ```python
-# tests/test_graph.py
+# tests/test_workflow.py
+import threading
 from contextforge.core.models.base import ModelResponse, ToolCall
 from contextforge.core.models.scripted import ScriptedModel
-from contextforge.worker.graph import build_graph
+from contextforge.worker.workflow import build_workflow
 from contextforge.worker.tools.sql_query import SqlQueryTool
 from contextforge.core.tools.base import ToolContext
-from tests.helpers import make_deps, seed_chat_with_dataset, initial_state, six_task_plan, t1_result
+from tests.helpers import make_deps, seed_chat_with_dataset, six_task_plan, t1_result
+
+def _cfg(req) -> dict:
+    return {"configurable": {"thread_id": req.message_id}}
+
+def _start(deps, req) -> None:
+    deps.repos.messages.update_request_status("c1", req.message_id, "ACCEPTED", "RUNNING")
 
 def test_csv_sql_query_finds_planted_transfer_pairs() -> None:
     deps = make_deps(ScriptedModel({}))
@@ -773,10 +821,11 @@ def test_fixture_request_produces_six_tasks_and_a_report() -> None:
                           ModelResponse(structured=t1_result()),
                           ModelResponse(structured=t1_result()),
                           ModelResponse(structured=t1_result())]}
-    deps = make_deps(ScriptedModel(script))
+    deps = make_deps(ScriptedModel(script), tasks_in_flight=1)   # serial, so the script order is deterministic
     req = seed_chat_with_dataset(deps, chat_id="c1", user_id="u1", dataset_id="a2")
-    graph = build_graph(deps, checkpointer=None)
-    graph.invoke(initial_state(req), config={"configurable": {"thread_id": req.message_id}})
+    _start(deps, req)
+    out = build_workflow(deps, checkpointer=None).invoke({"chat_id": "c1", "message_id": req.message_id}, _cfg(req))
+    assert out["status"] == "COMPLETED"
     tasks = deps.repos.tasks.list_by_request(req.message_id)
     assert len(tasks) == 6
     assert sorted(t.status for t in tasks) == sorted(["COMPLETED"] * 4 + ["SKIPPED"] * 2)
@@ -786,50 +835,80 @@ def test_fixture_request_produces_six_tasks_and_a_report() -> None:
     assert deps.repos.messages.get("c1", req.message_id).status == "COMPLETED"
     assert len(deps.repos.model_calls.list_by_request(req.message_id)) == 5
 
-def test_cancel_between_tasks_stops_the_run() -> None:
+def test_independent_tasks_run_in_parallel() -> None:
+    gate = threading.Barrier(3, timeout=5)        # all three sql tasks must be inside the model at once
+    class Pausing(ScriptedModel):
+        def invoke(self, request):
+            if request.stage == "execute":
+                gate.wait()
+            return super().invoke(request)
+    plan = six_task_plan(); plan["tasks"][1]["dependsOn"] = []     # t1, t2, t3 all independent
+    deps = make_deps(Pausing({"plan": [ModelResponse(structured=plan)],
+                              "execute": [ModelResponse(structured=t1_result())] * 3}), tasks_in_flight=3)
+    req = seed_chat_with_dataset(deps, chat_id="c1", user_id="u1", dataset_id="a2")
+    _start(deps, req)
+    out = build_workflow(deps, checkpointer=None).invoke({"chat_id": "c1", "message_id": req.message_id}, _cfg(req))
+    assert out["status"] == "COMPLETED" and gate.broken is False
+
+def test_cancel_between_waves_stops_the_run() -> None:
     script = {"plan": [ModelResponse(structured=six_task_plan())],
               "execute": [ModelResponse(structured=t1_result())] * 3}
-    deps = make_deps(ScriptedModel(script))
+    deps = make_deps(ScriptedModel(script), tasks_in_flight=1)
     req = seed_chat_with_dataset(deps, chat_id="c1", user_id="u1", dataset_id="a2")
-    # cancel is set by the API; here we set it right after the plan is written by hooking the task repository
+    # the API sets CANCELLED; here the hook fires right after the first task completes
     deps.repos.tasks.on_save = lambda t: deps.repos.messages.update_request_status(  # type: ignore[attr-defined]
-        "c1", req.message_id, "RUNNING", "CANCELLED") if t.kind == "reconcile" else None
-    build_graph(deps, checkpointer=None).invoke(initial_state(req), config={"configurable": {"thread_id": req.message_id}})
-    tasks = deps.repos.tasks.list_by_request(req.message_id)
+        "c1", req.message_id, "RUNNING", "CANCELLED") if t.status == "COMPLETED" and t.kind == "sql_analysis" else None
+    _start(deps, req)
+    out = build_workflow(deps, checkpointer=None).invoke({"chat_id": "c1", "message_id": req.message_id}, _cfg(req))
+    assert out["status"] == "CANCELLED"
     assert deps.repos.messages.get("c1", req.message_id).status == "CANCELLED"
-    assert not any(t.status in ("RUNNING", "COMPLETED") for t in tasks)
     assert not [m for m in deps.repos.messages.list_by_chat("c1") if m.kind == "report"]
+
+def test_tool_call_cap_fails_the_task_not_the_request() -> None:
+    call = ModelResponse(tool_calls=[ToolCall(id="x", name="sql_query",
+                         arguments={"dataset_id": "a2", "sql": "SELECT 1"})], stop_reason="tool_use")
+    deps = make_deps(ScriptedModel({"plan": [ModelResponse(structured=six_task_plan())],
+                                    "execute": [call] * 14 + [ModelResponse(structured=t1_result())] * 2}), tasks_in_flight=1)
+    req = seed_chat_with_dataset(deps, chat_id="c1", user_id="u1", dataset_id="a2")
+    _start(deps, req)
+    out = build_workflow(deps, checkpointer=None).invoke({"chat_id": "c1", "message_id": req.message_id}, _cfg(req))
+    tasks = deps.repos.tasks.list_by_request(req.message_id)
+    failed = [t for t in tasks if t.status == "FAILED"]
+    assert out["status"] == "COMPLETED" and len(failed) >= 1 and "tool call budget" in failed[0].failure_reason
 
 def test_scripted_exhaustion_fails_request_with_reason() -> None:
     deps = make_deps(ScriptedModel({"plan": [ModelResponse(structured=six_task_plan())]}))
     req = seed_chat_with_dataset(deps, chat_id="c1", user_id="u1", dataset_id="a2")
-    build_graph(deps, checkpointer=None).invoke(initial_state(req), config={"configurable": {"thread_id": req.message_id}})
+    _start(deps, req)
+    out = build_workflow(deps, checkpointer=None).invoke({"chat_id": "c1", "message_id": req.message_id}, _cfg(req))
     m = deps.repos.messages.get("c1", req.message_id)
-    assert m.status == "FAILED" and m.failure_reason
+    assert out["status"] == "FAILED" and m.status == "FAILED" and m.failure_reason
     assert any(c.outcome == "ERROR" for c in deps.repos.model_calls.list_by_request(req.message_id))
 ```
 
-Add to `tests/helpers.py`: `six_task_plan() -> dict` (t1, t2, t3 `sql_analysis` on `a2` with t2 depending on t1; t4 `pdf_lookup`; t5 `source_search`; t6 `reconcile` depending on t1, t2, t3) and `t1_result() -> dict` (the spec 9.2 result trimmed to two transfer pairs, the card settlement pair, two evidence refs on `a2`, one uncertainty).
+Add to `tests/helpers.py`: `six_task_plan() -> dict` (t1, t2, t3 `sql_analysis` on `a2` with t2 depending on t1; t4 `pdf_lookup`; t5 `source_search`; t6 `reconcile` depending on t1, t2, t3) and `t1_result() -> dict` (the spec 9.2 result trimmed to two transfer pairs, the card settlement pair, two evidence refs on `a2`, two facts with those refs, one uncertainty).
+
+The tool-cap test: with the cap at six, t1 consumes six calls then fails on the seventh, retries once (six more, fails again), so fourteen tool-call responses are consumed before t2 and t3 complete; t6 then fails on its dependency, and the request still completes with the two failures under uncertainties.
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `uv run pytest tests/test_graph.py -v`
-Expected: FAIL, `ModuleNotFoundError: contextforge.worker.graph`.
+Run: `uv run pytest tests/test_workflow.py -v`
+Expected: FAIL, `ModuleNotFoundError: contextforge.worker.workflow`.
 
-- [ ] **Step 3: Implement the tool, nodes and graph**
+- [ ] **Step 3: Implement the tool, stages and workflow**
 
-Task execution is sequential in phase 1; parallel branches are deferred. The subgraph is compiled without a checkpointer (its transcript is dropped on completion by design, spec 8.6 level 2). `InMemoryTasks` gains an optional `on_save` hook used only by tests. `make_deps` registers `{"sql_query": SqlQueryTool(...)}` in `deps.tools` and an `InProcessQueue`.
+The subgraph is compiled without a checkpointer (its transcript is dropped on completion by design, spec 8.6 level 2). `InMemoryTasks` gains an optional `on_save` hook, called after the task is stored, used only by tests. `make_deps` registers `{"sql_query": SqlQueryTool(...)}` in `deps.tools` and an `InProcessQueue`. `config/budgets.yaml` gains `callBudget: 50`, `tasksInFlight: 5`, `toolCallsPerTask: 6` and `taskRetries: 1`; `Budgets` gains the matching fields and the Task 1 test of the YAML keys is extended.
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `uv run pytest tests/test_graph.py -v && uv run mypy src && uv run ruff check .`
-Expected: 4 passed, clean.
+Run: `uv run pytest tests/test_workflow.py -v && uv run mypy src && uv run ruff check .`
+Expected: 6 passed, clean.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/contextforge/worker tests/helpers.py tests/test_graph.py
-git commit -m "feat: task subgraph with sql_query, stubs, report node and full graph"
+git add config/budgets.yaml src/contextforge tests
+git commit -m "feat: execute stage with task subgraph, stubs, report, Functional API workflow"
 ```
 
 ---
@@ -841,13 +920,13 @@ git commit -m "feat: task subgraph with sql_query, stubs, report node and full g
 - Test: `tests/test_runner.py`
 
 **Interfaces:**
-- Consumes: `build_graph`, `SqliteSaver` from `langgraph.checkpoint.sqlite`, `Command` from `langgraph.types`.
+- Consumes: `build_workflow`, `SqliteSaver` from `langgraph.checkpoint.sqlite`, `Command` from `langgraph.types`.
 - Produces:
-  - `runner.RequestRunner(deps: WorkerDeps, checkpointer: BaseCheckpointSaver)` with:
-    - `start(chat_id: str, message_id: str) -> RunOutcome`: transitions the request `ACCEPTED -> RUNNING` with the conditional update; on `StaleStatusError` returns `RunOutcome(started=False, reason="already started")` without invoking the graph; otherwise invokes `build_graph(deps, checkpointer)` with `thread_id = message_id` and returns `RunOutcome(started=True, status=<final request status>)`.
-    - `resume(chat_id: str, message_id: str, reply: ClarificationResponseMessage | ActionResponseMessage) -> RunOutcome`: loads the checkpoint state for the thread; verifies the request is `WAITING_USER` and `state["pending_interrupt"]["message_id"] == reply.in_reply_to_message_id`, else returns `RunOutcome(started=False, reason="reply does not target the pending interrupt")` and changes nothing; otherwise appends a `constraints` entry from the reply content, transitions `WAITING_USER -> RUNNING`, saves the reply Message, and invokes the graph with `Command(resume={"message_id": reply.message_id, "content": reply.content})`.
-    - `RunOutcome(started: bool, status: RequestStatus | None = None, reason: str | None = None)`.
-  - On resume the graph re-runs only `await_user_node`, which returns the answer into `constraints` and clears `pending_interrupt`; the edge back to `plan_node` then makes the second planner call (the scripted model's second plan response). The runner's `resume` also saves the reply Message and sends nothing to the queue in phase 1 (the queue is used by the API service in phase 4).
+  - `runner.RunOutcome(started: bool, status: RequestStatus | None = None, reason: str | None = None)`.
+  - `runner.RequestRunner(deps: WorkerDeps, checkpointer: BaseCheckpointSaver)` holding one workflow from `build_workflow(deps, checkpointer)`, with:
+    - `start(chat_id, message_id) -> RunOutcome`: transitions the request `ACCEPTED -> RUNNING` with the conditional update; on `StaleStatusError` returns `RunOutcome(started=False, reason="already started")` without invoking the workflow. Otherwise, with `config = {"configurable": {"thread_id": message_id}}`: when `workflow.get_state(config).values` is empty (no checkpoint) invokes `{"chat_id", "message_id"}`; when a checkpoint exists (an operator requeue after a crash) invokes `None`, which continues the thread with completed task results restored. Returns `RunOutcome(started=True, status=<returned status>)`.
+    - `pending_interrupt(message_id) -> PendingInterrupt | None`: the `value` of the first interrupt in `workflow.get_state(config).interrupts` (fall back to `tasks[*].interrupts` if the attribute is absent in the installed LangGraph), else `None`.
+    - `resume(chat_id, message_id, reply: ClarificationResponseMessage | ActionResponseMessage) -> RunOutcome`: verifies the request is `WAITING_USER` and `pending_interrupt(message_id)["message_id"] == reply.in_reply_to_message_id`, else returns `RunOutcome(started=False, reason="reply does not target the pending interrupt")` and changes nothing; otherwise saves the reply Message, transitions `WAITING_USER -> RUNNING`, and invokes `Command(resume={"message_id": reply.message_id, "content": reply.content})` with the same config. The entrypoint re-runs from its first line; the plan task result is restored, the interrupt returns the answer, and the second planner call is a fresh task. The queue is not used in phase 1 (the API service uses it from phase 4).
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -864,6 +943,11 @@ from tests.helpers import make_deps, seed_chat_with_dataset, six_task_plan, t1_r
 def _saver(path) -> SqliteSaver:
     return SqliteSaver(sqlite3.connect(str(path), check_same_thread=False))
 
+def _reply(req, target: str, content: str = "ACC-SAV-1 and ACC-CUR-2") -> ClarificationResponseMessage:
+    return ClarificationResponseMessage(message_id="m3", chat_id="c1", user_id="u1", sender="user",
+        kind="clarification_response", content=content, request_message_id=req.message_id,
+        in_reply_to_message_id=target, created_at="t", updated_at="t")
+
 def test_duplicate_start_runs_once() -> None:
     deps = make_deps(ScriptedModel({"plan": [ModelResponse(structured=six_task_plan())],
                                     "execute": [ModelResponse(structured=t1_result())] * 3}))
@@ -871,7 +955,7 @@ def test_duplicate_start_runs_once() -> None:
     runner = RequestRunner(deps, _saver(":memory:"))
     first = runner.start("c1", req.message_id)
     second = runner.start("c1", req.message_id)
-    assert first.started and not second.started
+    assert first.started and first.status == "COMPLETED" and not second.started
     assert len([c for c in deps.repos.model_calls.list_by_request(req.message_id) if c.stage == "plan"]) == 1
 
 def test_clarification_interrupt_then_resume_completes(tmp_path) -> None:
@@ -886,32 +970,51 @@ def test_clarification_interrupt_then_resume_completes(tmp_path) -> None:
     pending = deps.repos.messages.pending_for_request("c1", req.message_id)
     assert len(pending) == 1 and pending[0].kind == "clarification"
     # new runner instance = process restart; same sqlite file = same checkpoint
-    reply = ClarificationResponseMessage(message_id="m3", chat_id="c1", user_id="u1", sender="user",
-        kind="clarification_response", content="ACC-SAV-1 and ACC-CUR-2", request_message_id=req.message_id,
-        in_reply_to_message_id=pending[0].message_id, created_at="t", updated_at="t")
-    out = RequestRunner(deps, _saver(db)).resume("c1", req.message_id, reply)
+    out = RequestRunner(deps, _saver(db)).resume("c1", req.message_id, _reply(req, pending[0].message_id))
     assert out.started and deps.repos.messages.get("c1", req.message_id).status == "COMPLETED"
     assert len(deps.repos.tasks.list_by_request(req.message_id)) == 6
+    plans = [c for c in deps.repos.model_calls.list_by_request(req.message_id) if c.stage == "plan"]
+    assert len(plans) == 2                          # the first planner call was restored, not re-paid
+
+def test_two_clarifications_then_plan(tmp_path) -> None:
+    db = tmp_path / "ckpt.sqlite"
+    script = {"plan": [ModelResponse(structured=clarification("Which accounts?")),
+                       ModelResponse(structured=clarification("Which months?")),
+                       ModelResponse(structured=six_task_plan())],
+              "execute": [ModelResponse(structured=t1_result())] * 3}
+    deps = make_deps(ScriptedModel(script))
+    req = seed_chat_with_dataset(deps, chat_id="c1", user_id="u1", dataset_id="a2")
+    RequestRunner(deps, _saver(db)).start("c1", req.message_id)
+    for i in range(2):
+        pending = [m for m in deps.repos.messages.pending_for_request("c1", req.message_id)]
+        assert len(pending) == 1
+        out = RequestRunner(deps, _saver(db)).resume("c1", req.message_id, _reply(req, pending[0].message_id, f"answer {i}"))
+        assert out.started
+    assert deps.repos.messages.get("c1", req.message_id).status == "COMPLETED"
+    assert len([m for m in deps.repos.messages.list_by_chat("c1") if m.kind == "clarification"]) == 2
 
 def test_resume_with_wrong_target_is_refused(tmp_path) -> None:
     db = tmp_path / "ckpt.sqlite"
     deps = make_deps(ScriptedModel({"plan": [ModelResponse(structured=clarification("Which?"))]}))
     req = seed_chat_with_dataset(deps, chat_id="c1", user_id="u1", dataset_id="a2")
     RequestRunner(deps, _saver(db)).start("c1", req.message_id)
-    reply = ClarificationResponseMessage(message_id="m3", chat_id="c1", user_id="u1", sender="user",
-        kind="clarification_response", content="x", request_message_id=req.message_id,
-        in_reply_to_message_id="not-the-pending-one", created_at="t", updated_at="t")
-    out = RequestRunner(deps, _saver(db)).resume("c1", req.message_id, reply)
+    out = RequestRunner(deps, _saver(db)).resume("c1", req.message_id, _reply(req, "not-the-pending-one"))
     assert not out.started and deps.repos.messages.get("c1", req.message_id).status == "WAITING_USER"
+    assert not [m for m in deps.repos.messages.list_by_chat("c1") if m.kind == "clarification_response"]
 
-def test_restart_after_two_tasks_does_not_replay_them(tmp_path) -> None:
+def test_restart_after_crash_does_not_replay_finished_tasks(tmp_path) -> None:
     db = tmp_path / "ckpt.sqlite"
     script = {"plan": [ModelResponse(structured=six_task_plan())],
               "execute": [ModelResponse(structured=t1_result())] * 3}
-    deps = make_deps(ScriptedModel(script))
+    deps = make_deps(ScriptedModel(script), tasks_in_flight=1)
     req = seed_chat_with_dataset(deps, chat_id="c1", user_id="u1", dataset_id="a2")
-    deps.repos.tasks.on_save = lambda t: (_ for _ in ()).throw(RuntimeError("crash")) if (  # type: ignore[attr-defined]
-        t.kind == "sql_analysis" and t.status == "COMPLETED" and len([x for x in deps.repos.tasks.list_by_request(req.message_id) if x.status == "COMPLETED"]) == 2) else None
+    completed = []
+    def crash_after_second_completed(t):
+        if t.kind == "sql_analysis" and t.status == "COMPLETED":
+            completed.append(t.task_id)
+            if len(completed) == 2:
+                raise RuntimeError("crash")
+    deps.repos.tasks.on_save = crash_after_second_completed  # type: ignore[attr-defined]
     try:
         RequestRunner(deps, _saver(db)).start("c1", req.message_id)
     except RuntimeError:
@@ -919,21 +1022,24 @@ def test_restart_after_two_tasks_does_not_replay_them(tmp_path) -> None:
     deps.repos.tasks.on_save = None  # type: ignore[attr-defined]
     calls_before = len(deps.repos.model_calls.list_by_request(req.message_id))
     deps.repos.messages.update_request_status("c1", req.message_id, "RUNNING", "ACCEPTED")  # operator requeue
-    RequestRunner(deps, _saver(db)).start("c1", req.message_id)
-    assert deps.repos.messages.get("c1", req.message_id).status == "COMPLETED"
+    out = RequestRunner(deps, _saver(db)).start("c1", req.message_id)
+    assert out.started and deps.repos.messages.get("c1", req.message_id).status == "COMPLETED"
     executes_after = [c for c in deps.repos.model_calls.list_by_request(req.message_id) if c.stage == "execute"]
     assert len(executes_after) == 3 and len(deps.repos.model_calls.list_by_request(req.message_id)) == calls_before + 1
+    assert len([m for m in deps.repos.messages.list_by_chat("c1") if m.kind == "report"]) == 1
 
-def test_next_action_is_read_first_on_resume(tmp_path) -> None:
+def test_pending_interrupt_carries_next_action(tmp_path) -> None:
     db = tmp_path / "ckpt.sqlite"
     deps = make_deps(ScriptedModel({"plan": [ModelResponse(structured=clarification("Which?"))]}))
     req = seed_chat_with_dataset(deps, chat_id="c1", user_id="u1", dataset_id="a2")
     RequestRunner(deps, _saver(db)).start("c1", req.message_id)
-    state = RequestRunner(deps, _saver(db)).state_for(req.message_id)
-    assert state["next_action"] and state["pending_interrupt"]["kind"] == "clarification"
+    pending = RequestRunner(deps, _saver(db)).pending_interrupt(req.message_id)
+    assert pending is not None and pending["kind"] == "clarification" and pending["next_action"]
 ```
 
-Add `clarification(question: str) -> dict` to `tests/helpers.py` (a `PlannerOutput` of kind clarification). Add `RequestRunner.state_for(message_id) -> RequestState` returning the checkpoint's current values.
+Add `clarification(question: str) -> dict` to `tests/helpers.py` (a `PlannerOutput` of kind clarification with `nextAction="wait for the answer"`).
+
+The crash test: the task whose save raised is COMPLETED in the repository but has no checkpointed result; on the requeued `start` its execute task re-runs, hits `StaleStatusError` on `PLANNED -> RUNNING`, and returns the stored outcome without a model call. The first completed task is restored from the checkpoint. Only the third task pays a new execute call, so the total grows by exactly one.
 
 - [ ] **Step 2: Run tests to verify they fail**
 
@@ -942,18 +1048,16 @@ Expected: FAIL, `ModuleNotFoundError: contextforge.worker.runner`.
 
 - [ ] **Step 3: Implement `runner.py`**
 
-The replay test needs the restart to resume from the checkpoint with `start`: when a checkpoint exists for the thread and the request is ACCEPTED again, `start` invokes the graph with `None` as input so LangGraph continues from the last checkpoint (the `run_tasks` node restarts and skips COMPLETED tasks).
-
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `uv run pytest tests/test_runner.py -v && uv run mypy src`
-Expected: 5 passed, clean.
+Expected: 6 passed, clean.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/contextforge/worker/runner.py src/contextforge/worker/nodes/plan.py tests/helpers.py tests/test_runner.py
-git commit -m "feat: runner with SQLite checkpoints, clarification resume, duplicate protection"
+git add src/contextforge/worker/runner.py tests/helpers.py tests/test_runner.py
+git commit -m "feat: runner with SQLite checkpoints, clarification resume, crash restart, duplicate protection"
 ```
 
 ---
@@ -962,7 +1066,7 @@ git commit -m "feat: runner with SQLite checkpoints, clarification resume, dupli
 
 **Files:**
 - Create: `src/contextforge/core/context/compaction.py`
-- Modify: `src/contextforge/worker/nodes/execute.py` (call `compact` before each `call_model`)
+- Modify: `src/contextforge/worker/stages/execute.py` (call `compact` before each `call_model`)
 - Test: `tests/test_compaction.py`
 
 **Interfaces:**
@@ -1029,7 +1133,7 @@ Expected: FAIL, `ModuleNotFoundError: contextforge.core.context.compaction`.
 
 - [ ] **Step 3: Implement `compaction.py`; wire `compact` into `call_model` with `budget_tokens = budgets.messages_budget(built.fixed_tokens)`**
 
-Also add an end-to-end check to `tests/test_graph.py`: run the six-task fixture with a `Budgets` copy whose `cap_input_tokens` is 3,000 and a compress script of three responses; assert the request still COMPLETES and the report claims keep their evidence refs.
+Also add an end-to-end check to `tests/test_workflow.py`: run the six-task fixture with a `Budgets` copy whose `cap_input_tokens` is 3,000 and a compress script of three responses; assert the request still COMPLETES and the report claims keep their evidence refs.
 
 - [ ] **Step 4: Run tests to verify they pass**
 
@@ -1039,7 +1143,7 @@ Expected: all tests pass, clean.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/contextforge/core/context/compaction.py src/contextforge/worker/nodes/execute.py tests
+git add src/contextforge/core/context/compaction.py src/contextforge/worker/stages/execute.py tests
 git commit -m "feat: compaction levels 1 and 3 with tool-call boundary rule"
 ```
 
@@ -1072,8 +1176,9 @@ git commit -m "docs: phase 1 complete"
 
 - Packages live under `src/contextforge/` rather than as top-level `core`, `worker`, `api`.
 - The phase 1 `sql_query` tool runs DuckDB in-process over the fixture CSV. The spec says "fake `sql_query` tool"; a real query over the fixture is simpler than scripting rows and still has no ingestion, isolation or limits, which stay in phase 3.
-- Task execution is sequential in dependency order. Parallel branches are a later change inside `run_tasks_node`.
-- `RequestState` carries `chat_id` and `user_id` in addition to the spec's fields, as identity for writes.
+- Tasks run in dependency-driven waves with up to five in flight, as the grill decided; the spec's phase 1 row still says one subgraph at a time.
+- `RequestState` carries `chat_id` and `user_id` in addition to the spec's fields, as identity for writes, and carries no `messages`: only `TaskState` has a transcript.
 - `reconcile` is a stub that merges dependency summaries; `pdf_lookup` and `source_search` tasks are SKIPPED with a reason.
 - The resume path appends the clarification answer to `constraints` and re-plans with the same planner call; a separate `clarify` stage is not introduced.
-- Interrupts live in a dedicated `await_user` node; the task loop is idempotent by repository status; raw_result ids are deterministic; cancellation is cooperative. These came from the LLD review of 4 November 2026 and are recorded in the decisions log.
+- Orchestration uses the Functional API (decided 5 November 2026) instead of the `await_user` node and the skip-on-replay task loop from the 4 November LLD review; deterministic ids and the cooperative cancel stay.
+- Deadlines (60 s, 120 s, 15 min) and the spend cap are not enforced in phase 1; they need the real model adapter and arrive with it in phase 2.
