@@ -14,7 +14,7 @@
 
 - Python 3.12; `uv` with a committed `uv.lock`; `ruff` and `mypy --strict` clean; `pytest` green before every commit.
 - Code lives under `src/contextforge/{core,worker,api}`; `api` stays empty in phase 1. (The spec names the packages `core`, `worker`, `api`; nesting them under one distribution package avoids shadowing generic names.)
-- Field names are camelCase in Pydantic models via `alias_generator=to_camel` with `populate_by_name=True`; Python attributes are snake_case. `extra="forbid"` on every entity. `from` is never a field name; the sender field is `sender`.
+- Naming follows implementation-plan 12.1: snake_case Python, camelCase on the wire and in YAML, enum values and error codes exactly as the spec writes them. Field names are camelCase in Pydantic models via `alias_generator=to_camel` with `populate_by_name=True`; Python attributes are snake_case; code constructs models by attribute name. `extra="forbid"` on every entity. `from` is never a field name; the sender field is `sender`.
 - Ids are ULID strings; timestamps are ISO 8601 UTC strings produced by one helper.
 - Enumerations are `StrEnum`s whose values are exactly the spec's strings (`ACCEPTED`, `sql_analysis`, …).
 - No code outside `core/repositories` and `core/storage` builds a storage key or path.

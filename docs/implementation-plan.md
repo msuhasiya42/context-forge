@@ -417,6 +417,21 @@ No code outside the storage module builds a key string. Every entity exposes `sa
 
 Stable content first (memory file, stage prompt) so prompt caching hits; volatile content after.
 
+Which stage fills which section (recorded 6 November 2026; the phase 1 plan assumes this):
+
+| Section | plan | execute | cite | compress |
+|---|---|---|---|---|
+| 1 memory file and `User.instructions` | yes | yes | yes | yes |
+| 2 brief: goal, constraints, nextAction | request text only | yes | yes | no |
+| 3 facts | no | yes | the facts to verify | no |
+| 4 openQuestions | no | yes | no | no |
+| 5 dependency summaries | no | yes | no | no |
+| 6 evidence slices | no | via tools | yes, re-read | no |
+| 7 tool schemas | none | the task kind's tools | none | none |
+| 8 messages | prior context: claims of the last two reports | the task transcript | none | the older messages to summarise |
+
+The planner sees sources and prior context but no tools, because it names tasks, not calls. Execute sees everything. Cite sees facts and evidence only, so it cannot wander. Compress sees only the messages it must shrink, so brief fields can never be lost to compaction. The builder is a pure function: stages fetch, the builder assembles and measures.
+
 ### 8.3 Reading artifacts back
 
 | Model asks | Tool | Returns | If too big |
@@ -1142,6 +1157,38 @@ Rules fixed by the LLD review:
 - Routes call services; services hold the rules and are tested without HTTP.
 
 Python 3.12, `uv` with a committed lockfile, `pytest`, `ruff`, `mypy` strict. Tests before implementation for every behavior in section 13. No AWS resources before phase 10; SQLite checkpointer, in-memory repositories and local disk storage until then.
+
+### 12.1 Naming conventions
+
+Snake case inside Python, camel case on the wire. Fixed 6 November 2026.
+
+| Where | Convention | Examples |
+|---|---|---|
+| Python modules, functions, variables, Pydantic attributes, LangGraph state keys (`RequestState`, `TaskState`) | `snake_case` (PEP 8) | `request_message_id`, `build_context`, `tool_results.py` |
+| Python classes | `PascalCase` | `RequestMessage`, `ContextBuilder` |
+| Python constants | `UPPER_SNAKE` | `MEMORY_VERSION` |
+| JSON over HTTP, SSE event payloads, DynamoDB attribute names, `config/*.yaml` keys | `camelCase` | `requestMessageId`, `inReplyToMessageId`, `lastEvaluatedKey`, `capInputTokens` |
+| Enum values, error codes, task kinds, Message kinds, SSE event names | lower `snake_case` strings or `UPPER_SNAKE` statuses, exactly as the spec writes them | `sql_analysis`, `invalid_state`, `clarification_response`, `WAITING_USER` |
+| Environment variables | `UPPER_SNAKE` | `CONTEXTFORGE_AWS_PROFILE` |
+| URL paths | lower case plural nouns, `camelCase` path parameters | `/chats/{chatId}/messages` |
+| TypeScript | `camelCase` members, `PascalCase` types and components, CSS Modules classes `camelCase` | `useChatMessages`, `MessageTimeline` |
+
+The bridge is Pydantic: every entity sets `alias_generator=to_camel` and `populate_by_name=True`, so one model is snake_case in code and camelCase when serialised. Code constructs models by attribute name; only the boundary (routes, repositories, YAML loading) uses aliases. Never a field named `from`; the sender field is `sender`.
+
+### 12.2 Tool inventory
+
+Three tools are ours; the rest arrive through the MCP client and need no tool code. Every tool, ours or MCP, implements the `Tool` Protocol in `core/tools/base.py` (`spec`, `permission`, `run(arguments, ctx)`).
+
+| Tool | Kind | Phase | Notes |
+|---|---|---|---|
+| `sql_query(dataset_id, sql)` | ours, READ | 1 over the fixture CSV; 3 over ingested datasets | the only tool coded in phase 1 |
+| `read_artifact(id, locator)` | ours, READ | 3 | slices by row range, page or item locator (8.3, 8.9) |
+| `search_chunks(query, artifact_ids)` | ours, READ | 5 | hybrid retrieval over the chunk index |
+| fetch; DuckDuckGo `search`, `fetch_content`; time `get_current_time`, `convert_time` | MCP, public, `auth.kind: none`, READ | 6 | from `config/integrations.yaml` |
+| Gmail and Drive read tools | MCP, OAuth, READ | 8 | behind an IntegrationConnection |
+| email draft | WRITE, gated by a proposed_action Message | 11 | ours or MCP, decided then |
+
+Until phase 6 a task's tool set is the tools allowed for its kind; lexical tool retrieval (system-design section 7) starts when the catalog exceeds a handful.
 
 ## 13. Phase 1 task list
 
