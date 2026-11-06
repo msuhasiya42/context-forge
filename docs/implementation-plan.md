@@ -725,7 +725,7 @@ Worker: validate against the sql_analysis result schema; write to `REQ#m1 / TASK
 
 ### 9.3 One request end to end: every write, every call, the cost
 
-Recorded 4 November 2026. The request is the section 9.1 example. Chat c1 already holds a1 bank-export.xlsx with dataset a2, and card statements a4 and a6, indexed. Models are Bedrock: `anthropic.claude-opus-5-5` for plan and cite, `anthropic.claude-haiku-5-5` for execute and compress, `amazon.titan-embed-text-v2` for indexing.
+Recorded 4 November 2026. The request is the section 9.1 example. Chat c1 already holds a1 bank-export.xlsx with dataset a2, and card statements a4 and a6, indexed. Models are Bedrock in Sydney: inference profile `au.anthropic.claude-opus-5-5` for plan and cite, `au.anthropic.claude-haiku-5-5` for execute and compress, `amazon.titan-embed-text-v2:0` for indexing.
 
 **1. Submit.** `POST /chats/c1/requests` with `Idempotency-Key` and `{ content, artifactIds: [a2, a4, a6] }`. The API checks the artifacts are AVAILABLE in c1 and writes one transaction; 202 with the Message.
 

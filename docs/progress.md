@@ -53,6 +53,21 @@ Phases are defined in system-design section 14 (revised 4 Nov 2026 for learning 
 | 9. AWS persistence | Not started |
 | 10. Writes and hosting | Not started |
 
+## AWS resources (created 6 November 2026, Sydney ap-southeast-2)
+
+Account 441186132531, project "Proof of Concept". Mumbai is unavailable on the account's plan; Sydney was chosen instead. Created through the console and CloudShell, to be imported into CDK in phase 10.
+
+| Resource | Name | Settings |
+|---|---|---|
+| DynamoDB table | `contextforge` | PK, SK strings; on-demand; GSI1 on GSI1PK, GSI1SK projecting indexStatus, kind, name, chatId; stream on, NEW_IMAGE; point-in-time recovery on; deletion protection on |
+| SQS queue | `contextforge-work` | standard; visibility timeout 1200 s; dead-letter after 3 receives |
+| SQS dead-letter queue | `contextforge-work-dlq` | retention 14 days |
+| S3 bucket | `contextforge-441186132531-apse2` | private, ACLs disabled, versioning off; lifecycle rule `expire-raw-results`: prefix `raw_result/` expires after 30 days |
+| Bedrock | no setup needed | models auto-enable on first invoke; Claude 5.5 via inference profiles `au.anthropic.claude-opus-5-5`, `au.anthropic.claude-haiku-5-5` (or `global.`); `amazon.titan-embed-text-v2:0` on-demand in-region |
+| IAM policy and user | `contextforge-dev` | pending: the policy document is at `/tmp/contextforge-dev.json` in CloudShell; creation was left to Mayur (see the log) |
+
+Not created on purpose: the stream-to-SQS Lambda and service roles (phase 10, CDK).
+
 ## Legacy files
 
 `bridge.py`, `build_template.py`, `test_bridge.py`, `verify_delivery.py` and `prototype.template.json` are an earlier, narrow DynamoDB-to-SQS event-delivery prototype using the old Job terminology. They are not the application and are not integrated. Keep them as reference until phase 9 deliberately replaces or removes them. `evidence/budget-created.jpg` records the $5 AWS usage alert.
@@ -72,3 +87,4 @@ Phases are defined in system-design section 14 (revised 4 Nov 2026 for learning 
 - **4 Nov 2026, end of session.** All eight open decisions confirmed. `User.instructions`, `User.updatedAt` and `Chat.lastRequestStatus` added to the entity tables. Committed. Next: Codex starts phase 1 task 1 (project skeleton) from implementation-plan section 13.
 - **4 Nov 2026, LLD.** Module map and layering rule written (implementation-plan section 12). End-to-end walk of one request (9.3) exposed four defects (planner re-call on resume, task replay on restart, duplicate raw_result on replay, no cancel path); all nine review fixes applied to the phase 1 plan at `docs/superpowers/plans/2026-11-04-phase-1-engine.md` and recorded in the decisions log. Open decisions 2 to 16 from the 4 Nov list remain; next is the execution approach for phase 1.
 - **5 Nov 2026.** Grill session (grill-with-docs run by hand): sixteen decisions on limits, behaviour and structure recorded in the decisions log; five glossary terms added; `facts` added to Task.result. Orchestration moves to the LangGraph Functional API; phase 1 plan tasks 8 to 10 to be rewritten accordingly before build. Next: backend runtime architecture, then rewrite the plan, then start phase 1.
+- **6 Nov 2026.** AWS setup through Claude in Chrome (Brave) and CloudShell. Mumbai unavailable on the account plan; Sydney chosen. Created the DynamoDB table with GSI1, stream, PITR and deletion protection; two SQS queues; the S3 bucket with the raw_result lifecycle rule. Bedrock needs no model-access step. The IAM policy and user creation was blocked by the Claude Code permission classifier (credential grant), so Mayur runs those commands himself. Next: Mayur creates the IAM user and an access key, configures the `contextforge` CLI profile, then phase 1 task 1.
