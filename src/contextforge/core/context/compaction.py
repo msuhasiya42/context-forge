@@ -10,9 +10,8 @@ from typing import Any, TypeGuard
 
 from langchain_core.messages import AIMessage, AnyMessage, SystemMessage, ToolMessage
 
-from contextforge.core.context.builder import message_text
+from contextforge.core.context.builder import messages_tokens
 from contextforge.core.context.prompts import load_prompt
-from contextforge.core.context.tokens import estimate_tokens
 from contextforge.core.entities.model_call import Stage
 from contextforge.core.models.base import ModelClient, ModelRequest
 
@@ -20,11 +19,6 @@ from contextforge.core.models.base import ModelClient, ModelRequest
 _STUB_PREFIX = "[tool "
 _SUMMARY_PREFIX = "Summary of earlier work: "
 _SUMMARY_MAX_TOKENS = 1000
-
-
-def messages_tokens(messages: list[AnyMessage]) -> int:
-    """Estimated tokens of ``messages``, measured as the Context Builder measures them."""
-    return sum(estimate_tokens(message_text(m)) for m in messages)
 
 
 def compact(

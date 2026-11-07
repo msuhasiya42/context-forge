@@ -1,9 +1,9 @@
 # tests/test_compaction.py
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
+from contextforge.core.context.builder import messages_tokens
 from contextforge.core.context.compaction import (
     compact,
-    messages_tokens,
     stub_old_tool_results,
     summarize_messages,
 )

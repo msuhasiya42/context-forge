@@ -90,7 +90,7 @@ def build_context(inputs: ContextInputs, budgets: Budgets) -> BuiltContext:
         ("memory", _tokens(system)),
         *((name, _tokens([text])) for name, text in user_sections.items()),
         ("tools", _tokens([_tool_text(tool) for tool in inputs.tools])),
-        ("messages", _tokens([message_text(m) for m in inputs.loop_messages])),
+        ("messages", messages_tokens(inputs.loop_messages)),
     ]
     return BuiltContext(
         system=system,
@@ -170,11 +170,16 @@ def _tool_text(tool: ToolSpec) -> str:
     return json.dumps(tool.model_dump(mode="json", by_alias=True), sort_keys=True)
 
 
-def message_text(message: AnyMessage) -> str:
-    """The text a loop message is measured by: its content plus, on an AI turn, its tool calls.
+def messages_tokens(messages: list[AnyMessage]) -> int:
+    """Estimated tokens of loop messages: the one rule the builder and compaction both use.
 
-    Shared with compaction so the builder and the compactor count a message the same way.
+    Every message costs at least one token, even with empty text, because it is still sent.
     """
+    return sum(estimate_tokens(_message_text(m)) for m in messages)
+
+
+def _message_text(message: AnyMessage) -> str:
+    """The text a loop message is measured by: its content plus, on an AI turn, its tool calls."""
     content = message.content
     text = content if isinstance(content, str) else json.dumps(content, sort_keys=True)
     if isinstance(message, AIMessage) and message.tool_calls:

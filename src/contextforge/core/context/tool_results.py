@@ -16,7 +16,8 @@ class ProcessedRows:
     """What the model sees of one tool result.
 
     ``rows`` are the kept, shaped rows; ``artifact_id`` names the raw_result Artifact holding
-    every row when some were left out, and is None otherwise.
+    every row, unshaped, when rows were left out or a cell or column was cut, and is None
+    otherwise.
     """
 
     rows: list[dict[str, Any]]
@@ -40,8 +41,8 @@ def process_rows(
     user_id: str,
     name: str,
     artifact_id: str,
-    column_cap: int = 20,
-    cell_char_cap: int = 200,
+    column_cap: int,
+    cell_char_cap: int,
 ) -> ProcessedRows:
     """Keep at most ``cap`` rows, shaped to ``column_cap`` columns and ``cell_char_cap`` chars.
 
@@ -74,8 +75,8 @@ def process_rows(
 def _was_shaped(original: list[dict[str, Any]], shaped: list[dict[str, Any]]) -> bool:
     """True when shaping cut a column or a cell, so the kept rows are not the full rows.
 
-    Shaping only drops keys or replaces long strings, so any difference is a cut; unchanged
-    cells are the same objects, so the comparison is by identity for them.
+    Compared by value: shaping only drops keys or replaces long strings, so any difference
+    between a kept row and its original is a cut.
     """
     return shaped != original
 

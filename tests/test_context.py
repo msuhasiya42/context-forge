@@ -2,6 +2,7 @@
 import dataclasses
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage
@@ -11,9 +12,9 @@ from contextforge.core.context.builder import (
     ContextInputs,
     SourceLine,
     build_context,
-    message_text,
+    messages_tokens,
 )
-from contextforge.core.context.tool_results import process_rows, raw_result_id
+from contextforge.core.context.tool_results import ProcessedRows, process_rows, raw_result_id
 from contextforge.core.entities.message import (
     Claim,
     MessageKind,
@@ -76,6 +77,29 @@ def _inputs() -> ContextInputs:
                 tool_calls=[{"name": "sql_query", "args": {"sql": "select 1"}, "id": "x1"}],
             ),
         ],
+    )
+
+
+def _process(
+    repos: Repositories,
+    blobs: MemoryBlobStore,
+    rows: list[dict[str, Any]],
+    artifact_id: str,
+    cap: int = 50,
+) -> ProcessedRows:
+    """``process_rows`` for chat c1 with the shaping caps from config/budgets.yaml."""
+    budgets = load_budgets()
+    return process_rows(
+        rows,
+        cap=cap,
+        artifacts=repos.artifacts,
+        blobs=blobs,
+        chat_id="c1",
+        user_id="u1",
+        name="q",
+        artifact_id=artifact_id,
+        column_cap=budgets.column_cap,
+        cell_char_cap=budgets.cell_char_cap,
     )
 
 
@@ -144,37 +168,10 @@ def test_facts_are_capped_to_newest() -> None:
 def test_process_rows_boundary_at_cap() -> None:
     repos, blobs = Repositories.in_memory(), MemoryBlobStore()
     fifty = [{"i": i} for i in range(50)]
-    r = process_rows(
-        fifty,
-        cap=50,
-        artifacts=repos.artifacts,
-        blobs=blobs,
-        chat_id="c1",
-        user_id="u1",
-        name="q",
-        artifact_id="a6",
-    )
+    r = _process(repos, blobs, fifty, "a6")
     assert r.artifact_id is None and len(r.rows) == 50 and r.text == "showing 50 of 50 rows"
-    r2 = process_rows(
-        fifty + [{"i": 50}],
-        cap=50,
-        artifacts=repos.artifacts,
-        blobs=blobs,
-        chat_id="c1",
-        user_id="u1",
-        name="q",
-        artifact_id="a7",
-    )
-    r3 = process_rows(
-        fifty + [{"i": 50}],
-        cap=50,
-        artifacts=repos.artifacts,
-        blobs=blobs,
-        chat_id="c1",
-        user_id="u1",
-        name="q",
-        artifact_id="a7",
-    )  # replay: same id, one artifact
+    r2 = _process(repos, blobs, fifty + [{"i": 50}], "a7")
+    r3 = _process(repos, blobs, fifty + [{"i": 50}], "a7")  # replay: same id, one artifact
     assert r3.artifact_id == "a7" and len(repos.artifacts.list_by_chat("c1")) == 1
     assert (
         r2.artifact_id
@@ -188,46 +185,19 @@ def test_process_rows_boundary_at_cap() -> None:
 
 def test_process_rows_1240_rows_keeps_50() -> None:
     repos, blobs = Repositories.in_memory(), MemoryBlobStore()
-    r = process_rows(
-        [{"i": i} for i in range(1240)],
-        cap=50,
-        artifacts=repos.artifacts,
-        blobs=blobs,
-        chat_id="c1",
-        user_id="u1",
-        name="q",
-        artifact_id="a8",
-    )
+    r = _process(repos, blobs, [{"i": i} for i in range(1240)], "a8")
     assert len(r.rows) == 50 and r.total_rows == 1240 and "1190 more row(s)" in r.text
 
 
 def test_zero_rows_is_a_valid_result() -> None:
     repos, blobs = Repositories.in_memory(), MemoryBlobStore()
-    r = process_rows(
-        [],
-        cap=50,
-        artifacts=repos.artifacts,
-        blobs=blobs,
-        chat_id="c1",
-        user_id="u1",
-        name="q",
-        artifact_id="a8",
-    )
+    r = _process(repos, blobs, [], "a8")
     assert r.rows == [] and r.artifact_id is None and r.text == "showing 0 of 0 rows"
 
 
 def test_wide_cells_are_shaped_once() -> None:
     repos, blobs = Repositories.in_memory(), MemoryBlobStore()
-    r = process_rows(
-        [{"c": "x" * 500}],
-        cap=50,
-        artifacts=repos.artifacts,
-        blobs=blobs,
-        chat_id="c1",
-        user_id="u1",
-        name="q",
-        artifact_id="a9",
-    )
+    r = _process(repos, blobs, [{"c": "x" * 500}], "a9")
     assert r.rows[0]["c"].endswith("…[+300 chars]") and len(r.rows[0]["c"]) == 200 + len(
         "…[+300 chars]"
     )
@@ -296,8 +266,10 @@ def test_user_text_follows_the_spec_layout() -> None:
         tokens for name, tokens in built.sections if name != "messages"
     )
     assert built.messages == _inputs().loop_messages
-    # A tool-call turn has empty content; its tool calls are what it costs.
-    assert "select 1" in message_text(_inputs().loop_messages[1])
+    # Section 8 uses the rule compaction shares: a tool-call turn with empty content costs its
+    # tool calls, and even an empty message costs one token.
+    assert sections["messages"] == messages_tokens(built.messages)
+    assert messages_tokens([built.messages[1]]) > messages_tokens([AIMessage("")]) == 1
 
 
 def test_prior_context_renders_report_claims_and_other_kinds() -> None:
@@ -336,16 +308,7 @@ def test_prior_context_renders_report_claims_and_other_kinds() -> None:
 def test_shaping_caps_columns_and_leaves_the_blob_unshaped() -> None:
     repos, blobs = Repositories.in_memory(), MemoryBlobStore()
     wide = [{f"k{j}": "y" * 250 for j in range(25)} for _ in range(3)]
-    r = process_rows(
-        wide,
-        cap=2,
-        artifacts=repos.artifacts,
-        blobs=blobs,
-        chat_id="c1",
-        user_id="u1",
-        name="q",
-        artifact_id="a10",
-    )
+    r = _process(repos, blobs, wide, "a10", cap=2)
     assert list(r.rows[0]) == [f"k{j}" for j in range(20)]
     assert r.rows[0]["k0"].endswith("…[+50 chars]")
     art = repos.artifacts.get("c1", "a10")
@@ -353,14 +316,5 @@ def test_shaping_caps_columns_and_leaves_the_blob_unshaped() -> None:
         art and b"y" * 250 in blobs.get(art.storage_ref) and b'"k24"' in blobs.get(art.storage_ref)
     )
     # Only columns cut, short cells, under the row cap: still offloaded.
-    r2 = process_rows(
-        [{f"k{j}": j for j in range(25)}],
-        cap=50,
-        artifacts=repos.artifacts,
-        blobs=blobs,
-        chat_id="c1",
-        user_id="u1",
-        name="q",
-        artifact_id="a11",
-    )
+    r2 = _process(repos, blobs, [{f"k{j}": j for j in range(25)}], "a11")
     assert r2.artifact_id == "a11" and r2.text == "showing 1 of 1 rows; full rows in artifact a11"
