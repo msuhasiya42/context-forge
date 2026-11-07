@@ -392,8 +392,9 @@ def test_duplicate_tool_call_spends_no_slot() -> None:
     assert [bool(r.tools) for r in turns] == [True] * 4 + [False]
 
 
-def test_failed_dependency_fails_its_dependents() -> None:
-    # t1 returns an invalid result on both of its attempts; t3 needs no t1 and completes
+def test_a_dependent_runs_on_what_completed_and_one_with_nothing_fails() -> None:
+    # t1 returns an invalid result on both of its attempts; t3 needs no t1 and completes. t2
+    # needs only t1, so it never runs (I-2); t6 needs t1, t2 and t3, so it runs (F7 ruling 2).
     invalid = ModelResponse(structured={})
     deps = make_deps(
         ScriptedModel(
@@ -412,9 +413,121 @@ def test_failed_dependency_fails_its_dependents() -> None:
     t1, t2, t3, _, _, t6 = deps.repos.tasks.list_by_request(req.message_id)
     assert t1.status == "FAILED" and "invalid result" in t1.failure_reason
     assert t2.status == "FAILED" and t2.failure_reason == "dependency failed"
-    assert t6.status == "FAILED" and t6.failure_reason == "dependency failed"
     assert t3.status == "COMPLETED" and out["status"] == "COMPLETED"
+    assert t6.status == "COMPLETED" and t6.result.uncertainties[1:] == [
+        f"A dependency did not complete ({t1.failure_reason}); not covered: {t1.goal}",
+        f"A dependency did not complete (dependency failed); not covered: {t2.goal}",
+    ]
     assert deps.repos.messages.get("c1", req.message_id).status == "COMPLETED"
+
+
+WEATHER = "Daily weather in Ajmer and Palanpur over the last two weeks."
+WHEN_TO_VISIT = "Whether this is a good time to visit, from that weather."
+DISTANCE = "Road distance between Ajmer and Palanpur."
+TRAINS = "Trains between Ajmer and Palanpur."
+ANSWER = "Combine the weather, distance and trains into one answer."
+
+
+def _f7_plan() -> dict:
+    """The plan of the live F7 run (7 Nov, Nova Pro) on the fixture chat."""
+    tasks = [
+        ("t1", WEATHER, []),
+        ("t2", WHEN_TO_VISIT, ["t1"]),
+        ("t3", DISTANCE, []),
+        ("t4", TRAINS, []),
+        ("t5", ANSWER, ["t1", "t2", "t3", "t4"]),
+    ]
+    return {
+        "kind": "plan",
+        "goal": "Weather, a good time to visit, distance and trains for Ajmer and Palanpur.",
+        "constraints": [],
+        "openQuestions": [],
+        "tasks": [
+            {
+                "ref": ref,
+                "kind": "sql_analysis",
+                "goal": goal,
+                "inputArtifactIds": ["a2"],
+                "dependsOn": depends_on,
+            }
+            for ref, goal, depends_on in tasks
+        ],
+        "nextAction": "Run t1, t3 and t4, then t2, then t5.",
+    }
+
+
+def _f7_result(fact: str, row: str, uncertainties: list[str] | None = None) -> ModelResponse:
+    ref = {"artifactId": "a2", "locator": {"kind": "row", "value": row}}
+    facts = [{"text": fact, "evidenceRefs": [ref]}]
+    return ModelResponse(
+        structured={"summary": fact, "facts": facts, "uncertainties": uncertainties or []}
+    )
+
+
+class _F7Agent:
+    """The live F7 run's executor, by task goal: the weather task never stops calling tools,
+    even when it may only return its result; distance, trains and the answer return facts."""
+
+    def __init__(self) -> None:
+        self.requests: list[ModelRequest] = []
+
+    def invoke(self, request: ModelRequest) -> ModelResponse:
+        self.requests.append(request)
+        if request.stage == "plan":
+            return ModelResponse(structured=_f7_plan())
+        if self.goal_of(request) == WEATHER:
+            turn = len(request.messages)
+            sql = {"dataset_id": "a2", "sql": f"SELECT {turn}"}
+            return ModelResponse(
+                tool_calls=[ToolCall(id=f"w{turn}", name="sql_query", arguments=sql)]
+            )
+        return {
+            DISTANCE: _f7_result("Ajmer to Palanpur is approximately 350+ kms.", "1"),
+            TRAINS: _f7_result("Two trains a day run from Ajmer to Palanpur.", "2"),
+            ANSWER: _f7_result(
+                "Ajmer to Palanpur is approximately 350+ km.",
+                "3",
+                ["No weather data: the weather task did not complete."],
+            ),
+        }[self.goal_of(request)]
+
+    @staticmethod
+    def goal_of(request: ModelRequest) -> str:
+        return str(request.messages[0].content).split("Task goal: ", 1)[1].split("\n", 1)[0]
+
+
+def test_a_failed_task_leaves_a_stated_gap_not_an_unanswered_request() -> None:
+    """F7 ruling 2 on the live run: weather failed at its tool budget, the visit task (needing
+    only weather) never ran, and the combining task ran on distance and trains, told what is
+    missing, instead of failing with "dependency failed"."""
+    agent = _F7Agent()
+    deps = make_deps(agent)
+    req = seed_chat_with_dataset(deps, chat_id="c1", user_id="u1", dataset_id="a2")
+    _start(deps, req)
+    out = build_workflow(deps, checkpointer=None).invoke(
+        {"chat_id": "c1", "message_id": req.message_id}, _cfg(req)
+    )
+    assert out["status"] == "COMPLETED"
+    tasks = {t.goal: t for t in deps.repos.tasks.list_by_request(req.message_id)}
+    statuses = {goal: (t.status, t.failure_reason) for goal, t in tasks.items()}
+    assert statuses == {
+        WEATHER: ("FAILED", "tool call budget exhausted"),
+        WHEN_TO_VISIT: ("FAILED", "dependency failed"),
+        DISTANCE: ("COMPLETED", None),
+        TRAINS: ("COMPLETED", None),
+        ANSWER: ("COMPLETED", None),
+    }
+    executes = [r for r in agent.requests if r.stage == "execute"]
+    (brief,) = {str(r.messages[0].content) for r in executes if agent.goal_of(r) == ANSWER}
+    dependencies = brief.split("<dependencies>")[1].split("</dependencies>")[0]
+    assert dependencies.splitlines()[1:] == [
+        "- Ajmer to Palanpur is approximately 350+ kms.",
+        "- Two trains a day run from Ajmer to Palanpur.",
+        f"- A dependency did not complete (tool call budget exhausted); not covered: {WEATHER}",
+        f"- A dependency did not complete (dependency failed); not covered: {WHEN_TO_VISIT}",
+    ]
+    report = next(m for m in deps.repos.messages.list_by_chat("c1") if m.kind == "report")
+    assert "No weather data: the weather task did not complete." in report.report.uncertainties
 
 
 def test_scripted_exhaustion_fails_request_with_reason() -> None:

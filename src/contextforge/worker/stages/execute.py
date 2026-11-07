@@ -232,22 +232,35 @@ def run_tools(state: TaskState, runtime: Runtime[TaskRun], *, deps: WorkerDeps) 
 
 
 def _run_to_end(task: Task, brief: RequestState, deps: WorkerDeps) -> Task:
-    """The Task as stored after its final transition: FAILED when a dependency did not
-    complete, whatever the kind; otherwise what that is depends on its kind."""
-    results = _dependency_results(task, deps)
-    if results is None:
+    """The Task as stored after its final transition: FAILED when it has dependencies and none
+    completed, whatever the kind (I-2); otherwise what that is depends on its kind.
+
+    F7 ruling 2: a task with at least one completed dependency runs, told which of the others
+    did not complete and why, so it states the gap instead of the whole answer being lost.
+    """
+    results, gaps = _dependencies(task, deps)
+    if gaps and not results:
         return _settle(deps, task, TaskStatus.FAILED, failure_reason=DEPENDENCY_FAILED)
     if task.kind in (TaskKind.SQL_ANALYSIS, TaskKind.WEB_SEARCH):
-        return _run_sql_analysis(task, brief, deps, results)
+        return _run_sql_analysis(task, brief, deps, results, gaps)
     if task.kind == TaskKind.RECONCILE:
-        return _settle(deps, task, TaskStatus.COMPLETED, result=reconcile_stub(task, results))
+        result = reconcile_stub(task, results, gaps)
+        return _settle(deps, task, TaskStatus.COMPLETED, result=result)
     return _settle(deps, task, TaskStatus.SKIPPED, failure_reason=skipped_reason(task.kind))
 
 
 def _run_sql_analysis(
-    task: Task, brief: RequestState, deps: WorkerDeps, dependencies: list[TaskResult]
+    task: Task,
+    brief: RequestState,
+    deps: WorkerDeps,
+    dependencies: list[TaskResult],
+    gaps: list[str],
 ) -> Task:
-    """Run the subgraph, again from a fresh state after an error; COMPLETED or FAILED."""
+    """Run the subgraph, again from a fresh state after an error; COMPLETED or FAILED.
+
+    The completed dependencies' summaries and the ``gaps`` left by the others form its
+    ``<dependencies>`` block.
+    """
     subgraph = build_task_subgraph(deps)
     run = TaskRun(
         task=task,
@@ -260,7 +273,7 @@ def _run_sql_analysis(
             for ref in f.evidence_refs
         ],
     )
-    dependency_summaries = [result.summary for result in dependencies]
+    dependency_summaries = [*(result.summary for result in dependencies), *gaps]
     config: RunnableConfig = {"recursion_limit": _recursion_limit(deps.budgets)}
     error = ""
     attempts = deps.budgets.task_retries + 1
@@ -314,14 +327,25 @@ def _get_task(deps: WorkerDeps, request_message_id: str, task_id: str) -> Task:
     return task
 
 
-def _dependency_results(task: Task, deps: WorkerDeps) -> list[TaskResult] | None:
-    """Each dependency's result in ``depends_on`` order; None when any did not complete
-    (FAILED, SKIPPED or CANCELLED), since the task would otherwise run without its input."""
-    dependencies = [_get_task(deps, task.request_message_id, d) for d in task.depends_on_task_ids]
-    results = [
-        d.result for d in dependencies if d.status == TaskStatus.COMPLETED and d.result is not None
-    ]
-    return results if len(results) == len(dependencies) else None
+def _dependencies(task: Task, deps: WorkerDeps) -> tuple[list[TaskResult], list[str]]:
+    """The results of the task's completed dependencies, and a gap line for each one that did
+    not complete (FAILED, SKIPPED or CANCELLED), both in ``depends_on`` order."""
+    results: list[TaskResult] = []
+    gaps: list[str] = []
+    for task_id in task.depends_on_task_ids:
+        dependency = _get_task(deps, task.request_message_id, task_id)
+        if dependency.status == TaskStatus.COMPLETED and dependency.result is not None:
+            results.append(dependency.result)
+        else:
+            gaps.append(_gap(dependency))
+    return results, gaps
+
+
+def _gap(dependency: Task) -> str:
+    """What a dependency that did not complete leaves out, and why, for the dependent's brief.
+    Named by its goal, not its id: the dependent states the gap in words the user reads."""
+    reason = dependency.failure_reason or dependency.status.value.lower()
+    return f"A dependency did not complete ({reason}); not covered: {dependency.goal}"
 
 
 def _task_sources(task: Task, chat_id: str, deps: WorkerDeps) -> list[SourceLine]:

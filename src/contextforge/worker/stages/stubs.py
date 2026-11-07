@@ -4,8 +4,9 @@ from contextforge.core.entities.task import Task, TaskKind, TaskResult
 from contextforge.core.values import EvidenceRef
 
 
-def reconcile_stub(task: Task, dependency_results: list[TaskResult]) -> TaskResult:
-    """Carry the dependencies' summaries and evidence forward; reconcile nothing.
+def reconcile_stub(task: Task, dependency_results: list[TaskResult], gaps: list[str]) -> TaskResult:
+    """Carry the completed dependencies' summaries and evidence forward, and the ``gaps`` the
+    others left as uncertainties; reconcile nothing.
 
     ``task`` is unused until phase 4 reconciles for real.
     """
@@ -16,7 +17,7 @@ def reconcile_stub(task: Task, dependency_results: list[TaskResult]) -> TaskResu
         structured_data={"reconciled": False},
         evidence_refs=_union(refs),
         artifact_refs=[],
-        uncertainties=["reconcile is a stub in phase 1"],
+        uncertainties=["reconcile is a stub in phase 1", *gaps],
         coverage={},
     )
 
