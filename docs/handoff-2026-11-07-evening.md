@@ -69,8 +69,8 @@ complete, so use `uv run --no-sync`. Outside the sandbox `uv sync` is fine.)
 **F9 — per-stage model routing with fallbacks** (brief `fix-wave-2/F9-brief.md`). Five commits
 are on `phase-1-engine` (`5f6f603` routing + 60 s cooldown, `40b43ac` reasoning blocks and
 output path on ModelCall, `b7af9bb` lenient plan read + dependency sanity, `2fd6902` engine
-instruction leak filter, `bcbd0a9` shipped routes + Sydney Nova prices). `F9-report.md` was not
-yet written when this handoff was made. **Do first:** run the full checks on HEAD; if green, read
+instruction leak filter, `bcbd0a9` shipped routes + Sydney Nova prices). `F9-report.md` is written (read it
+first for the implementer's concerns). **Do first:** run the full checks on HEAD; if green, read
 `config/models.yaml` and confirm the shipped routes: plan `openai.gpt-oss-120b-1:0` →
 `qwen.qwen3-235b-a22b-2507-v1:0` → `global.amazon.nova-2-lite-v1:0`; execute Qwen3-235B →
 gpt-oss-120b → Nova Pro; compress Nova 2 Lite → Nova Lite. Then run ONE live request (cap $0.25)
@@ -79,7 +79,8 @@ reasoning block did not break parsing.
 
 **F10 — report summary covering every subject + conclusions as first-class** (brief
 `fix-wave-2/F10-brief.md`, worktree `.claude/worktrees/fix-F10`, branch `fix-F10`). At handoff:
-10 files modified, possibly a `wip(F10)` commit if the implementer managed one. Rulings: (1)
+commit `a671710` "wip(F10): ruling 1 conclusions first-class, ruling 3 order kept" plus a few
+uncommitted files for rulings 2 and 4; `F10-report.md` states the status. Rulings: (1)
 `TaskResult.conclusions` (text, supporting facts, confidence) rendered as an "Assessment" section,
 never with a source link; (2) the report message body is a model-written summary (new `summary`
 stage on the cheap model, prompt `prompts/summary.1.md`) with a deterministic validator (every
