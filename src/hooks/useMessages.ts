@@ -28,8 +28,18 @@ const fresh = (chatId: string | null, state: AsyncState<Message[]>): OwnedMessag
   refreshError: null,
 });
 
+interface UseMessagesOptions {
+  pollIntervalMs: number;
+  /** Told how many messages a chat has whenever the server answers or a send succeeds. */
+  onMessageCount: (chatId: string, count: number) => void;
+}
+
 /** Messages of one chat: load on selection, poll while a request is active, and send. */
-export function useMessages(client: ApiClient, chatId: string | null, pollIntervalMs: number) {
+export function useMessages(
+  client: ApiClient,
+  chatId: string | null,
+  { pollIntervalMs, onMessageCount }: UseMessagesOptions,
+) {
   const [owned, setOwned] = useState<OwnedMessages>(fresh(null, LOADING));
   const runLatest = useLatestRequest();
   const current = owned.chatId === chatId ? owned : fresh(chatId, LOADING);
@@ -40,13 +50,14 @@ export function useMessages(client: ApiClient, chatId: string | null, pollInterv
       if (mode === 'replace') setOwned(fresh(chatId, LOADING));
       const settled = await runLatest(() => client.listMessages(chatId));
       if (!settled) return;
+      if (settled.status === 'success') onMessageCount(chatId, settled.data.length);
       setOwned((prev) =>
         mode === 'merge' && prev.chatId === chatId
           ? applyRefresh(prev, settled)
           : fresh(chatId, sortState(settled)),
       );
     },
-    [client, chatId, runLatest],
+    [client, chatId, runLatest, onMessageCount],
   );
 
   useEffect(() => {
@@ -56,10 +67,14 @@ export function useMessages(client: ApiClient, chatId: string | null, pollInterv
   const refresh = useCallback(() => void load('merge'), [load]);
   usePolling(current, refresh, pollIntervalMs);
 
-  const appendMessage = useCallback((message: Message) => {
-    // Dropped when the user has switched chats while the request was in flight.
-    setOwned((prev) => (prev.chatId === message.chatId ? appendTo(prev, message) : prev));
-  }, []);
+  const appendMessage = useCallback(
+    (message: Message) => {
+      // Dropped when the user has switched chats while the request was in flight.
+      setOwned((prev) => (prev.chatId === message.chatId ? appendTo(prev, message) : prev));
+      onMessageCount(message.chatId, 1);
+    },
+    [onMessageCount],
+  );
 
   const sender = useSendRequest(client, chatId, appendMessage);
   const reload = useCallback(() => load('replace'), [load]);

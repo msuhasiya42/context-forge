@@ -41,6 +41,9 @@ export function App({ client, pollIntervalMs = DEFAULT_POLL_INTERVAL_MS }: AppPr
           void app.startNewChat();
         }}
         isCreating={app.actions.isCreating}
+        isInNewChat={app.isInNewChat}
+        onRename={app.actions.renameChat}
+        onArchive={app.actions.archiveChat}
         actionError={app.actions.actionError}
         onRetry={() => void app.chats.reload()}
       />

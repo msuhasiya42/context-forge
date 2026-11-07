@@ -5,7 +5,7 @@ import { LOADING, success, type AsyncState } from '../utils/asyncState';
 import { sortChatsByRecent, upsertChat } from '../utils/chats';
 import { useLatestRequest } from './useLatestRequest';
 
-/** The chat list (E2), plus a way to apply chats returned by other calls. */
+/** The chat list (E2), plus ways to apply chats returned by other calls or remove one. */
 export function useChats(client: ApiClient) {
   const [state, setState] = useState<AsyncState<Chat[]>>(LOADING);
   const runLatest = useLatestRequest();
@@ -24,11 +24,19 @@ export function useChats(client: ApiClient) {
     setState((prev) => (prev.status === 'success' ? success(upsertChat(prev.data, chat)) : prev));
   }, []);
 
+  const removeChat = useCallback((chatId: string) => {
+    setState((prev) =>
+      prev.status === 'success'
+        ? success(prev.data.filter((chat) => chat.chatId !== chatId))
+        : prev,
+    );
+  }, []);
+
   // Order is derived on read, so every update path keeps "most recently updated first".
   const sortedState = useMemo(
     () => (state.status === 'success' ? success(sortChatsByRecent(state.data)) : state),
     [state],
   );
 
-  return { state: sortedState, reload, applyChat };
+  return { state: sortedState, reload, applyChat, removeChat };
 }

@@ -10,6 +10,8 @@ export interface ApiClient {
   createChat(): Promise<Chat>;
   /** E15: rename a chat. */
   renameChat(chatId: string, title: string): Promise<Chat>;
+  /** E16: archive a chat; it disappears from E2, its objects are kept. */
+  archiveChat(chatId: string): Promise<void>;
   /** E3: messages in a chat (newest page). */
   listMessages(chatId: string): Promise<Message[]>;
   /** E4: submit a request; resolves with the created request Message. */

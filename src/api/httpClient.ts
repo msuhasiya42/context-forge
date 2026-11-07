@@ -12,7 +12,7 @@ const REQUEST_TIMEOUT_MS = 15_000;
 const CHAT_PAGE_SIZE = 50;
 const MESSAGE_PAGE_SIZE = 100;
 
-type HttpMethod = 'GET' | 'POST' | 'PATCH';
+type HttpMethod = 'GET' | 'POST' | 'PATCH' | 'DELETE';
 type JsonCaller = (
   method: HttpMethod,
   path: string,
@@ -31,6 +31,9 @@ export function createHttpClient(baseUrl: string): ApiClient {
     createChat: async () => parseChat(await call('POST', '/chats', {})),
     renameChat: async (chatId, title) =>
       parseChat(await call('PATCH', chatPath(chatId), { title })),
+    archiveChat: async (chatId) => {
+      await call('DELETE', chatPath(chatId));
+    },
     listMessages: async (chatId) =>
       parsePageItemsSkippingInvalid(
         await call('GET', `${chatPath(chatId)}/messages?limit=${MESSAGE_PAGE_SIZE}`),

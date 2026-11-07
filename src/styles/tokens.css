@@ -14,6 +14,8 @@
   --color-agent-bubble: #ffffff;
   --color-danger: #b42318;
   --color-danger-surface: #fdecea;
+  --color-on-danger: #ffffff;
+  --color-backdrop: rgb(15 18 25 / 45%);
   --color-focus: #1f6feb;
 
   --space-1: 4px;
@@ -35,6 +37,8 @@
   --radius-sm: 6px;
   --radius-md: 12px;
   --radius-pill: 999px;
+  --shadow-dialog: 0 12px 32px rgb(0 0 0 / 25%);
+  --icon-button-size: 32px;
   --border: 1px solid var(--color-border);
   --focus-outline: 2px solid var(--color-focus);
 
@@ -58,6 +62,8 @@
     --color-agent-bubble: #1f242e;
     --color-danger: #ff8a7f;
     --color-danger-surface: #3a1d1b;
+    --color-on-danger: #1a0b0a;
+    --color-backdrop: rgb(0 0 0 / 60%);
     --color-focus: #8fb0ff;
   }
 }

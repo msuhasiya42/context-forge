@@ -37,21 +37,16 @@
   list-style: none;
 }
 
-.item {
-  display: block;
-  width: 100%;
-  padding: var(--space-3);
+.row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding-right: var(--space-1);
   border: 1px solid transparent;
   border-radius: var(--radius-sm);
-  background: transparent;
-  text-align: left;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  cursor: pointer;
 }
 
-.item:hover {
+.row:hover {
   background: var(--color-surface);
 }
 
@@ -61,6 +56,64 @@
   border-color: var(--color-accent);
   background: var(--color-selected);
   font-weight: var(--font-weight-bold);
+}
+
+.item {
+  flex: 1;
+  min-width: 0;
+  padding: var(--space-3);
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  font-weight: inherit;
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+/* Row actions appear on hover or keyboard focus; touch screens always show them. */
+.rowActions {
+  display: flex;
+  flex-shrink: 0;
+  opacity: 0;
+}
+
+.row:hover .rowActions,
+.row:focus-within .rowActions {
+  opacity: 1;
+}
+
+@media (hover: none) {
+  .rowActions {
+    opacity: 1;
+  }
+}
+
+.renameField {
+  flex: 1;
+  min-width: 0;
+  padding: var(--space-1);
+}
+
+.renameInput {
+  width: 100%;
+  padding: var(--space-2);
+  border: var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface);
+}
+
+.renameInput[aria-invalid='true'] {
+  border-color: var(--color-danger);
+}
+
+.renameError {
+  margin: var(--space-1) 0 0;
+  color: var(--color-danger);
+  font-size: var(--font-size-sm);
+  font-weight: normal;
 }
 
 /* Narrow screens: the sidebar becomes a full-screen panel behind the toggle. */

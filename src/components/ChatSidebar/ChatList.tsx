@@ -1,33 +1,37 @@
 import type { Chat } from '../../api/types';
-import { chatDisplayName } from '../../utils/chats';
-import { classNames } from '../../utils/classNames';
+import { useInlineRename } from '../../hooks/useInlineRename';
+import { ChatRow } from './ChatRow';
 import styles from './ChatSidebar.module.css';
 
 interface ChatListProps {
   chats: readonly Chat[];
   selectedChatId: string | null;
   onSelect: (chatId: string) => void;
+  onRename: (chatId: string, title: string) => Promise<boolean>;
+  onRequestDelete: (chat: Chat) => void;
 }
 
-export function ChatList({ chats, selectedChatId, onSelect }: ChatListProps) {
+export function ChatList({
+  chats,
+  selectedChatId,
+  onSelect,
+  onRename,
+  onRequestDelete,
+}: ChatListProps) {
+  const rename = useInlineRename(onRename);
   return (
     <nav aria-label="Chat list" className={styles.nav}>
       <ul className={styles.list}>
-        {chats.map((chat) => {
-          const isSelected = chat.chatId === selectedChatId;
-          return (
-            <li key={chat.chatId}>
-              <button
-                type="button"
-                className={classNames(styles.item, isSelected && styles.selected)}
-                aria-current={isSelected ? 'true' : undefined}
-                onClick={() => onSelect(chat.chatId)}
-              >
-                {chatDisplayName(chat)}
-              </button>
-            </li>
-          );
-        })}
+        {chats.map((chat) => (
+          <ChatRow
+            key={chat.chatId}
+            chat={chat}
+            isSelected={chat.chatId === selectedChatId}
+            rename={rename}
+            onSelect={() => onSelect(chat.chatId)}
+            onRequestDelete={() => onRequestDelete(chat)}
+          />
+        ))}
       </ul>
     </nav>
   );

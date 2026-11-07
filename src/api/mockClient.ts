@@ -24,6 +24,7 @@ export function createMockClient(options: MockClientOptions = {}): ApiClient {
       store.saveChat({ chatId: store.nextId('chat'), title: '', updatedAt: now() }),
     renameChat: async (chatId, title) =>
       store.saveChat({ ...store.chat(chatId), title, updatedAt: now() }),
+    archiveChat: async (chatId) => store.archiveChat(store.chat(chatId).chatId),
     listMessages: async (chatId) => sortMessages(store.messagesOf(store.chat(chatId).chatId)),
     submitRequest: async (chatId, content) => {
       const request = store.addMessage(chatId, {
@@ -79,6 +80,8 @@ function createMockStore(seed: MockSeed) {
     },
     messagesOf: (chatId: string) => [...messages.values()].filter((m) => m.chatId === chatId),
     saveChat: (chat: Chat) => (chats.set(chat.chatId, chat), chat),
+    // Archived chats leave the list; their messages stay, as on the server.
+    archiveChat: (chatId: string) => void chats.delete(chatId),
     saveMessage: (message: Message) => (messages.set(message.messageId, message), message),
     addMessage: (chatId: string, fields: NewMessage): Message => {
       const chat = store.chat(chatId);

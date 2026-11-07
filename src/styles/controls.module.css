@@ -13,11 +13,13 @@
   cursor: pointer;
 }
 
-.button:hover:not(:disabled) {
+.button:hover:not(:disabled, [aria-disabled='true']) {
   border-color: var(--color-accent);
 }
 
-.button:disabled {
+/* aria-disabled keeps a control focusable so its explanation can still be read. */
+.button:disabled,
+.button[aria-disabled='true'] {
   cursor: not-allowed;
   opacity: 0.55;
 }
@@ -29,8 +31,34 @@
   color: var(--color-on-accent);
 }
 
-.primary:hover:not(:disabled) {
+.primary:hover:not(:disabled, [aria-disabled='true']) {
   background: var(--color-accent-hover);
+}
+
+.danger {
+  composes: button;
+  border-color: var(--color-danger);
+  background: var(--color-danger);
+  color: var(--color-on-danger);
+}
+
+.iconButton {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--icon-button-size);
+  height: var(--icon-button-size);
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text-muted);
+  cursor: pointer;
+}
+
+.iconButton:hover {
+  border-color: var(--color-border);
+  color: var(--color-text);
 }
 
 .visuallyHidden {
