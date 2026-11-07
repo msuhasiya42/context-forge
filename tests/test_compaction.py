@@ -42,6 +42,9 @@ def test_level1_stubs_only_old_tool_results() -> None:
     tools = [m for m in msgs if isinstance(m, ToolMessage)]
     assert tools[0].content.startswith("[tool sql_query") and tools[1].content.startswith("[tool")
     assert tools[2].content == "x" * 4000 and tools[3].content == "x" * 4000
+    failed = _turns(4, big=True)
+    failed[2].additional_kwargs["status"] = "error"  # t0, older than the last two turns
+    assert "outcome=error" in stub_old_tool_results(failed, keep_turns=2)[2].content
 
 
 def test_level3_never_splits_a_tool_call_from_its_result() -> None:

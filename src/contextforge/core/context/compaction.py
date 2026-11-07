@@ -6,7 +6,7 @@ The budget and the number of messages kept come from the caller, read from ``Bud
 """
 
 import json
-from typing import TypeGuard
+from typing import Any, TypeGuard
 
 from langchain_core.messages import AIMessage, AnyMessage, SystemMessage, ToolMessage
 
@@ -111,15 +111,21 @@ def _is_unstubbed_result(message: AnyMessage) -> TypeGuard[ToolMessage]:
 
 
 def _stub(message: ToolMessage) -> ToolMessage:
-    """The one-line stub, built from the metadata the execute node stores on the result."""
-    meta = message.additional_kwargs
-    args = json.dumps(meta["arguments"], sort_keys=True)
-    content = (
-        f"{_STUB_PREFIX}{meta['tool_name']} args={args} outcome=ok rows={meta['row_count']} "
-        f"artifact={meta['artifact_id'] or '-'}]"
-    )
     # A copy keeps tool_call_id (which pairs the result with its call), id and metadata.
-    return message.model_copy(update={"content": content})
+    return message.model_copy(update={"content": _stub_text(message.additional_kwargs)})
+
+
+def _stub_text(meta: dict[str, Any]) -> str:
+    """The one-line stub, from the metadata the execute node stores on each result.
+
+    Missing keys fall back to defaults: a result without metadata still compacts, never raises.
+    """
+    args = json.dumps(meta.get("arguments", {}), sort_keys=True)
+    return (
+        f"{_STUB_PREFIX}{meta.get('tool_name', 'unknown')} args={args} "
+        f"outcome={meta.get('status', 'ok')} rows={meta.get('row_count', 0)} "
+        f"artifact={meta.get('artifact_id') or '-'}]"
+    )
 
 
 def _summary_boundary(messages: list[AnyMessage], keep_last: int) -> int:
