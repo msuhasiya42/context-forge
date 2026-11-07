@@ -63,6 +63,19 @@ NO_PERIOD = "none stated; use the most recent information available"
 _PLAN_MECHANICS = re.compile(
     r"\b(?:plan|task|tasks|kind|schema|inputArtifactIds|JSON|format)\b", re.IGNORECASE
 )
+# A constraint quoting the engine's own instructions (the constants above, the retry's
+# rejection and the plan prompt): gpt-oss and MiniMax copied NO_MORE_QUESTIONS (bake-off, F9).
+_ENGINE_PHRASES = (
+    "ask another question",
+    "stated assumptions",
+    "may not ask",
+    "most likely reading",
+    "never ask",
+    "at most one question",
+    "previous plan was rejected",
+    "most recent information available",
+    "return_result",
+)
 
 
 class PlanFailed(Exception):
@@ -187,8 +200,12 @@ def answer_constraint(question: str, answer: str) -> str | None:
 
 
 def is_plan_mechanics(constraint: str) -> bool:
-    """True when ``constraint`` is about the plan's format rather than the user's request."""
-    return _PLAN_MECHANICS.search(constraint) is not None
+    """True when ``constraint`` is about the plan's format, or quotes the engine's instructions,
+    rather than stating something about the user's request."""
+    lowered = constraint.lower()
+    return _PLAN_MECHANICS.search(constraint) is not None or any(
+        phrase in lowered for phrase in _ENGINE_PHRASES
+    )
 
 
 def _planner_inputs(

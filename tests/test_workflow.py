@@ -570,10 +570,13 @@ def test_report_constraints_keep_the_users_facts_with_provenance_and_drop_plan_r
     # Live finding L-2: the planner restated its own output rules as constraints, and the
     # report carried them into the next request as if the user had stated them.
     plan = six_task_plan()
+    # F9, bake-off: gpt-oss and MiniMax copied the engine's own instruction.
+    leaked = ["Do not ask another question", "Never ask for an upload to answer a web question."]
     plan["constraints"] = [
         "The plan must include 2 to 6 tasks.",
         "Each task must have a clear goal, kind, and inputArtifactIds.",
         "Exclude transfers between the user's own accounts from spending.",
+        *leaked,
     ]
     deps = make_deps(
         ScriptedModel(
@@ -600,3 +603,4 @@ def test_report_constraints_keep_the_users_facts_with_provenance_and_drop_plan_r
     )
     assert kept["Exclude transfers between the user's own accounts from spending."][0] == "request"
     assert not [text for text in kept if "plan" in text.lower() or "task" in text.lower()]
+    assert not set(leaked) & set(kept)
