@@ -32,15 +32,15 @@ from contextforge.core.logging import request_context
 from contextforge.core.models.base import ModelRequest
 from contextforge.core.models.scripted import ScriptExhausted
 from contextforge.core.planner import PlannedTask, PlannerOutput
-from contextforge.core.repositories.base import StaleStatusError
 from contextforge.core.state import PendingInterrupt, PlanEntry, RequestState
 from contextforge.worker.brief import load_request
 from contextforge.worker.deps import WorkerDeps
+from contextforge.worker.stages.errors import one_line
 from contextforge.worker.stages.guards import (
     CallBudgetExceeded,
-    Cancelled,
     check_call_budget,
     check_not_cancelled,
+    leave_running,
 )
 from contextforge.worker.stages.sources import available_artifacts, source_line
 
@@ -92,7 +92,7 @@ def plan_stage(
     failed model call; ``Cancelled`` propagates. ``today`` defaults to the user's local date.
     """
     with request_context(brief["request_message_id"]):
-        inputs = _planner_inputs(brief, attempt, deps, today or _local_today())
+        inputs = _planner_inputs(brief, attempt, deps, today or local_today())
         output = _plan_or_fail(brief, inputs, deps)
         logger.info("planner returned a %s", output.kind)
         pending = None if output.kind == "plan" else _ask_user(brief, attempt, output, deps)
@@ -129,7 +129,8 @@ def plan_gate(brief: RequestState, planned: PlanResult, deps: WorkerDeps) -> lis
         return [_plan_entry(task) for task in tasks]
 
 
-def _local_today() -> date:
+def local_today() -> date:
+    """Today in the user's timezone."""
     return datetime.now(ZoneInfo(USER_TIMEZONE)).date()
 
 
@@ -206,14 +207,14 @@ def _plan_with_one_retry(
     try:
         return _call_planner(brief, inputs, deps)
     except ValidationError as rejected:
-        errors = _one_line(rejected)
+        errors = one_line(rejected)
         logger.warning("planner output rejected, retrying once: %s", errors)
         rejection = f"Previous plan was rejected: {errors}"
         retry_inputs = replace(inputs, constraints=[*inputs.constraints, rejection])
     try:
         return _call_planner(brief, retry_inputs, deps)
     except ValidationError as rejected_again:
-        reason = f"planner returned an invalid plan twice: {_one_line(rejected_again)}"
+        reason = f"planner returned an invalid plan twice: {one_line(rejected_again)}"
         raise PlanFailed(reason) from rejected_again
 
 
@@ -233,14 +234,6 @@ def _call_planner(brief: RequestState, inputs: ContextInputs, deps: WorkerDeps) 
     return PlannerOutput.model_validate(response.structured)
 
 
-def _one_line(error: ValidationError) -> str:
-    """Each error as ``<field path>: <message>`` joined by "; ", for the retry's constraint."""
-    return "; ".join(
-        f"{'.'.join(str(part) for part in e['loc'])}: {e['msg']}" if e["loc"] else e["msg"]
-        for e in error.errors()
-    )
-
-
 def _ask_user(
     brief: RequestState, attempt: int, output: PlannerOutput, deps: WorkerDeps
 ) -> PendingInterrupt:
@@ -253,7 +246,7 @@ def _ask_user(
         raise PlanFailed("planner asked a third question")
     if not output.question:
         raise PlanFailed("planner asked without a question")
-    _wait_for_user(brief, deps)
+    leave_running(deps, brief["chat_id"], brief["request_message_id"], RequestStatus.WAITING_USER)
     message_id = clarification_id(brief["request_message_id"], attempt)
     deps.repos.messages.save(_clarification(brief, message_id, output.question))
     return PendingInterrupt(
@@ -277,28 +270,6 @@ def _clarification(brief: RequestState, message_id: str, question: str) -> Clari
         created_at=now,
         updated_at=now,
     )
-
-
-def _wait_for_user(brief: RequestState, deps: WorkerDeps) -> None:
-    """RUNNING -> WAITING_USER; a re-run that finds the request already waiting changes nothing.
-
-    Raises ``Cancelled`` when the user cancelled during the planner call, and
-    ``StaleStatusError`` for any other unexpected status.
-    """
-    try:
-        deps.repos.messages.update_request_status(
-            brief["chat_id"],
-            brief["request_message_id"],
-            RequestStatus.RUNNING,
-            RequestStatus.WAITING_USER,
-        )
-    except StaleStatusError as exc:
-        if exc.actual == RequestStatus.CANCELLED:
-            raise Cancelled(
-                f"request {brief['request_message_id']} was cancelled while the planner ran"
-            ) from exc
-        if exc.actual != RequestStatus.WAITING_USER:
-            raise
 
 
 def _check_plan(planned_tasks: list[PlannedTask], chat_artifacts: list[Artifact]) -> None:
@@ -347,4 +318,9 @@ def _new_tasks(planned_tasks: list[PlannedTask], request_message_id: str) -> lis
 
 
 def _plan_entry(task: Task) -> PlanEntry:
-    return PlanEntry(task_id=task.task_id, kind=task.kind.value, status=task.status.value)
+    return PlanEntry(
+        task_id=task.task_id,
+        kind=task.kind.value,
+        status=task.status.value,
+        depends_on=task.depends_on_task_ids,
+    )

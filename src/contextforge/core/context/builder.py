@@ -78,7 +78,9 @@ def build_context(inputs: ContextInputs, budgets: Budgets) -> BuiltContext:
     system = [inputs.memory, inputs.stage_prompt]
     user_sections = {
         "brief": _render_brief(inputs),
-        "facts": _block("facts", [_fact_line(f) for f in _newest(inputs.facts, budgets.facts_cap)]),
+        "facts": _block(
+            "facts", [_fact_line(f) for f in newest_facts(inputs.facts, budgets.facts_cap)]
+        ),
         "open_questions": _block(
             "open_questions", [_open_question_line(q) for q in inputs.open_questions]
         ),
@@ -144,7 +146,8 @@ def _join(blocks: Iterable[str]) -> str:
     return "\n".join(block for block in blocks if block)
 
 
-def _newest(facts: list[Fact], cap: int) -> list[Fact]:
+def newest_facts(facts: list[Fact], cap: int) -> list[Fact]:
+    """The last ``cap`` facts: the brief keeps and shows only the newest."""
     # Not ``facts[-cap:]``: with a cap of 0 that slice keeps every fact.
     return facts[max(0, len(facts) - cap) :]
 

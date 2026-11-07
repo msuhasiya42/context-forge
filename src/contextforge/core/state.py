@@ -18,6 +18,8 @@ class PlanEntry(TypedDict):
     task_id: str
     kind: str  # a TaskKind value
     status: str  # a TaskStatus value
+    # Task ids this one waits for, so the workflow can order waves from state alone.
+    depends_on: list[str]
 
 
 class Fact(TypedDict):
