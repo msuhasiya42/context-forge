@@ -4,6 +4,7 @@ import dataclasses
 import gzip
 import html
 import json
+import re
 import time
 from collections.abc import Callable, Iterator
 from typing import Any
@@ -311,7 +312,7 @@ def _request(content: str) -> RequestMessage:
 class _WebAgent:
     """Scripted planner and executor: a web_search task, then a task of kind ``then`` after it
     (a reconcile runs no model call). Each execute turn is a function of that call's request;
-    compress gets a fixed summary."""
+    compress gets a summary that keeps every artifact id, as the compress prompt asks."""
 
     def __init__(
         self, turns: list[Callable[[ModelRequest], ModelResponse]], then: str = "reconcile"
@@ -333,7 +334,9 @@ class _WebAgent:
             tasks = [search, after]
             return ModelResponse(structured={**plan, "nextAction": "search", "tasks": tasks})
         if request.stage == "compress":
-            return ModelResponse(text="Searched once and read two pages.")
+            stubs = " ".join(str(m.content) for m in request.messages)
+            handles = ", ".join(re.findall(r"artifact=(\w+)\]", stubs))
+            return ModelResponse(text=f"Searched once and read two pages; artifacts {handles}.")
         return self.turns[len(self.calls("execute")) - 1](request)
 
     def calls(self, stage: str) -> list[ModelRequest]:
@@ -592,8 +595,12 @@ def test_web_search_rows_keep_their_artifact_handle_through_compaction():
     (compress,) = agent.calls("compress")
     stubs = [str(m.content) for m in compress.messages if isinstance(m, ToolMessage)]
     assert any(f"artifact={rows_id}]" in stub for stub in stubs)
-    last = execute[3].messages
-    assert any(isinstance(m, SystemMessage) for m in last) and "s1" not in _results(execute[3])
+    assert "artifact id" in compress.system[1]  # the compress prompt asks to keep handles
+    (summary,) = [m for m in execute[3].messages if isinstance(m, SystemMessage)]
+    assert rows_id in str(summary.content) and "s1" not in _results(execute[3])
+    recorded = deps.repos.model_calls.list_by_request("r1")
+    compress_calls = [c for c in recorded if c.stage == "compress"]
+    assert [c.context_version.split("|")[1] for c in compress_calls] == ["prompt:compress.2"]
     report = next(m for m in deps.repos.messages.list_by_chat("c1") if m.kind == "report")
     cited = {ref.artifact_id for claim in report.report.claims for ref in claim.evidence_refs}
     assert rows_id in cited and len(report.report.claims) == 2

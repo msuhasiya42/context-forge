@@ -15,7 +15,7 @@ MEMORY_VERSION = "1"
 _STAGE_PROMPTS: dict[Stage, str] = {
     Stage.PLAN: "plan.2",
     Stage.EXECUTE: "execute.2",
-    Stage.COMPRESS: "compress.1",
+    Stage.COMPRESS: "compress.2",
 }
 
 

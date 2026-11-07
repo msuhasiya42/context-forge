@@ -11,7 +11,7 @@ from typing import Any, TypeGuard
 from langchain_core.messages import AIMessage, AnyMessage, SystemMessage, ToolMessage
 
 from contextforge.core.context.builder import messages_tokens
-from contextforge.core.context.prompts import load_prompt
+from contextforge.core.context.prompts import load_prompt, prompt_version
 from contextforge.core.entities.model_call import Stage
 from contextforge.core.models.base import ModelClient, ModelRequest
 
@@ -79,7 +79,7 @@ def summarize_messages(
         ModelRequest(
             stage=Stage.COMPRESS,
             model=model_id,
-            system=[memory, load_prompt("compress.1")],
+            system=[memory, load_prompt(prompt_version(Stage.COMPRESS))],
             messages=messages[:boundary],
             max_tokens=_SUMMARY_MAX_TOKENS,
         )
