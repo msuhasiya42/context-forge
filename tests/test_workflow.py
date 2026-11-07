@@ -44,6 +44,11 @@ def test_csv_sql_query_finds_planted_transfer_pairs() -> None:
     )
     assert rows is not None
     assert {(r["debit_row"], r["credit_row"]) for r in rows} >= {(12, 13), (40, 41), (50, 51)}
+    # external access is off once the dataset is loaded: a SELECT cannot read host files
+    leaked = SqlQueryTool(deps.repos.artifacts, deps.blobs).run(
+        {"dataset_id": "a2", "sql": "SELECT count(*) FROM read_text('/etc/hosts')"}, ctx
+    )
+    assert leaked.status == "error" and leaked.error_class == "code" and leaked.rows is None
 
 
 def test_fixture_request_produces_six_tasks_and_a_report() -> None:
@@ -176,7 +181,11 @@ def test_tool_error_is_a_result_the_model_sees() -> None:
         spec = SqlQueryTool.spec
         permission = "READ"
 
+        def __init__(self) -> None:
+            self.runs = 0
+
         def run(self, arguments, ctx):
+            self.runs += 1
             raise RuntimeError("duckdb exploded")
 
     boom = ModelResponse(
@@ -203,6 +212,25 @@ def test_tool_error_is_a_result_the_model_sees() -> None:
         {"chat_id": "c1", "message_id": req.message_id}, _cfg(req)
     )
     assert out["status"] == "COMPLETED" and any('"error_class": "system"' in c for c in seen)
+    # a failed call is never answered "[already done]": repeating it runs the tool again
+    retried = Boom()
+    deps = make_deps(
+        ScriptedModel(
+            {
+                "plan": [ModelResponse(structured=six_task_plan())],
+                "execute": [boom, boom] + [ModelResponse(structured=t1_result())] * 3,
+            }
+        ),
+        tasks_in_flight=1,
+    )
+    deps.tools["sql_query"] = retried
+    req = seed_chat_with_dataset(deps, chat_id="c1", user_id="u1", dataset_id="a2")
+    _start(deps, req)
+    out = build_workflow(deps, checkpointer=None).invoke(
+        {"chat_id": "c1", "message_id": req.message_id}, _cfg(req)
+    )
+    t1 = deps.repos.tasks.list_by_request(req.message_id)[0]
+    assert retried.runs == 2 and t1.status == "COMPLETED" and out["status"] == "COMPLETED"
 
 
 def test_duplicate_tool_call_spends_no_slot() -> None:

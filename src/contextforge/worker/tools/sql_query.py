@@ -39,8 +39,9 @@ _SELECT_KEYWORDS = ("SELECT", "WITH")
 class SqlQueryTool:
     """Loads the dataset into a fresh in-memory DuckDB per call; nothing is shared between calls.
 
-    The SELECT check is a convenience guard, not a security boundary: the database is a
-    throwaway copy, so a statement that slipped through could change nothing that lasts.
+    The query reads only table ``t``: external access (files, ``read_text``, ``read_csv``,
+    httpfs) is switched off once the dataset is loaded. The SELECT check is a convenience
+    guard: the database is a throwaway copy, so a write that slipped through lasts nothing.
     """
 
     spec: ToolSpec = ToolSpec(
@@ -90,6 +91,8 @@ def _select_rows(csv_bytes: bytes, sql: str) -> list[dict[str, Any]]:
         path = Path(tmp) / "dataset.csv"
         path.write_bytes(csv_bytes)
         con.execute("CREATE TABLE t AS SELECT * FROM read_csv_auto(?)", [str(path)])
+        # After the load, never before it: the query must not read host files or the network.
+        con.execute("SET enable_external_access=false")
         # Parse and bind without running, so a malformed statement fails before any work.
         con.execute(f"EXPLAIN {sql}")
         cursor = con.execute(sql)

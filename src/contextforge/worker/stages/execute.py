@@ -7,11 +7,12 @@ it is the Task record and the outcome the workflow folds into the brief.
 
 import json
 import logging
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from functools import partial
 from typing import Any, TypedDict
 
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 from langchain_core.messages.tool import tool_call
 from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END, START, StateGraph
@@ -398,27 +399,52 @@ def _requested_calls(state: TaskState) -> list[ToolCall]:
 def _run_one_call(
     call: ToolCall, turn: _Turn, state: TaskState, task: Task, deps: WorkerDeps
 ) -> ToolMessage:
-    """Answer one call: from an earlier identical call, as not run past the cap, or by running
-    it. Only a run spends a slot."""
-    key = _call_key(call)
+    """Answer one call: from an earlier identical ok call, as not run past the cap, or by
+    running it. Only a run spends a slot. A failed run is never replayed, so the model can
+    retry it."""
+    key = _call_key(call.name, call.arguments)
     earlier = turn.seen.get(key)
     if earlier is not None:
         logger.info("tool %s repeated; answered from the earlier result", call.name)
-        return _tool_message(call, ALREADY_DONE + earlier, status="ok")
+        return _replay(call, key, earlier, [*state["messages"], *turn.messages])
     if turn.made >= deps.budgets.tool_calls_per_task:
         return _result_message(call, _NOT_EXECUTED, state, deps)
     turn.made += 1
     result = _invoke_tool(call, state, task.kind, deps)
     logger.info("tool %s returned %s", call.name, result.status)
     message = _result_message(call, result, state, deps)
-    turn.seen[key] = str(message.content)
+    if result.status == "ok":
+        turn.seen[key] = str(message.content)
     return message
 
 
-def _call_key(call: ToolCall) -> str:
+def _call_key(name: str, arguments: dict[str, Any]) -> str:
     """The tool name with its canonical JSON arguments: equal keys mean the same call."""
-    arguments = json.dumps(call.arguments, sort_keys=True, separators=(",", ":"))
-    return f"{call.name}:{arguments}"
+    return f"{name}:{json.dumps(arguments, sort_keys=True, separators=(',', ':'))}"
+
+
+def _replay(
+    call: ToolCall, key: str, earlier_content: str, transcript: Sequence[BaseMessage]
+) -> ToolMessage:
+    """A repeated call answered from its earlier ok result. The rows and artifact are that
+    result's while the transcript still holds it; compaction may have summarized it away."""
+    earlier = next((m.additional_kwargs for m in reversed(transcript) if _answers(m, key)), {})
+    return _tool_message(
+        call,
+        ALREADY_DONE + earlier_content,
+        status="ok",
+        row_count=earlier.get("row_count", 0),
+        artifact_id=earlier.get("artifact_id"),
+    )
+
+
+def _answers(message: BaseMessage, key: str) -> bool:
+    """True when ``message`` is an ok result of the call ``key``."""
+    if not isinstance(message, ToolMessage):
+        return False
+    meta = message.additional_kwargs
+    called = _call_key(meta.get("tool_name", ""), meta.get("arguments", {}))
+    return meta.get("status") == "ok" and called == key
 
 
 def _invoke_tool(call: ToolCall, state: TaskState, kind: TaskKind, deps: WorkerDeps) -> ToolResult:
@@ -500,7 +526,7 @@ def _tool_message(
     artifact_id: str | None = None,
 ) -> ToolMessage:
     """A ToolMessage with the envelope compaction stubs read: tool, arguments, rows, artifact,
-    status. ``row_count`` is what this call fetched; 0 for a failure or a repeat."""
+    status. ``row_count`` counts the rows behind the content: 0 for a failure."""
     return ToolMessage(
         content=content,
         tool_call_id=call.id,
