@@ -12,6 +12,7 @@ export interface MockClientOptions {
 }
 
 const DEFAULT_REPLY_DELAY_MS = 800;
+const TITLE_MAX_LENGTH = 60;
 
 /** In-memory stand-in for the backend; the agent echoes each request after a delay. */
 export function createMockClient(options: MockClientOptions = {}): ApiClient {
@@ -31,10 +32,23 @@ export function createMockClient(options: MockClientOptions = {}): ApiClient {
         content,
         status: 'ACCEPTED',
       });
+      nameAfterFirstRequest(store, chatId, content);
       setTimeout(() => replyTo(store, request), replyDelayMs);
       return request;
     },
   };
+}
+
+/** Mirrors the server: an untitled chat takes its first request's text, truncated. */
+function nameAfterFirstRequest(store: MockStore, chatId: string, content: string): void {
+  const chat = store.chat(chatId);
+  if (chat.title === '') store.saveChat({ ...chat, title: titleFromContent(content) });
+}
+
+function titleFromContent(content: string): string {
+  const singleLine = content.replace(/\s+/g, ' ').trim();
+  if (singleLine.length <= TITLE_MAX_LENGTH) return singleLine;
+  return `${singleLine.slice(0, TITLE_MAX_LENGTH - 1).trimEnd()}…`;
 }
 
 function replyTo(store: MockStore, request: Message): void {

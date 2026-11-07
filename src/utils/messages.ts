@@ -1,7 +1,7 @@
-import type { Message, MessageKind, RequestStatus, Sender } from '../api/types';
+import type { Message, MessageKind, MessageStatus, Sender } from '../api/types';
 import { timestampOf, upsertBy } from './collections';
 
-const ACTIVE_STATUSES: ReadonlySet<RequestStatus> = new Set(['ACCEPTED', 'RUNNING']);
+const ACTIVE_REQUEST_STATUSES: ReadonlySet<MessageStatus> = new Set(['ACCEPTED', 'RUNNING']);
 
 const SENDER_LABELS: Record<Sender, string> = {
   user: 'You',
@@ -18,18 +18,25 @@ const KIND_LABELS: Partial<Record<MessageKind, string>> = {
   report: 'Report',
 };
 
-const STATUS_LABELS: Record<RequestStatus, string> = {
+const STATUS_LABELS: Record<MessageStatus, string> = {
   ACCEPTED: 'Accepted',
   RUNNING: 'Working on it',
   WAITING_USER: 'Waiting for you',
   COMPLETED: 'Completed',
   FAILED: 'Failed',
   CANCELLED: 'Cancelled',
+  PROPOSED: 'Awaiting your decision',
+  APPROVED: 'Approved',
+  REJECTED: 'Rejected',
+  EXPIRED: 'Expired',
+  EXECUTING: 'Executing',
+  EXECUTED: 'Executed',
+  UNCERTAIN: 'Outcome uncertain',
 };
 
 export const senderLabel = (sender: Sender) => SENDER_LABELS[sender];
 export const kindLabel = (kind: MessageKind) => KIND_LABELS[kind] ?? null;
-export const statusLabel = (status: RequestStatus) => STATUS_LABELS[status];
+export const statusLabel = (status: MessageStatus) => STATUS_LABELS[status];
 
 /** Oldest first; ULID message ids break timestamp ties in creation order. */
 export function sortMessages(messages: readonly Message[]): Message[] {
@@ -56,7 +63,7 @@ export function hasActiveRequest(messages: readonly Message[]): boolean {
     (message) =>
       message.kind === 'request' &&
       message.status !== undefined &&
-      ACTIVE_STATUSES.has(message.status),
+      ACTIVE_REQUEST_STATUSES.has(message.status),
   );
 }
 

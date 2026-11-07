@@ -1,6 +1,21 @@
 // Runtime validation of untrusted server payloads into the wire types.
 import { ApiError, invalidResponse, type ApiErrorCode } from './errors';
-import { MESSAGE_KINDS, REQUEST_STATUSES, SENDERS, type Chat, type Message } from './types';
+import {
+  MESSAGE_KINDS,
+  PROPOSED_ACTION_STATUSES,
+  REQUEST_STATUSES,
+  SENDERS,
+  type Chat,
+  type Message,
+  type MessageKind,
+  type MessageStatus,
+} from './types';
+
+// Only these kinds carry a lifecycle status; each has its own set of values.
+const STATUSES_BY_KIND: Partial<Record<MessageKind, readonly MessageStatus[]>> = {
+  request: REQUEST_STATUSES,
+  proposed_action: PROPOSED_ACTION_STATUSES,
+};
 
 type JsonRecord = Record<string, unknown>;
 
@@ -25,34 +40,71 @@ function isAbsent(value: unknown): boolean {
   return value === undefined || value === null;
 }
 
+function readOptionalString(record: JsonRecord, key: string): string | undefined {
+  return isAbsent(record[key]) ? undefined : readString(record, key);
+}
+
+function readStatus(record: JsonRecord, kind: MessageKind): MessageStatus | undefined {
+  const allowed = STATUSES_BY_KIND[kind];
+  return allowed && !isAbsent(record.status) ? readEnum(record, 'status', allowed) : undefined;
+}
+
 export function parseChat(value: unknown): Chat {
   const record = asRecord(value);
   return {
     chatId: readString(record, 'chatId'),
-    title: isAbsent(record.title) ? '' : readString(record, 'title'),
+    title: readOptionalString(record, 'title') ?? '',
     updatedAt: readString(record, 'updatedAt'),
   };
 }
 
 export function parseMessage(value: unknown): Message {
   const record = asRecord(value);
-  const message: Message = {
+  const kind = readEnum(record, 'kind', MESSAGE_KINDS);
+  return {
     messageId: readString(record, 'messageId'),
     chatId: readString(record, 'chatId'),
     sender: readEnum(record, 'sender', SENDERS),
-    kind: readEnum(record, 'kind', MESSAGE_KINDS),
-    content: readString(record, 'content'),
+    kind,
+    // An action_response may carry only a decision; its note is optional.
+    content:
+      kind === 'action_response'
+        ? (readOptionalString(record, 'content') ?? '')
+        : readString(record, 'content'),
     createdAt: readString(record, 'createdAt'),
+    status: readStatus(record, kind),
+    failureReason: readOptionalString(record, 'failureReason'),
   };
-  if (!isAbsent(record.status)) message.status = readEnum(record, 'status', REQUEST_STATUSES);
-  return message;
+}
+
+function readItems(value: unknown): unknown[] {
+  const items = asRecord(value).items;
+  if (!Array.isArray(items)) throw invalidResponse();
+  return items;
 }
 
 /** List endpoints return `{ items, nextCursor }`; the UI reads the first page only. */
 export function parsePageItems<T>(value: unknown, parseItem: (item: unknown) => T): T[] {
-  const items = asRecord(value).items;
-  if (!Array.isArray(items)) throw invalidResponse();
-  return items.map(parseItem);
+  return readItems(value).map(parseItem);
+}
+
+/**
+ * Like parsePageItems, but one item the UI cannot read is skipped (and reported in the
+ * console) instead of failing the whole page.
+ */
+export function parsePageItemsSkippingInvalid<T>(
+  value: unknown,
+  parseItem: (item: unknown) => T,
+): T[] {
+  const parsed: T[] = [];
+  for (const item of readItems(value)) {
+    try {
+      parsed.push(parseItem(item));
+    } catch (error) {
+      console.warn('Skipped a list item the UI cannot display', item, error);
+    }
+  }
+  return parsed;
 }
 
 /** Maps the `{ error: { code, message } }` envelope; falls back when the body is not that shape. */

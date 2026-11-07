@@ -1,3 +1,4 @@
+import type { Ref } from 'react';
 import type { Chat } from '../../api/types';
 import controls from '../../styles/controls.module.css';
 import type { AsyncState } from '../../utils/asyncState';
@@ -11,6 +12,8 @@ interface ChatSidebarProps {
   id: string;
   isOpen: boolean;
   onClose: () => void;
+  /** Receives focus when the narrow-screen overlay opens. */
+  closeButtonRef: Ref<HTMLButtonElement>;
   chats: AsyncState<Chat[]>;
   selectedChatId: string | null;
   onSelect: (chatId: string) => void;
@@ -33,7 +36,13 @@ export function ChatSidebar(props: ChatSidebarProps) {
         >
           New chat
         </button>
-        <SidebarToggle sidebarId={props.id} isOpen={props.isOpen} onToggle={props.onClose} />
+        <SidebarToggle
+          ref={props.closeButtonRef}
+          sidebarId={props.id}
+          isOpen={props.isOpen}
+          action="hide"
+          onClick={props.onClose}
+        />
       </header>
       {props.actionError && (
         <div className={styles.errorSlot}>

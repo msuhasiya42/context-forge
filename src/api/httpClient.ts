@@ -1,6 +1,12 @@
 import type { ApiClient } from './client';
 import { ApiError, invalidResponse } from './errors';
-import { parseApiError, parseChat, parseMessage, parsePageItems } from './parse';
+import {
+  parseApiError,
+  parseChat,
+  parseMessage,
+  parsePageItems,
+  parsePageItemsSkippingInvalid,
+} from './parse';
 
 const REQUEST_TIMEOUT_MS = 15_000;
 const CHAT_PAGE_SIZE = 50;
@@ -26,7 +32,7 @@ export function createHttpClient(baseUrl: string): ApiClient {
     renameChat: async (chatId, title) =>
       parseChat(await call('PATCH', chatPath(chatId), { title })),
     listMessages: async (chatId) =>
-      parsePageItems(
+      parsePageItemsSkippingInvalid(
         await call('GET', `${chatPath(chatId)}/messages?limit=${MESSAGE_PAGE_SIZE}`),
         parseMessage,
       ),

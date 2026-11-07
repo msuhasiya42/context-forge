@@ -22,7 +22,7 @@ Copy `.env.example` to `.env.local` and set the API base URL:
 VITE_API_BASE_URL=http://localhost:8000
 ```
 
-When `VITE_API_BASE_URL` is unset or empty the mock client is used. The UI calls these endpoints: `POST /chats`, `GET /chats`, `GET /chats/{chatId}/messages`, `POST /chats/{chatId}/requests` (with an `Idempotency-Key` header) and `PATCH /chats/{chatId}`. The backend must allow the dev origin via CORS. `crypto.randomUUID` (used for the idempotency key) needs a secure context, so serve the UI from `localhost` or HTTPS.
+When `VITE_API_BASE_URL` is unset or empty the mock client is used. The UI calls these endpoints: `POST /chats`, `GET /chats`, `GET /chats/{chatId}/messages` and `POST /chats/{chatId}/requests` (with an `Idempotency-Key` header). `PATCH /chats/{chatId}` is in the client but not used by the UI yet; chat titles come from the server. The backend must allow the dev origin via CORS. `crypto.randomUUID` (used for the idempotency key) needs a secure context, so serve the UI from `localhost` or HTTPS.
 
 ## Checks
 
@@ -44,4 +44,4 @@ npm run format     # Prettier --write
 
 ## Current limits
 
-No streaming yet: while a request is `ACCEPTED` or `RUNNING` the open chat re-fetches its messages every second, standing in for the SSE stream. Only the first page of chats (50) and messages (newest 100) is loaded. Picked files are shown as chips but not uploaded.
+No streaming yet: while a request is `ACCEPTED` or `RUNNING` the open chat re-fetches its messages every second (backing off up to 10 s after failures), standing in for the SSE stream. Only the first page of chats (50) and messages (newest 100) is loaded. Picked files are shown as chips but not uploaded.

@@ -8,6 +8,7 @@ import { useSendRequest } from './useSendRequest';
 
 /** Polling stands in for the SSE stream (section 11.5) until streaming is built. */
 export const DEFAULT_POLL_INTERVAL_MS = 1000;
+const MAX_POLL_INTERVAL_MS = 10_000;
 
 type LoadMode = 'replace' | 'merge';
 
@@ -15,20 +16,35 @@ type LoadMode = 'replace' | 'merge';
 interface OwnedMessages {
   chatId: string | null;
   state: AsyncState<Message[]>;
+  /** Consecutive failed background refreshes; drives the notice and the back-off. */
+  failedRefreshes: number;
+  refreshError: string | null;
 }
+
+const fresh = (chatId: string | null, state: AsyncState<Message[]>): OwnedMessages => ({
+  chatId,
+  state,
+  failedRefreshes: 0,
+  refreshError: null,
+});
 
 /** Messages of one chat: load on selection, poll while a request is active, and send. */
 export function useMessages(client: ApiClient, chatId: string | null, pollIntervalMs: number) {
-  const [owned, setOwned] = useState<OwnedMessages>({ chatId: null, state: LOADING });
+  const [owned, setOwned] = useState<OwnedMessages>(fresh(null, LOADING));
   const runLatest = useLatestRequest();
-  const state = owned.chatId === chatId ? owned.state : LOADING;
+  const current = owned.chatId === chatId ? owned : fresh(chatId, LOADING);
 
   const load = useCallback(
     async (mode: LoadMode) => {
       if (!chatId) return;
-      if (mode === 'replace') setOwned({ chatId, state: LOADING });
+      if (mode === 'replace') setOwned(fresh(chatId, LOADING));
       const settled = await runLatest(() => client.listMessages(chatId));
-      if (settled) setOwned((prev) => ({ chatId, state: combine(prev, chatId, settled, mode) }));
+      if (!settled) return;
+      setOwned((prev) =>
+        mode === 'merge' && prev.chatId === chatId
+          ? applyRefresh(prev, settled)
+          : fresh(chatId, sortState(settled)),
+      );
     },
     [client, chatId, runLatest],
   );
@@ -37,37 +53,46 @@ export function useMessages(client: ApiClient, chatId: string | null, pollInterv
     void load('replace');
   }, [load]);
 
-  const shouldPoll = state.status === 'success' && hasActiveRequest(state.data);
-  useEffect(() => {
-    if (!shouldPoll) return;
-    const timer = setTimeout(() => void load('merge'), pollIntervalMs);
-    return () => clearTimeout(timer);
-  }, [shouldPoll, state, load, pollIntervalMs]);
+  const refresh = useCallback(() => void load('merge'), [load]);
+  usePolling(current, refresh, pollIntervalMs);
 
   const appendMessage = useCallback((message: Message) => {
     // Dropped when the user has switched chats while the request was in flight.
-    setOwned((prev) =>
-      prev.chatId === message.chatId
-        ? { ...prev, state: combine(prev, message.chatId, success([message]), 'merge') }
-        : prev,
-    );
+    setOwned((prev) => (prev.chatId === message.chatId ? appendTo(prev, message) : prev));
   }, []);
 
   const sender = useSendRequest(client, chatId, appendMessage);
   const reload = useCallback(() => load('replace'), [load]);
-  return { state, reload, ...sender };
+  return { state: current.state, refreshError: current.refreshError, reload, ...sender };
 }
 
-function combine(
-  prev: OwnedMessages,
-  chatId: string,
-  settled: AsyncState<Message[]>,
-  mode: LoadMode,
-): AsyncState<Message[]> {
-  if (settled.status !== 'success') return settled;
-  const previous = mode === 'merge' && prev.chatId === chatId ? successData(prev.state) : null;
-  return success(previous ? mergeMessages(previous, settled.data) : sortMessages(settled.data));
+/** Re-fetches while a request is active, doubling the delay after each failure (capped). */
+function usePolling(owned: OwnedMessages, refresh: () => void, baseIntervalMs: number) {
+  const { state, failedRefreshes } = owned;
+  const shouldPoll = state.status === 'success' && hasActiveRequest(state.data);
+  const delay = Math.min(baseIntervalMs * 2 ** failedRefreshes, MAX_POLL_INTERVAL_MS);
+  useEffect(() => {
+    if (!shouldPoll) return;
+    const timer = setTimeout(refresh, delay);
+    return () => clearTimeout(timer);
+  }, [shouldPoll, owned, refresh, delay]);
 }
 
-const successData = <T>(state: AsyncState<T>): T | null =>
-  state.status === 'success' ? state.data : null;
+/** A failed refresh keeps the messages already shown; a successful one merges by id. */
+function applyRefresh(prev: OwnedMessages, settled: AsyncState<Message[]>): OwnedMessages {
+  if (prev.state.status !== 'success') return fresh(prev.chatId, sortState(settled));
+  if (settled.status === 'error') {
+    return { ...prev, failedRefreshes: prev.failedRefreshes + 1, refreshError: settled.message };
+  }
+  if (settled.status !== 'success') return prev;
+  return fresh(prev.chatId, success(mergeMessages(prev.state.data, settled.data)));
+}
+
+function appendTo(prev: OwnedMessages, message: Message): OwnedMessages {
+  const existing = prev.state.status === 'success' ? prev.state.data : [];
+  return { ...prev, state: success(mergeMessages(existing, [message])) };
+}
+
+function sortState(settled: AsyncState<Message[]>): AsyncState<Message[]> {
+  return settled.status === 'success' ? success(sortMessages(settled.data)) : settled;
+}

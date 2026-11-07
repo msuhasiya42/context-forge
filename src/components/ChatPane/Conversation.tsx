@@ -3,6 +3,8 @@ import type { AsyncState } from '../../utils/asyncState';
 import { AsyncContent } from '../AsyncContent/AsyncContent';
 import { Composer } from '../Composer/Composer';
 import { MessageList } from '../MessageList/MessageList';
+import controls from '../../styles/controls.module.css';
+import styles from './Conversation.module.css';
 
 interface ConversationProps {
   messages: AsyncState<Message[]>;
@@ -10,6 +12,8 @@ interface ConversationProps {
   onSend: (content: string) => Promise<boolean>;
   isSending: boolean;
   sendError: string | null;
+  /** Set while background refreshes fail; the messages already shown stay. */
+  refreshError: string | null;
 }
 
 /** The selected chat's messages above its composer. */
@@ -19,6 +23,7 @@ export function Conversation({
   onSend,
   isSending,
   sendError,
+  refreshError,
 }: ConversationProps) {
   return (
     <>
@@ -30,6 +35,13 @@ export function Conversation({
       >
         {(items) => <MessageList messages={items} />}
       </AsyncContent>
+      {refreshError && (
+        <div className={styles.noticeSlot}>
+          <p role="status" className={controls.errorBanner}>
+            Could not refresh messages: {refreshError} Retrying automatically.
+          </p>
+        </div>
+      )}
       <Composer
         onSend={onSend}
         isBlocked={isSending || messages.status !== 'success'}

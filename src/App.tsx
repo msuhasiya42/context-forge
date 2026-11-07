@@ -4,7 +4,7 @@ import { PaneContent } from './components/ChatPane/PaneContent';
 import { ChatSidebar } from './components/ChatSidebar/ChatSidebar';
 import { SidebarToggle } from './components/SidebarToggle/SidebarToggle';
 import { useChatApp } from './hooks/useChatApp';
-import { useDisclosure } from './hooks/useDisclosure';
+import { useSidebarOverlay } from './hooks/useSidebarOverlay';
 import { DEFAULT_POLL_INTERVAL_MS } from './hooks/useMessages';
 import { chatDisplayName } from './utils/chats';
 import styles from './App.module.css';
@@ -20,7 +20,7 @@ export interface AppProps {
 
 export function App({ client, pollIntervalMs = DEFAULT_POLL_INTERVAL_MS }: AppProps) {
   const app = useChatApp(client, pollIntervalMs);
-  const sidebar = useDisclosure();
+  const sidebar = useSidebarOverlay();
   const { activeChat, messages } = app;
 
   return (
@@ -29,6 +29,7 @@ export function App({ client, pollIntervalMs = DEFAULT_POLL_INTERVAL_MS }: AppPr
         id={SIDEBAR_ID}
         isOpen={sidebar.isOpen}
         onClose={sidebar.close}
+        closeButtonRef={sidebar.hideButtonRef}
         chats={app.chats.state}
         selectedChatId={activeChat?.chatId ?? null}
         onSelect={(chatId) => {
@@ -45,8 +46,15 @@ export function App({ client, pollIntervalMs = DEFAULT_POLL_INTERVAL_MS }: AppPr
       />
       <ChatPane
         title={activeChat ? chatDisplayName(activeChat) : APP_NAME}
+        isInert={sidebar.isOpen}
         leading={
-          <SidebarToggle sidebarId={SIDEBAR_ID} isOpen={sidebar.isOpen} onToggle={sidebar.open} />
+          <SidebarToggle
+            ref={sidebar.showButtonRef}
+            sidebarId={SIDEBAR_ID}
+            isOpen={sidebar.isOpen}
+            action="show"
+            onClick={sidebar.open}
+          />
         }
       >
         <PaneContent
@@ -57,6 +65,7 @@ export function App({ client, pollIntervalMs = DEFAULT_POLL_INTERVAL_MS }: AppPr
           onSend={app.sendMessage}
           isSending={messages.isSending}
           sendError={messages.sendError}
+          refreshError={messages.refreshError}
         />
       </ChatPane>
     </div>

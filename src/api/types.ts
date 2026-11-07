@@ -25,6 +25,20 @@ export const REQUEST_STATUSES = [
 ] as const;
 export type RequestStatus = (typeof REQUEST_STATUSES)[number];
 
+export const PROPOSED_ACTION_STATUSES = [
+  'PROPOSED',
+  'APPROVED',
+  'REJECTED',
+  'EXPIRED',
+  'EXECUTING',
+  'EXECUTED',
+  'FAILED',
+  'UNCERTAIN',
+] as const;
+export type ProposedActionStatus = (typeof PROPOSED_ACTION_STATUSES)[number];
+
+export type MessageStatus = RequestStatus | ProposedActionStatus;
+
 export interface Chat {
   chatId: string;
   /** Empty until the first request names the chat. */
@@ -39,6 +53,9 @@ export interface Message {
   kind: MessageKind;
   content: string;
   createdAt: string;
-  /** Present on `kind: "request"` only. */
-  status?: RequestStatus;
+  /** Empty only on an `action_response` sent without a note. */
+  /** Request statuses on `kind: "request"`, proposed-action statuses on `kind: "proposed_action"`. */
+  status?: MessageStatus;
+  /** User-facing reason when a request failed. */
+  failureReason?: string;
 }

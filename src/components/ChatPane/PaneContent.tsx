@@ -11,6 +11,7 @@ interface PaneContentProps {
   onSend: (content: string) => Promise<boolean>;
   isSending: boolean;
   sendError: string | null;
+  refreshError: string | null;
 }
 
 /** The selected chat's conversation, or a prompt to create one once the list has loaded. */
@@ -25,6 +26,7 @@ export function PaneContent({ activeChat, chatsLoaded, ...conversation }: PaneCo
         onSend={conversation.onSend}
         isSending={conversation.isSending}
         sendError={conversation.sendError}
+        refreshError={conversation.refreshError}
       />
     );
   }

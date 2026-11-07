@@ -21,8 +21,9 @@ export function MessageItem({ message }: MessageItemProps) {
         {tag && <span className={styles.tag}>{tag}</span>}
         <time dateTime={message.createdAt}>{formatMessageTime(message.createdAt)}</time>
       </p>
-      <p className={styles.content}>{message.content}</p>
+      {message.content && <p className={styles.content}>{message.content}</p>}
       {message.status && <p className={styles.status}>Status: {statusLabel(message.status)}</p>}
+      {message.failureReason && <p className={styles.status}>Reason: {message.failureReason}</p>}
     </li>
   );
 }

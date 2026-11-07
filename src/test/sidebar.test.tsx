@@ -39,6 +39,22 @@ describe('chat sidebar', () => {
     expect(await screen.findByText('Start the conversation')).toBeInTheDocument();
   });
 
+  it('moves focus into the narrow-screen sidebar, and Escape closes it and restores focus', async () => {
+    const { user } = renderApp(createMockClient({ seed: twoChatSeed() }));
+    await chatList();
+    const main = screen.getByRole('main');
+    const showChats = screen.getByRole('button', { name: 'Show chats' });
+
+    await user.click(showChats);
+    expect(screen.getByRole('button', { name: 'Hide chats' })).toHaveFocus();
+    expect(main).toHaveAttribute('inert');
+
+    await user.keyboard('{Escape}');
+    expect(showChats).toHaveFocus();
+    expect(showChats).toHaveAttribute('aria-expanded', 'false');
+    expect(main).not.toHaveAttribute('inert');
+  });
+
   it('puts a new chat at the top of an existing list', async () => {
     const { user } = renderApp(createMockClient({ seed: twoChatSeed() }));
     await chatList();
