@@ -1,27 +1,36 @@
 """The dependency bundle every worker stage receives: storage, the model, limits and tools."""
 
+import math
 import threading
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from typing import Any
 
 from contextforge.core.activity import ActivityBus
 from contextforge.core.context.budgets import Budgets
 from contextforge.core.context.prompts import MEMORY_VERSION
+from contextforge.core.entities.message import (
+    ActionResponseMessage,
+    ClarificationResponseMessage,
+    RequestMessage,
+)
 from contextforge.core.models.base import ModelClient
-from contextforge.core.models.recording import RecordingModelClient
+from contextforge.core.models.recording import PriceTable, RecordingModelClient
 from contextforge.core.queue import Queue
 from contextforge.core.repositories.memory import Repositories
 from contextforge.core.settings import Settings
 from contextforge.core.storage import BlobStore
 from contextforge.core.tools.base import Tool
+from contextforge.infra.tracing import RequestTracer
 from contextforge.worker.calls import BudgetedModel
 
 
 @dataclass
 class WorkerDeps:
-    """``model`` is the bare client; stages call it only through ``model_for`` so every call is
-    recorded as a ModelCall of its request."""
+    """``model`` is the provider client (traced when tracing is on); stages call it only through
+    ``model_for`` so every call is admitted and recorded as a ModelCall of its request."""
 
     repos: Repositories
     blobs: BlobStore
@@ -33,12 +42,21 @@ class WorkerDeps:
     price_version: str
     planner_model: str = "scripted"
     executor_model: str = "scripted"
+    # config/models.yaml prices; each ModelCall's cost is computed from its usage with them.
+    prices: PriceTable = field(default_factory=dict)
+    # Prefix of ModelCall.model (spec 3.5): every real model of this project is on Bedrock.
+    model_provider: str = "bedrock"
     # Caps the tasks executing at once across the worker at ``budgets.tasks_in_flight``.
     semaphore: threading.BoundedSemaphore = field(init=False)
     settings: Settings | None = None
     budget_lock: threading.RLock = field(default_factory=threading.RLock)
     pending_calls: dict[str, int] = field(default_factory=dict)
     activity: ActivityBus = field(default_factory=ActivityBus)
+    # time.monotonic() at the start of each request's current segment (see ``segment``).
+    segment_started: dict[str, float] = field(default_factory=dict)
+    # Opens the trace runs; the default traces nothing. A tracing tracer also wraps ``model``
+    # and ``tools`` (see ``RequestTracer.model`` and ``.tools``).
+    tracer: RequestTracer = field(default_factory=RequestTracer)
 
     def __post_init__(self) -> None:
         self.semaphore = threading.BoundedSemaphore(self.budgets.tasks_in_flight)
@@ -50,38 +68,83 @@ class WorkerDeps:
         memory_version: str | None = None,
         created_at: str | None = None,
     ) -> ModelClient:
-        """The model client for one request: each call it makes is saved as a ModelCall."""
+        """The model client for one request. Every attempt is admitted against the request's call
+        budget (with settings, also its spend cap and deadline), retried when transient, and
+        saved as a ModelCall priced from its usage.
+
+        The deadline counts from the start of the request's current segment, never from its
+        ``created_at`` (A-C1), so time spent waiting on the user is not counted. ``created_at``
+        is therefore unused; it stays until the stages stop passing it.
+        """
+        settings = self.settings
         recorded = RecordingModelClient(
             self.model,
             self.repos.model_calls,
             request_message_id=request_message_id,
             memory_version=memory_version or MEMORY_VERSION,
             price_version=self.price_version,
+            prices=self.prices,
+            unknown_cost_usd=settings.call_reserve_usd if settings else None,
+            provider=self.model_provider,
         )
-
-        if self.settings is None:
-            return recorded
-        recorded.reserve_usd = self.settings.call_reserve_usd
-        remaining = float(self.settings.request_deadline_seconds)
-        if created_at is not None:
-            age = (datetime.now(UTC) - datetime.fromisoformat(created_at)).total_seconds()
-            remaining = max(0, remaining - age)
+        deadline = None
+        if settings is not None:
+            # A stage run outside a segment (a direct call in a test) gets the whole deadline.
+            started = self.segment_started.get(request_message_id, time.monotonic())
+            deadline = started + settings.request_deadline_seconds
+        # Without settings (tests, offline tools) the call budget is the only limit.
         return BudgetedModel(
             recorded,
             self.repos.model_calls,
             request_message_id,
             call_budget=self.budgets.call_budget,
-            max_usd=self.settings.request_max_usd,
-            reserve_usd=recorded.reserve_usd,
-            retries=self.settings.model_retries,
+            max_usd=settings.request_max_usd if settings else math.inf,
+            reserve_usd=settings.call_reserve_usd if settings else 0.0,
+            retries=settings.model_retries if settings else 0,
             lock=self.budget_lock,
             pending=self.pending_calls,
-            deadline=time.monotonic() + remaining,
+            deadline=deadline,
         )
 
-    def touch_chat(self, chat_id: str, user_id: str) -> None:
-        from contextforge.core.entities.message import RequestMessage
+    @contextmanager
+    def segment(self, chat_id: str, request_message_id: str) -> Iterator[None]:
+        """One run of a request: its start or a resume, from claim until it ends or pauses.
 
+        The request deadline counts from the segment's start, so the time a request waits on
+        the user, between segments, never counts against it. The segment is one trace root.
+        """
+        self.segment_started[request_message_id] = time.monotonic()
+        try:
+            with self.tracer.request(
+                request_message_id,
+                chat_id,
+                lambda: self._segment_summary(chat_id, request_message_id),
+            ):
+                yield
+        finally:
+            self.segment_started.pop(request_message_id, None)
+
+    def _segment_summary(self, chat_id: str, request_message_id: str) -> dict[str, Any]:
+        """The request's status as a segment ends, and which segment it was: 1 for the first
+        run, n + 1 for the run after the user's n-th answer."""
+        messages = self.repos.messages.list_by_chat(chat_id)
+        answers = [
+            m
+            for m in messages
+            if isinstance(m, ClarificationResponseMessage | ActionResponseMessage)
+            and m.request_message_id == request_message_id
+        ]
+        request = next(
+            (
+                m
+                for m in messages
+                if isinstance(m, RequestMessage) and m.message_id == request_message_id
+            ),
+            None,
+        )
+        return {"status": request.status if request else None, "attempt": len(answers) + 1}
+
+    def touch_chat(self, chat_id: str, user_id: str) -> None:
         chat = self.repos.chats.get(user_id, chat_id)
         if chat is None:
             return

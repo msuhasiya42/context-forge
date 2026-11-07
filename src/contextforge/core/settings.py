@@ -24,9 +24,13 @@ class Settings(BaseSettings):
     cors_origins: list[str] = ["http://localhost:5173"]
     search_provider: Literal["duckduckgo", "serper"] = "duckduckgo"
     serper_api_key: SecretStr | None = Field(default=None, validation_alias="SERPER_API_KEY")
-    planner_model: str = "apac.amazon.nova-pro-v1:0"
-    executor_model: str = "apac.amazon.nova-lite-v1:0"
-    model_timeout_seconds: int = Field(default=60, ge=1, le=120)
+    # Overrides of the config/models.yaml stage models (plan and cite; execute and compress).
+    planner_model: str | None = None
+    executor_model: str | None = None
+    # Read timeouts per call: the planner model (plan, cite) may think longer than the executor
+    # model (execute, compress); each gets its own bedrock-runtime client.
+    planner_timeout_seconds: int = Field(default=120, ge=1, le=300)
+    executor_timeout_seconds: int = Field(default=60, ge=1, le=300)
     model_retries: int = Field(default=1, ge=0, le=2)
     request_max_usd: float = Field(default=1.0, gt=0)
     call_reserve_usd: float = Field(default=0.10, gt=0)
@@ -35,8 +39,12 @@ class Settings(BaseSettings):
     web_timeout_seconds: int = Field(default=15, ge=1, le=60)
     web_max_bytes: int = Field(default=1_000_000, ge=1024)
     web_max_chars: int = Field(default=12_000, ge=100)
+    # Our own switch, not LANGSMITH_TRACING: exporting that turns on the LangSmith SDK's global
+    # auto-tracing, which would send LangGraph's full state (requests, pages) to LangSmith.
+    model_tracing: bool = False
+    # Developer machines only: put prompts and model and tool outputs on trace runs.
+    trace_content: bool = False
     langsmith_api_key: SecretStr | None = Field(default=None, validation_alias="LANGSMITH_API_KEY")
-    langsmith_tracing: bool = Field(default=False, validation_alias="LANGSMITH_TRACING")
     langsmith_project: str = Field(default="contextforge", validation_alias="LANGSMITH_PROJECT")
     run_worker: bool = True
     sse_poll_seconds: float = Field(default=1, gt=0)

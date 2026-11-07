@@ -3,12 +3,15 @@ import pytest
 
 from contextforge.core.context.prompts import load_prompt, prompt_version
 from contextforge.core.entities.model_call import Stage
-from contextforge.core.models.base import ModelRequest, ModelResponse, ToolSpec
+from contextforge.core.models.base import ModelClient, ModelRequest, ModelResponse, ToolSpec
 from contextforge.core.models.config import load_models_config
+from contextforge.core.models.errors import ModelTimeout
 from contextforge.core.models.recording import RecordingModelClient
 from contextforge.core.models.scripted import ScriptedModel, ScriptExhausted
 from contextforge.core.repositories.memory import Repositories
+from contextforge.core.settings import Settings
 from contextforge.core.values import Usage
+from tests.helpers import make_deps
 
 
 def _req(stage: str = "plan") -> ModelRequest:
@@ -91,8 +94,54 @@ def test_recording_client_records_price_stop_reason_and_order_free_tool_set_hash
 
 def test_models_config_loads_price_version_and_stages() -> None:
     config = load_models_config()
-    assert config.price_version == "2026-11-04"
-    assert config.stages["plan"].model == "scripted"
+    assert config.price_version == "2026-11-07"
+    assert config.stages["plan"].model == "apac.amazon.nova-pro-v1:0"
+    assert config.stages["execute"].model == "apac.amazon.nova-lite-v1:0"
+
+
+def test_a_call_is_priced_from_its_usage_and_unknown_usage_is_charged_the_reserve() -> None:
+    config = load_models_config()
+    repos = Repositories.in_memory()
+    usage = Usage(input_tokens=31_920, output_tokens=2_724)  # the live run's ten calls in one
+
+    class TimesOut:
+        def invoke(self, request: ModelRequest) -> ModelResponse:
+            raise ModelTimeout("no answer")
+
+    def recorder(inner: ModelClient) -> RecordingModelClient:
+        return RecordingModelClient(
+            inner,
+            repos.model_calls,
+            request_message_id="m1",
+            memory_version="1",
+            price_version=config.price_version,
+            prices=config.prices,
+            unknown_cost_usd=0.10,
+        )
+
+    pro = ModelRequest(stage="plan", model="apac.amazon.nova-pro-v1:0", system=[], messages=[])
+    recorder(ScriptedModel({"plan": [ModelResponse(usage=usage)]})).invoke(pro)
+    with pytest.raises(ModelTimeout):
+        recorder(TimesOut()).invoke(pro)
+    priced, timed_out = repos.model_calls.list_by_request("m1")
+    assert priced.model == "bedrock/apac.amazon.nova-pro-v1:0"
+    assert priced.price_version == "2026-11-07"
+    assert priced.estimated_cost_usd == pytest.approx((31_920 * 0.80 + 2_724 * 3.20) / 1e6)
+    assert timed_out.usage is None and timed_out.estimated_cost_usd == 0.10
+
+
+def test_spend_cap_admits_more_than_ten_cheap_calls() -> None:
+    """Live finding L-1: the flat reserve recorded per call refused the eleventh call."""
+    reply = ModelResponse(text="ok", usage=Usage(input_tokens=3_192, output_tokens=272))
+    deps = make_deps(ScriptedModel({"execute": [reply] * 12}))
+    deps.settings = Settings(_env_file=None, request_max_usd=1.0, call_reserve_usd=0.10)
+    deps.prices = load_models_config().prices
+    request = ModelRequest(stage="execute", model=deps.executor_model, system=[], messages=[])
+    model = deps.model_for("m1")
+    for _ in range(12):
+        model.invoke(request)
+    calls = deps.repos.model_calls.list_by_request("m1")
+    assert len(calls) == 12 and sum(c.estimated_cost_usd or 0 for c in calls) < 0.01
 
 
 def test_prompt_version_mapping() -> None:

@@ -126,7 +126,11 @@ def execute_stage(brief: RequestState, task_id: str, deps: WorkerDeps) -> TaskOu
     ``Cancelled`` propagates and leaves the Task RUNNING.
     """
     request_message_id = brief["request_message_id"]
-    with request_context(request_message_id, task_id), deps.semaphore:
+    with (
+        request_context(request_message_id, task_id),
+        deps.semaphore,
+        deps.tracer.task(brief, task_id),
+    ):
         try:
             task = deps.repos.tasks.update_status(
                 request_message_id, task_id, TaskStatus.PLANNED, TaskStatus.RUNNING

@@ -104,13 +104,16 @@ def _run_to_status(inputs: dict[str, Any], stages: _StageTasks, deps: WorkerDeps
     """Plan, run the waves, cite and report; the request's final status."""
     brief = stages.load_brief(inputs["chat_id"], inputs["message_id"]).result()
     try:
-        brief = _plan(brief, stages)
+        with deps.tracer.stage(inputs["message_id"], "plan"):
+            brief = _plan(brief, stages)
     except PlanFailed as failed:
         stages.fail(brief, failed.reason).result()
         return RequestStatus.FAILED.value
     brief, outcomes = _run_waves(brief, stages, deps)
-    brief = {**brief, "facts": stages.cite(brief).result()}
-    return stages.report(brief, outcomes).result()
+    with deps.tracer.stage(inputs["message_id"], "cite"):
+        brief = {**brief, "facts": stages.cite(brief).result()}
+    with deps.tracer.stage(inputs["message_id"], "report"):
+        return stages.report(brief, outcomes).result()
 
 
 def _plan(brief: RequestState, stages: _StageTasks) -> RequestState:

@@ -2,6 +2,8 @@ from pathlib import Path
 
 import yaml
 
+from contextforge.core.models.recording import price_row
+
 
 def test_package_imports() -> None:
     import contextforge  # noqa: F401
@@ -34,9 +36,10 @@ def test_budgets_yaml_has_spec_values() -> None:
 def test_models_yaml_covers_every_stage() -> None:
     m = yaml.safe_load(Path("config/models.yaml").read_text())
     assert set(m["stages"]) >= {"plan", "execute", "cite", "compress"}
-    assert all(v["model"] == "scripted" for v in m["stages"].values())
+    # every stage model is priced, so each call's cost is computed from its usage
+    assert all(price_row(m["prices"], v["model"]) for v in m["stages"].values())
 
 
 def test_models_yaml_has_price_version() -> None:
     m = yaml.safe_load(Path("config/models.yaml").read_text())
-    assert m["priceVersion"] == "2026-11-04"
+    assert m["priceVersion"] == "2026-11-07"

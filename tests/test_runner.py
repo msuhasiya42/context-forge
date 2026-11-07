@@ -1,11 +1,13 @@
 # tests/test_runner.py
 import sqlite3
+from datetime import UTC, datetime, timedelta
 
 from langgraph.checkpoint.sqlite import SqliteSaver
 
 from contextforge.core.entities.message import ClarificationResponseMessage
 from contextforge.core.models.base import ModelResponse
 from contextforge.core.models.scripted import ScriptedModel
+from contextforge.core.settings import Settings
 from contextforge.worker.runner import RequestRunner
 from tests.helpers import clarification, make_deps, seed_chat_with_dataset, six_task_plan, t1_result
 
@@ -208,3 +210,28 @@ def test_pending_interrupt_carries_next_action(tmp_path) -> None:
     RequestRunner(deps, _saver(db)).start("c1", req.message_id)
     pending = RequestRunner(deps, _saver(db)).pending_interrupt(req.message_id)
     assert pending is not None and pending["kind"] == "clarification" and pending["next_action"]
+
+
+def test_deadline_counts_per_segment_so_a_late_request_still_gets_model_calls(tmp_path) -> None:
+    """A-C1: a request created 20 minutes ago (deadline 15) still plans, asks, and finishes on
+    resume, because the deadline counts from the start of each run, not from creation."""
+    script = {
+        "plan": [
+            ModelResponse(structured=clarification("Which accounts are yours?")),
+            ModelResponse(structured=six_task_plan()),
+        ],
+        "execute": [ModelResponse(structured=t1_result())] * 3,
+    }
+    deps = make_deps(ScriptedModel(script))
+    deps.settings = Settings(_env_file=None, request_deadline_seconds=900)
+    req = seed_chat_with_dataset(deps, chat_id="c1", user_id="u1", dataset_id="a2")
+    created = (datetime.now(UTC) - timedelta(minutes=20)).isoformat()
+    deps.repos.messages.save(req.model_copy(update={"created_at": created}))
+    runner = RequestRunner(deps, _saver(tmp_path / "ckpt.sqlite"))
+    runner.start("c1", req.message_id)
+    pending = deps.repos.messages.pending_for_request("c1", req.message_id)
+    out = runner.resume("c1", req.message_id, _reply(req, pending[0].message_id))
+    assert out.status == "COMPLETED"
+    calls = deps.repos.model_calls.list_by_request(req.message_id)
+    assert [c.stage for c in calls].count("plan") == 2
+    assert all(c.outcome == "COMPLETED" for c in calls) and not deps.segment_started
