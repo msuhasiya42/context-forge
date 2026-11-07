@@ -52,7 +52,7 @@ def with_summary(report: ReportMessage, goal: str, summary: str, deps: WorkerDep
 
 
 def _counts(report: ReportMessage) -> str:
-    """ "6 findings, 1 limitation.": how much the report holds, for the reader of its summary."""
+    """How much the report holds, for the reader of its summary: "6 findings, 1 limitation"."""
     claims, limits = len(report.report.claims), len(report.report.uncertainties)
     return f"{_count(claims, 'finding')}, {_count(limits, 'limitation')}."
 
