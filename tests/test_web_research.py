@@ -416,6 +416,33 @@ def test_a_web_fact_cited_with_another_locator_is_pointed_at_the_url_quoting_it(
     ]
 
 
+def test_cite_merges_facts_stating_the_same_claim_and_keeps_both_sources():
+    """F7 ruling 3 (live run, 7 Nov): the distance task and the task combining it both stated
+    the distance, "350+ kms." and "350+ km.", and the report showed both. Facts equal but for
+    case, spacing, punctuation and unit plurals merge into the first, citing every repeat's
+    evidence; a different number never merges."""
+    rows = [{"artifactId": "a2", "locator": {"kind": "row", "value": str(n)}} for n in range(4)]
+    brief = initial_brief(_request("How far is Palanpur from Ajmer, and how long by road?"))
+    brief["facts"] = [
+        {"text": "Ajmer to Palanpur is approximately 350+ kms.", "evidence_refs": [rows[0]]},
+        {"text": "The drive takes 3.5 hours.", "evidence_refs": [rows[1]]},
+        {
+            "text": "ajmer to Palanpur is approximately  350+ km",
+            "evidence_refs": [rows[2], rows[0]],
+        },
+        {"text": "The drive takes 35 hours.", "evidence_refs": [rows[3]]},
+    ]
+    citations = check_citations(brief, make_deps(ScriptedModel({})))
+    assert citations["facts"] == [
+        {
+            "text": "Ajmer to Palanpur is approximately 350+ kms.",
+            "evidence_refs": [rows[0], rows[2]],
+        },
+        brief["facts"][1],
+        brief["facts"][3],
+    ]
+
+
 def test_a_result_without_its_optional_lists_still_completes_the_task():
     """Live run 1: Nova Lite left out artifactRefs and the task failed twice. Only summary is
     required; the lists and maps a model may omit default to empty."""

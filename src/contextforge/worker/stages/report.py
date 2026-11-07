@@ -22,6 +22,7 @@ from contextforge.core.services.memory import user_timezone
 from contextforge.core.state import Fact, RequestState
 from contextforge.core.values import ArtifactRef, EvidenceRef
 from contextforge.worker.deps import WorkerDeps
+from contextforge.worker.stages.cite import merge_repeats
 from contextforge.worker.stages.execute import TaskOutcome
 from contextforge.worker.stages.guards import check_not_cancelled, leave_running
 from contextforge.worker.stages.long_report import attach_if_long
@@ -145,16 +146,9 @@ def _answers(brief: RequestState, deps: WorkerDeps) -> list[_Answer]:
 
 
 def _claims(report_id: str, facts: list[Fact]) -> list[Claim]:
-    """One UNKNOWN claim per distinct fact text, first occurrence first: a comparison task
-    restates its dependencies' facts (live run 3). Checking claims against their evidence is
-    phase 3."""
-    seen: set[str] = set()
-    distinct: list[Fact] = []
-    for fact in facts:
-        key = " ".join(fact["text"].split()).casefold()
-        if key not in seen:
-            seen.add(key)
-            distinct.append(fact)
+    """One UNKNOWN claim per distinct claim, first occurrence first, citing the evidence of all
+    its repeats: a comparison task restates its dependencies' facts (live run 3, F7 ruling 3).
+    Checking claims against their evidence is phase 3."""
     return [
         Claim(
             claim_id=derived_id(f"{report_id}:{index}"),
@@ -162,7 +156,7 @@ def _claims(report_id: str, facts: list[Fact]) -> list[Claim]:
             evidence_refs=[EvidenceRef.model_validate(ref) for ref in fact["evidence_refs"]],
             status="UNKNOWN",
         )
-        for index, fact in enumerate(distinct)
+        for index, fact in enumerate(merge_repeats(facts))
     ]
 
 
