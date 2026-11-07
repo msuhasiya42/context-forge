@@ -76,27 +76,17 @@ class RequestRunner:
         with request_context(message_id):
             if not self._accept(chat_id, message_id, reply):
                 return RunOutcome(started=False, reason=NOT_THE_PENDING_INTERRUPT)
-            answer = {"message_id": reply.message_id, "content": reply.content}
-            return self._run(Command(resume=answer), chat_id, message_id)
+            return self._run(_resume_command(reply), chat_id, message_id)
 
     def resume_claimed(self, chat_id: str, message_id: str, reply: Reply) -> RunOutcome:
-        """Continue a reply whose WAITING_USER -> RUNNING claim was made by the API."""
-        request = load_request(self._deps.repos.messages, chat_id, message_id)
-        pending = self.pending_interrupt(message_id)
-        if (
-            request.status != RequestStatus.RUNNING
-            or reply.chat_id != chat_id
-            or reply.request_message_id != message_id
-            or reply.user_id != request.user_id
-            or pending is None
-            or pending["message_id"] != reply.in_reply_to_message_id
-        ):
-            return RunOutcome(started=False, reason=NOT_THE_PENDING_INTERRUPT)
-        return self._run(
-            Command(resume={"message_id": reply.message_id, "content": reply.content}),
-            chat_id,
-            message_id,
-        )
+        """Continue a reply the API has already saved and claimed (WAITING_USER -> RUNNING).
+
+        Refused unless the request is RUNNING and ``reply`` answers its pending interrupt.
+        """
+        with request_context(message_id):
+            if not self._answers_pending(chat_id, message_id, reply, RequestStatus.RUNNING):
+                return RunOutcome(started=False, reason=NOT_THE_PENDING_INTERRUPT)
+            return self._run(_resume_command(reply), chat_id, message_id)
 
     def pending_interrupt(self, message_id: str) -> PendingInterrupt | None:
         """What the request's thread is waiting on, or None when it waits on nothing."""
@@ -122,6 +112,18 @@ class RequestRunner:
 
     def _accept(self, chat_id: str, message_id: str, reply: Reply) -> bool:
         """Save ``reply`` and claim the request when the reply answers its pending interrupt."""
+        if not self._answers_pending(chat_id, message_id, reply, RequestStatus.WAITING_USER):
+            return False
+        # Saved before the claim, so a RUNNING request always has its answer in the chat. A
+        # delivery that then loses the claim to a concurrent one has saved its reply, no more.
+        self._deps.repos.messages.save(reply)
+        return self._claim(chat_id, message_id, RequestStatus.WAITING_USER)
+
+    def _answers_pending(
+        self, chat_id: str, message_id: str, reply: Reply, status: RequestStatus
+    ) -> bool:
+        """Whether ``reply`` is the request user's answer to the interrupt the request waits on,
+        with the request in ``status``: WAITING_USER before a claim, RUNNING after one."""
         request = load_request(self._deps.repos.messages, chat_id, message_id)
         if (
             reply.chat_id != chat_id
@@ -129,23 +131,13 @@ class RequestRunner:
             or reply.user_id != request.user_id
         ):
             return False
-        if not self._awaits(chat_id, message_id, reply.in_reply_to_message_id):
+        pending = self.pending_interrupt(message_id) if request.status == status else None
+        if pending is None or pending["message_id"] != reply.in_reply_to_message_id:
             logger.warning(
                 "reply %s refused: it does not answer the pending interrupt", reply.message_id
             )
             return False
-        # Saved before the claim, so a RUNNING request always has its answer in the chat. A
-        # delivery that then loses the claim to a concurrent one has saved its reply, no more.
-        self._deps.repos.messages.save(reply)
-        return self._claim(chat_id, message_id, RequestStatus.WAITING_USER)
-
-    def _awaits(self, chat_id: str, message_id: str, target_message_id: str) -> bool:
-        """Whether the request is WAITING_USER on the interrupt for ``target_message_id``."""
-        request = load_request(self._deps.repos.messages, chat_id, message_id)
-        if request.status != RequestStatus.WAITING_USER:
-            return False
-        pending = self.pending_interrupt(message_id)
-        return pending is not None and pending["message_id"] == target_message_id
+        return True
 
     def _start_input(self, chat_id: str, message_id: str) -> dict[str, str] | None:
         """The entrypoint input of a new thread; None continues a thread from its checkpoint.
@@ -167,6 +159,11 @@ class RequestRunner:
         status = result.get("status")
         logger.info("run returned %s", status or "on an interrupt")
         return RunOutcome(started=True, status=None if status is None else RequestStatus(status))
+
+
+def _resume_command(reply: Reply) -> Command[Any]:
+    """The resume whose value the workflow's ``interrupt`` returns as the user's answer."""
+    return Command(resume={"message_id": reply.message_id, "content": reply.content})
 
 
 def _thread(message_id: str) -> RunnableConfig:

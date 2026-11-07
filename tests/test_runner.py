@@ -122,15 +122,20 @@ def test_resume_with_wrong_target_is_refused(tmp_path) -> None:
     deps = make_deps(ScriptedModel({"plan": [ModelResponse(structured=clarification("Which?"))]}))
     req = seed_chat_with_dataset(deps, chat_id="c1", user_id="u1", dataset_id="a2")
     RequestRunner(deps, _saver(db)).start("c1", req.message_id)
-    out = RequestRunner(deps, _saver(db)).resume(
-        "c1", req.message_id, _reply(req, "not-the-pending-one")
-    )
+    runner = RequestRunner(deps, _saver(db))
+    out = runner.resume("c1", req.message_id, _reply(req, "not-the-pending-one"))
     assert (
         not out.started and deps.repos.messages.get("c1", req.message_id).status == "WAITING_USER"
     )
     assert not [
         m for m in deps.repos.messages.list_by_chat("c1") if m.kind == "clarification_response"
     ]
+    # The API's path: the right target before the API's claim, then a wrong one after it.
+    (question,) = deps.repos.messages.pending_for_request("c1", req.message_id)
+    unclaimed = runner.resume_claimed("c1", req.message_id, _reply(req, question.message_id))
+    deps.repos.messages.update_request_status("c1", req.message_id, "WAITING_USER", "RUNNING")
+    wrong = runner.resume_claimed("c1", req.message_id, _reply(req, "not-the-pending-one"))
+    assert not unclaimed.started and not wrong.started
 
 
 def test_restart_after_crash_does_not_replay_finished_tasks(tmp_path) -> None:
