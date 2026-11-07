@@ -214,7 +214,7 @@ def test_deadline_refuses_a_call_once_the_segment_has_run_past_it() -> None:
 
 def test_prompt_version_mapping() -> None:
     stages = (Stage.PLAN, Stage.EXECUTE, Stage.COMPRESS, Stage.CITE)
-    assert [prompt_version(s) for s in stages] == ["plan.3", "execute.4", "compress.2", "none"]
+    assert [prompt_version(s) for s in stages] == ["plan.3", "execute.5", "compress.2", "none"]
 
 
 def test_load_prompt_reads_file() -> None:
