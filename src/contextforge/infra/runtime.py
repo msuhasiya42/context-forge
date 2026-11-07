@@ -13,7 +13,7 @@ from contextforge.core.settings import Settings
 from contextforge.core.storage import BlobStore, MemoryBlobStore
 from contextforge.infra.aws import S3Blobs, SqsQueue, dynamo_repositories
 from contextforge.infra.bedrock import BedrockModel
-from contextforge.infra.web import FetchURLTool, PublicWebClient, WebSearchTool
+from contextforge.infra.web import PublicWebClient, web_tools
 from contextforge.worker.deps import WorkerDeps
 from contextforge.worker.tools.sql_query import SqlQueryTool
 
@@ -66,8 +66,7 @@ def build_worker(settings: Settings) -> WorkerDeps:
         budgets=load_budgets(),
         tools={
             "sql_query": SqlQueryTool(repos.artifacts, blobs),
-            "web_search": WebSearchTool(web, repos.artifacts, blobs),
-            "fetch_url": FetchURLTool(web, repos.artifacts, blobs),
+            **web_tools(web, repos, blobs),
         },
         price_version=models.price_version + ":reserve-v1",
         planner_model=settings.planner_model,
