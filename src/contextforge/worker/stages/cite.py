@@ -10,6 +10,7 @@ never dropped silently.
 """
 
 import json
+import re
 from typing import Any, TypedDict
 
 from contextforge.core.entities.artifact import Artifact, ArtifactKind, ArtifactStatus
@@ -130,10 +131,19 @@ def _records(data: bytes) -> list[dict[str, Any]]:
 
 
 def _quotes(excerpt: str | None, evidence: str) -> bool:
-    """True when ``excerpt`` is long enough to mean something and appears in ``evidence``."""
-    wanted = _normalised(excerpt or "")
+    """True when ``excerpt`` is long enough to mean something and appears in ``evidence``.
+
+    A leading or trailing ellipsis marks text left out, not text quoted: a search snippet ends
+    "... six sessions ..." and a model quotes it as "six sessions..." (live run 3).
+    """
+    wanted = _ELLIPSIS_ENDS.sub("", _normalised(excerpt or ""))
     return len(wanted) >= MIN_EXCERPT_CHARS and wanted in _normalised(evidence)
 
 
+# "..." or "…" with the spaces beside it, at either end of a normalised excerpt.
+_ELLIPSIS_ENDS = re.compile(r"^(?:\.\.\.\s*)+|(?:\s*\.\.\.)+$")
+
+
 def _normalised(text: str) -> str:
-    return " ".join(text.split()).casefold()
+    """Whitespace collapsed, case folded, and "…" written as "..."."""
+    return " ".join(text.replace("…", "...").split()).casefold()

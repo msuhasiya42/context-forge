@@ -162,14 +162,18 @@ def test_a_long_report_becomes_a_deliverable_that_the_content_route_serves(tmp_p
     """F5 Part B: a report text over 1,500 characters is saved whole as a markdown deliverable;
     the chat keeps its first paragraph and a pointer, and only deliverables and raw results
     are served."""
-    long_result = t1_result()
-    for fact in long_result["facts"]:
-        fact["text"] += " The statement rows give the detail." * 12
+
+    def long_result(task: int) -> ModelResponse:
+        result = t1_result()
+        for fact in result["facts"]:
+            fact["text"] += f" Task {task}: the statement rows give the detail." * 12
+        return ModelResponse(structured=result)
+
     deps = make_deps(
         ScriptedModel(
             {
                 "plan": [ModelResponse(structured=six_task_plan())],
-                "execute": [ModelResponse(structured=long_result)] * 3,
+                "execute": [long_result(task) for task in range(3)],
             }
         ),
         tasks_in_flight=1,

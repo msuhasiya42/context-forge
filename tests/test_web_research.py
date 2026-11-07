@@ -327,7 +327,7 @@ def test_cite_keeps_only_facts_quoting_their_snapshot_by_url():
         "<p>It also adds an experimental JIT.</p>"
         "<p>The S&amp;P 500 index rose 2% this week.</p>"
     )
-    snippet = "What is new in Python 3.13, the release of October 2024."
+    snippet = "What is new in Python 3.13, the release of October 2024 ..."
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.host == "html.duckduckgo.com":
@@ -352,10 +352,14 @@ def test_cite_keeps_only_facts_quoting_their_snapshot_by_url():
     from_snippet = fact(rows_id, "the release of October 2024")
     # Re-review I-3: an ampersand is quoted as the page reads, never as "&amp;".
     ampersand = fact(page_id, "The S&P 500 index rose 2% this week")
+    # Live run 3: a hit's snippet ends "... October 2024 ..." and the model quoted it with the
+    # dots attached. A leading or trailing ellipsis marks omitted text, not quoted text.
+    trimmed = fact(rows_id, "...is new in Python 3.13, the release of October 2024…")
     brief = initial_brief(_request("research"))
     brief["facts"] = [
         quoted,
         ampersand,
+        trimmed,
         fact(page_id, "Python 3.13 removes the GIL for good", kind="section", value="intro"),
         fact(page_id, "ships"),
         fact(page_id, "Python 3.13 removes the GIL for good"),
@@ -363,7 +367,7 @@ def test_cite_keeps_only_facts_quoting_their_snapshot_by_url():
         from_snippet,
     ]
     citations = check_citations(brief, deps)
-    assert citations["facts"] == [quoted, ampersand, from_snippet]
+    assert citations["facts"] == [quoted, ampersand, trimmed, from_snippet]
     assert citations["uncertainties"] == [
         f"unsupported excerpt for artifact {page_id}: no page or search hit it saved holds it",
         f"unsupported excerpt for {DOCS_URL}",
@@ -790,7 +794,11 @@ def test_a_comparison_task_may_cite_the_evidence_its_dependencies_cite():
         return _task_result(_url_ref(rows[0], DOCS_URL, "adds an experimental free-threaded build"))
 
     def compare(request: ModelRequest) -> ModelResponse:
-        return _task_result(_url_ref(rows[0], DOCS_URL, "Python 3.13 adds an experimental"))
+        # Live run 3: the comparison also restated its dependency's fact word for word.
+        return _task_result(
+            _url_ref(rows[0], DOCS_URL, "Python 3.13 adds an experimental"),
+            _url_ref(rows[0], DOCS_URL, "adds an experimental free-threaded build"),
+        )
 
     agent = _WebAgent(
         [lambda request: _tool_call("web_search", "s1", query="python 3.13"), t1_finish, compare],
@@ -799,7 +807,7 @@ def test_a_comparison_task_may_cite_the_evidence_its_dependencies_cite():
     deps = make_deps(agent)
     assert _run(deps, agent, handler, "What changed in Python 3.13?")["status"] == "COMPLETED"
     report = next(m for m in deps.repos.messages.list_by_chat("c1") if m.kind == "report")
-    assert [c.text for c in report.report.claims] == [
+    assert [c.text for c in report.report.claims] == [  # each claim once
         "adds an experimental free-threaded build",
         "Python 3.13 adds an experimental",
     ]

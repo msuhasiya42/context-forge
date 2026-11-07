@@ -145,7 +145,16 @@ def _answers(brief: RequestState, deps: WorkerDeps) -> list[_Answer]:
 
 
 def _claims(report_id: str, facts: list[Fact]) -> list[Claim]:
-    """One UNKNOWN claim per fact; checking claims against their evidence is phase 3."""
+    """One UNKNOWN claim per distinct fact text, first occurrence first: a comparison task
+    restates its dependencies' facts (live run 3). Checking claims against their evidence is
+    phase 3."""
+    seen: set[str] = set()
+    distinct: list[Fact] = []
+    for fact in facts:
+        key = " ".join(fact["text"].split()).casefold()
+        if key not in seen:
+            seen.add(key)
+            distinct.append(fact)
     return [
         Claim(
             claim_id=derived_id(f"{report_id}:{index}"),
@@ -153,7 +162,7 @@ def _claims(report_id: str, facts: list[Fact]) -> list[Claim]:
             evidence_refs=[EvidenceRef.model_validate(ref) for ref in fact["evidence_refs"]],
             status="UNKNOWN",
         )
-        for index, fact in enumerate(facts)
+        for index, fact in enumerate(distinct)
     ]
 
 
