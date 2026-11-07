@@ -1,8 +1,10 @@
-"""Thin FastAPI boundary for the web-first research slice."""
+"""Thin FastAPI boundary for the web-first research slice; the rules live in ``Application``."""
 
 import asyncio
+import hmac
 import json
 import sqlite3
+import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Annotated, Any
@@ -12,15 +14,34 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from langgraph.checkpoint.sqlite import SqliteSaver
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from contextforge.core.entities.chat import ChatStatus
-from contextforge.core.entities.message import RequestStatus
-from contextforge.core.services.application import TERMINAL, Application, ServiceError, page, wire
+from contextforge.core.entities.message import RequestMessage, RequestStatus
+from contextforge.core.services.application import (
+    TERMINAL,
+    Application,
+    RequestView,
+    ServiceError,
+    page,
+    wire,
+)
 from contextforge.core.settings import Settings
+from contextforge.infra.runtime import build_worker
 from contextforge.worker.consumer import QueueConsumer
 from contextforge.worker.deps import WorkerDeps
 from contextforge.worker.runner import RequestRunner
+
+# Spec 11.5: a heartbeat comment every 15 seconds, and a stream never outlives 15 minutes, so a
+# stalled worker cannot hold a connection; the client refetches and reopens.
+HEARTBEAT_SECONDS = 15.0
+STREAM_MAX_SECONDS = 900.0
+INTERNAL_MESSAGE = "Something went wrong. Please try again."
+
+
+class NewChatBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    title: str | None = Field(default=None, min_length=1, max_length=200)
 
 
 class SubmitBody(BaseModel):
@@ -46,13 +67,11 @@ class MePatch(BaseModel):
 def create_app(settings: Settings | None = None, *, deps: WorkerDeps | None = None) -> FastAPI:
     config = settings or Settings()
     if deps is None:
-        from contextforge.infra.runtime import build_worker
-
         deps = build_worker(config)
     config.checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(config.checkpoint_path, check_same_thread=False)
     runner = RequestRunner(deps, SqliteSaver(connection))
-    service = Application(deps, runner, config.dev_user_id)
+    service = Application(deps, config.dev_user_id)
     consumer = QueueConsumer(deps, runner)
 
     @asynccontextmanager
@@ -61,9 +80,8 @@ def create_app(settings: Settings | None = None, *, deps: WorkerDeps | None = No
         if config.run_worker:
             consumer.start()
         yield
-        if config.run_worker:
-            consumer.stop()
-        if not consumer.thread.is_alive():
+        consumer.stop()
+        if not consumer.running:
             connection.close()
 
     app = FastAPI(title="ContextForge", lifespan=lifespan)
@@ -74,28 +92,13 @@ def create_app(settings: Settings | None = None, *, deps: WorkerDeps | None = No
         allow_methods=["GET", "POST", "PATCH", "DELETE"],
         allow_headers=["Content-Type", "Idempotency-Key", "Authorization"],
     )
-
-    @app.exception_handler(ServiceError)
-    async def service_error(request: Request, exc: ServiceError) -> JSONResponse:
-        return JSONResponse(
-            status_code=exc.status, content={"error": {"code": exc.code, "message": exc.message}}
-        )
-
-    @app.exception_handler(RequestValidationError)
-    async def validation_error(request: Request, exc: RequestValidationError) -> JSONResponse:
-        return JSONResponse(
-            status_code=400,
-            content={"error": {"code": "validation", "message": "Invalid request fields."}},
-        )
+    _install_error_handlers(app)
 
     def authorized(authorization: Annotated[str | None, Header()] = None) -> None:
-        if config.dev_token is not None:
-            import hmac
-
-            if not hmac.compare_digest(
-                authorization or "", f"Bearer {config.dev_token.get_secret_value()}"
-            ):
-                raise ServiceError(401, "authentication", "A valid development token is required.")
+        if config.dev_token is not None and not hmac.compare_digest(
+            authorization or "", f"Bearer {config.dev_token.get_secret_value()}"
+        ):
+            raise ServiceError(401, "unauthenticated", "A valid development token is required.")
 
     @app.get("/health")
     def health() -> dict[str, str]:
@@ -112,29 +115,17 @@ def create_app(settings: Settings | None = None, *, deps: WorkerDeps | None = No
 
     @app.patch("/me", dependencies=[Depends(authorized)])
     def patch_me(body: MePatch) -> dict[str, Any]:
-        try:
-            return wire(service.update_me(body.model_dump(exclude_unset=True)))
-        except ValidationError as exc:
-            raise ServiceError(400, "validation", "Invalid preferences or instructions.") from exc
+        return wire(service.update_me(body.model_dump(exclude_unset=True)))
 
     @app.post("/chats", status_code=201, dependencies=[Depends(authorized)])
-    def new_chat() -> dict[str, Any]:
-        return wire(service.create_chat())
+    def new_chat(body: NewChatBody | None = None) -> dict[str, Any]:
+        return wire(service.create_chat(body.title if body else None))
 
     @app.get("/chats", dependencies=[Depends(authorized)])
     def list_chats(
         limit: int = Query(50, ge=1, le=100), cursor: str | None = None
     ) -> dict[str, Any]:
-        return page(
-            [
-                c
-                for c in service.deps.repos.chats.list_by_user(service.user_id)
-                if c.status == ChatStatus.ACTIVE
-            ],
-            f"chats:{service.user_id}",
-            limit,
-            cursor,
-        )
+        return page(service.chats(), f"chats:{service.user_id}", limit, cursor)
 
     @app.patch("/chats/{chat_id}", dependencies=[Depends(authorized)])
     def rename_chat(chat_id: str, body: RenameBody) -> dict[str, Any]:
@@ -157,8 +148,6 @@ def create_app(settings: Settings | None = None, *, deps: WorkerDeps | None = No
         body: SubmitBody,
         idempotency_key: Annotated[str, Header(min_length=1, max_length=200)],
     ) -> dict[str, Any]:
-        if not body.content.strip():
-            raise ServiceError(400, "validation", "Question cannot be blank.")
         return wire(service.submit(chat_id, body.content, idempotency_key))
 
     @app.get("/chats/{chat_id}/requests/{message_id}", dependencies=[Depends(authorized)])
@@ -179,9 +168,16 @@ def create_app(settings: Settings | None = None, *, deps: WorkerDeps | None = No
 
     @app.get("/chats/{chat_id}/requests/{message_id}/events", dependencies=[Depends(authorized)])
     def events(chat_id: str, message_id: str) -> StreamingResponse:
-        service.request(chat_id, message_id)
+        opened = service.request(chat_id, message_id)  # a 404 here, never an empty stream
+        stream = event_stream(
+            service,
+            opened,
+            config.sse_poll_seconds,
+            heartbeat_seconds=HEARTBEAT_SECONDS,
+            max_seconds=STREAM_MAX_SECONDS,
+        )
         return StreamingResponse(
-            event_stream(service, chat_id, message_id, config.sse_poll_seconds),
+            stream,
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
@@ -190,49 +186,98 @@ def create_app(settings: Settings | None = None, *, deps: WorkerDeps | None = No
     def artifacts(
         chat_id: str, limit: int = Query(50, ge=1, le=100), cursor: str | None = None
     ) -> dict[str, Any]:
-        service.chat(chat_id)
-        return page(
-            service.deps.repos.artifacts.list_by_chat(chat_id),
-            f"artifacts:{chat_id}",
-            limit,
-            cursor,
-        )
+        return page(service.artifacts(chat_id), f"artifacts:{chat_id}", limit, cursor)
 
     return app
 
 
+def _install_error_handlers(app: FastAPI) -> None:
+    """One error shape everywhere (spec 11.2): ``{"error": {"code", "message"}}``, no traces."""
+
+    @app.exception_handler(ServiceError)
+    async def service_error(request: Request, exc: ServiceError) -> JSONResponse:
+        return _error(exc.status, exc.code, exc.message)
+
+    @app.exception_handler(RequestValidationError)
+    async def validation_error(request: Request, exc: RequestValidationError) -> JSONResponse:
+        return _error(400, "validation", "Invalid request fields.")
+
+    @app.exception_handler(StarletteHTTPException)
+    async def http_error(request: Request, exc: StarletteHTTPException) -> JSONResponse:
+        if exc.status_code == 404:
+            return _error(404, "not_found", "Not found.")
+        return _error(exc.status_code, "validation", str(exc.detail))
+
+    @app.exception_handler(Exception)
+    async def internal_error(request: Request, exc: Exception) -> JSONResponse:
+        # Starlette re-raises after this response is sent, so the server still logs the trace.
+        return _error(500, "internal", INTERNAL_MESSAGE)
+
+
+def _error(status: int, code: str, message: str) -> JSONResponse:
+    return JSONResponse(status_code=status, content={"error": {"code": code, "message": message}})
+
+
 async def event_stream(
-    service: Application, chat_id: str, message_id: str, interval: float
+    service: Application,
+    opened: RequestMessage,
+    poll_seconds: float,
+    *,
+    heartbeat_seconds: float,
+    max_seconds: float,
 ) -> AsyncIterator[str]:
-    seen: dict[str, str] = {}
-    activity_cursor = 0
-    for _ in range(max(1, int(900 / interval))):
-        detail = await asyncio.to_thread(service.detail, chat_id, message_id)
-        messages = await asyncio.to_thread(service.messages, chat_id)
-        records = [("task", t) for t in detail["tasks"]]
-        records += [
-            ("message", wire(m))
-            for m in messages
-            if m.sender != "user" and getattr(m, "request_message_id", None) == message_id
-        ]
-        records.append(("request", detail["request"]))
-        for kind, record in records:
-            encoded = json.dumps(record, ensure_ascii=False)
-            key = kind + ":" + record.get("messageId", record.get("taskId", ""))
-            if seen.get(key) != encoded:
-                yield f"event: {kind}\ndata: {encoded}\n\n"
-                seen[key] = encoded
-        for sequence, activity in service.deps.activity.since(message_id, activity_cursor):
-            yield f"event: activity\ndata: {json.dumps(activity)}\n\n"
-            activity_cursor = sequence
-        status = detail["request"]["status"]
-        if status in TERMINAL or (
-            status == RequestStatus.WAITING_USER
-            and any(k == "message" and r.get("kind") == "clarification" for k, r in records)
-        ):
+    """Spec 11.5: each record whose content changed as an event, transient activity, and a
+    heartbeat comment every ``heartbeat_seconds`` of wall time.
+
+    A request already finished when the stream opens gets its one ``request`` event. Otherwise
+    the stream closes once the request ends or waits on the user with the question sent, or
+    after ``max_seconds`` of wall time.
+    """
+    if opened.status in TERMINAL:
+        yield _frame("request", wire(opened))
+        return
+    sent: dict[str, str] = {}
+    activity_after = 0
+    started = last_beat = time.monotonic()
+    while time.monotonic() - started < max_seconds:
+        view = await asyncio.to_thread(service.request_view, opened.chat_id, opened.message_id)
+        for frame in _changed_frames(view, sent):
+            yield frame
+        for sequence, activity in service.activity_since(opened.message_id, activity_after):
+            yield _frame("activity", activity)
+            activity_after = sequence
+        if view.closed:
             return
-        yield ": heartbeat\n\n"
-        await asyncio.sleep(interval)
+        if time.monotonic() - last_beat >= heartbeat_seconds:
+            yield ": heartbeat\n\n"
+            last_beat = time.monotonic()
+        await asyncio.sleep(poll_seconds)
+
+
+def _changed_frames(view: RequestView, sent: dict[str, str]) -> list[str]:
+    """Frames for the view's records that differ from the last ``sent`` copy, which is updated.
+
+    Tasks and messages come before the request, so a closing status arrives last. WAITING_USER
+    is held back until the question is visible too: a client closes the stream on it.
+    """
+    records = [
+        *(("task", task) for task in view.tasks),
+        *(("message", message) for message in view.messages),
+    ]
+    if view.closed or view.request["status"] != RequestStatus.WAITING_USER:
+        records.append(("request", view.request))
+    frames = []
+    for kind, record in records:
+        frame = _frame(kind, record)
+        key = f"{kind}:{record.get('messageId', record.get('taskId', ''))}"
+        if sent.get(key) != frame:
+            frames.append(frame)
+            sent[key] = frame
+    return frames
+
+
+def _frame(kind: str, record: dict[str, Any]) -> str:
+    return f"event: {kind}\ndata: {json.dumps(record, ensure_ascii=False)}\n\n"
 
 
 def main() -> None:
