@@ -45,30 +45,49 @@ def process_rows(
 ) -> ProcessedRows:
     """Keep at most ``cap`` rows, shaped to ``column_cap`` columns and ``cell_char_cap`` chars.
 
-    Over the cap, every row (unshaped) is written to a raw_result Artifact under
-    ``artifact_id``; the caller derives that id with ``raw_result_id`` so the write is
-    idempotent. Zero rows is a valid result, not an error.
+    When rows are left out or shaping cut a cell or column, every row (unshaped) is written to a
+    raw_result Artifact under ``artifact_id``, so nothing the model sees as cut is lost. The
+    caller derives that id with ``raw_result_id`` so the write is idempotent. Zero rows is a
+    valid result, not an error.
     """
     kept = [_shape_row(row, column_cap, cell_char_cap) for row in rows[:cap]]
-    if len(rows) <= cap:
-        return ProcessedRows(
-            rows=kept,
-            total_rows=len(rows),
-            artifact_id=None,
-            text=f"showing {len(rows)} of {len(rows)} rows",
+    offloaded = len(rows) > cap or _was_shaped(rows[:cap], kept)
+    if offloaded:
+        _save_raw_result(
+            rows,
+            artifacts,
+            blobs,
+            chat_id=chat_id,
+            user_id=user_id,
+            name=name,
+            artifact_id=artifact_id,
         )
-    _save_raw_result(
-        rows, artifacts, blobs, chat_id=chat_id, user_id=user_id, name=name, artifact_id=artifact_id
-    )
+    stored_id = artifact_id if offloaded else None
     return ProcessedRows(
         rows=kept,
         total_rows=len(rows),
-        artifact_id=artifact_id,
-        text=(
-            f"showing {cap} of {len(rows)} rows; "
-            f"{len(rows) - cap} more row(s) in artifact {artifact_id}"
-        ),
+        artifact_id=stored_id,
+        text=_result_text(len(kept), len(rows), stored_id),
     )
+
+
+def _was_shaped(original: list[dict[str, Any]], shaped: list[dict[str, Any]]) -> bool:
+    """True when shaping cut a column or a cell, so the kept rows are not the full rows.
+
+    Shaping only drops keys or replaces long strings, so any difference is a cut; unchanged
+    cells are the same objects, so the comparison is by identity for them.
+    """
+    return shaped != original
+
+
+def _result_text(shown: int, total: int, artifact_id: str | None) -> str:
+    """The stub the model reads; it always starts "showing N of M rows"."""
+    head = f"showing {shown} of {total} rows"
+    if artifact_id is None:
+        return head
+    if shown < total:
+        return f"{head}; {total - shown} more row(s) in artifact {artifact_id}"
+    return f"{head}; full rows in artifact {artifact_id}"
 
 
 def _shape_row(row: dict[str, Any], column_cap: int, cell_char_cap: int) -> dict[str, Any]:

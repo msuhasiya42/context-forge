@@ -1,12 +1,18 @@
 # tests/test_context.py
 import dataclasses
+import json
 from pathlib import Path
 
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 
 from contextforge.core.context.budgets import BUDGETS_PATH, Budgets, load_budgets
-from contextforge.core.context.builder import ContextInputs, SourceLine, build_context
+from contextforge.core.context.builder import (
+    ContextInputs,
+    SourceLine,
+    build_context,
+    message_text,
+)
 from contextforge.core.context.tool_results import process_rows, raw_result_id
 from contextforge.core.entities.message import (
     Claim,
@@ -40,6 +46,7 @@ def _inputs() -> ContextInputs:
     return ContextInputs(
         memory="MEM",
         stage_prompt="EXECUTE",
+        chat_id="c1",
         request=request,
         # Deliberately out of key order: rendering must sort them.
         preferences={"timezone": "Asia/Kolkata", "currency": "INR"},
@@ -81,6 +88,7 @@ def test_builder_sections_in_spec_order_and_system_blocks() -> None:
     inputs = ContextInputs(
         memory="MEM",
         stage_prompt="PLAN",
+        chat_id="c1",
         request=None,
         preferences={"currency": "INR"},
         constraints=["c1"],
@@ -107,6 +115,7 @@ def test_builder_sections_in_spec_order_and_system_blocks() -> None:
         "messages",
     ]
     assert "<sources chat_id=" in built.user_text and "a2  dataset" in built.user_text
+    assert '<sources chat_id="c1">' in built.user_text
 
 
 def test_facts_are_capped_to_newest() -> None:
@@ -114,6 +123,7 @@ def test_facts_are_capped_to_newest() -> None:
     inputs = ContextInputs(
         memory="M",
         stage_prompt="P",
+        chat_id="c1",
         request=None,
         preferences={},
         constraints=[],
@@ -221,6 +231,10 @@ def test_wide_cells_are_shaped_once() -> None:
     assert r.rows[0]["c"].endswith("…[+300 chars]") and len(r.rows[0]["c"]) == 200 + len(
         "…[+300 chars]"
     )
+    # Cut but not over the row cap: the full row stays recoverable.
+    assert r.artifact_id == "a9" and r.text == "showing 1 of 1 rows; full rows in artifact a9"
+    art = repos.artifacts.get("c1", "a9")
+    assert art and json.loads(blobs.get(art.storage_ref).splitlines()[0])["c"] == "x" * 500
 
 
 def test_build_context_is_byte_stable() -> None:
@@ -282,6 +296,8 @@ def test_user_text_follows_the_spec_layout() -> None:
         tokens for name, tokens in built.sections if name != "messages"
     )
     assert built.messages == _inputs().loop_messages
+    # A tool-call turn has empty content; its tool calls are what it costs.
+    assert "select 1" in message_text(_inputs().loop_messages[1])
 
 
 def test_prior_context_renders_report_claims_and_other_kinds() -> None:
@@ -336,3 +352,15 @@ def test_shaping_caps_columns_and_leaves_the_blob_unshaped() -> None:
     assert (
         art and b"y" * 250 in blobs.get(art.storage_ref) and b'"k24"' in blobs.get(art.storage_ref)
     )
+    # Only columns cut, short cells, under the row cap: still offloaded.
+    r2 = process_rows(
+        [{f"k{j}": j for j in range(25)}],
+        cap=50,
+        artifacts=repos.artifacts,
+        blobs=blobs,
+        chat_id="c1",
+        user_id="u1",
+        name="q",
+        artifact_id="a11",
+    )
+    assert r2.artifact_id == "a11" and r2.text == "showing 1 of 1 rows; full rows in artifact a11"

@@ -34,6 +34,7 @@ class ContextInputs:
 
     memory: str
     stage_prompt: str
+    chat_id: str
     request: RequestMessage | None
     preferences: dict[str, str]
     constraints: list[str]
@@ -86,7 +87,7 @@ def build_context(inputs: ContextInputs, budgets: Budgets) -> BuiltContext:
         ("memory", _tokens(system)),
         *((name, _tokens([text])) for name, text in user_sections.items()),
         ("tools", _tokens([_tool_text(tool) for tool in inputs.tools])),
-        ("messages", _tokens([_message_text(m) for m in inputs.loop_messages])),
+        ("messages", _tokens([message_text(m) for m in inputs.loop_messages])),
     ]
     return BuiltContext(
         system=system,
@@ -110,8 +111,7 @@ def _render_brief(inputs: ContextInputs) -> str:
             _block(
                 "sources",
                 [f"{s.artifact_id}  {s.kind}  {s.name}  {s.detail}" for s in inputs.sources],
-                # The chat is known from the request; a call without one renders it empty.
-                attrs=f' chat_id="{request.chat_id if request else ""}"',
+                attrs=f' chat_id="{inputs.chat_id}"',
                 empty="(none)",
             ),
             _block("prior_context", [line for m in inputs.prior_messages for line in _prior(m)]),
@@ -163,8 +163,11 @@ def _tool_text(tool: ToolSpec) -> str:
     return json.dumps(tool.model_dump(mode="json", by_alias=True), sort_keys=True)
 
 
-def _message_text(message: AnyMessage) -> str:
-    """What a loop message costs: its content plus, on an AI turn, its tool calls."""
+def message_text(message: AnyMessage) -> str:
+    """The text a loop message is measured by: its content plus, on an AI turn, its tool calls.
+
+    Shared with compaction so the builder and the compactor count a message the same way.
+    """
     content = message.content
     text = content if isinstance(content, str) else json.dumps(content, sort_keys=True)
     if isinstance(message, AIMessage) and message.tool_calls:
