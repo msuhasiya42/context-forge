@@ -5,12 +5,22 @@ from datetime import UTC, datetime, timedelta
 from langgraph.checkpoint.sqlite import SqliteSaver
 
 from contextforge.core.entities.message import ClarificationResponseMessage
+from contextforge.core.entities.model_call import Stage
 from contextforge.core.models.base import ModelResponse
+from contextforge.core.models.config import ModelRoute
+from contextforge.core.models.errors import ModelUnavailable
 from contextforge.core.models.scripted import ScriptedModel
 from contextforge.core.settings import Settings
 from contextforge.worker.runner import RequestRunner
 from contextforge.worker.stages.plan import FORCED_PLAN, NOT_ASKED
-from tests.helpers import clarification, make_deps, seed_chat_with_dataset, six_task_plan, t1_result
+from tests.helpers import (
+    ByModel,
+    clarification,
+    make_deps,
+    seed_chat_with_dataset,
+    six_task_plan,
+    t1_result,
+)
 
 
 def _saver(path) -> SqliteSaver:
@@ -238,3 +248,31 @@ def test_deadline_counts_per_segment_so_a_late_request_still_gets_model_calls(tm
     calls = deps.repos.model_calls.list_by_request(req.message_id)
     assert [c.stage for c in calls].count("plan") == 2
     assert all(c.outcome == "COMPLETED" for c in calls) and not deps.segment_started
+
+
+def test_a_request_completes_on_the_fallbacks_while_every_stage_model_is_down() -> None:
+    """F9: the planner and the executor are down; the request plans and runs on their
+    fallbacks, and each is tried once, then left to cool down while the fallback serves."""
+    down = ModelUnavailable("ServiceUnavailableException")
+    model = ByModel(
+        {
+            "planner": [down],
+            "planner-2": [ModelResponse(structured=six_task_plan())],
+            "executor": [down],
+            "executor-2": [ModelResponse(structured=t1_result())] * 3,
+        }
+    )
+    deps = make_deps(model, tasks_in_flight=1)
+    deps.routes = {
+        Stage.PLAN: ModelRoute("planner", ("planner-2",)),
+        Stage.EXECUTE: ModelRoute("executor", ("executor-2",)),
+    }
+    req = seed_chat_with_dataset(deps, chat_id="c1", user_id="u1", dataset_id="a2")
+    assert RequestRunner(deps, _saver(":memory:")).start("c1", req.message_id).status == "COMPLETED"
+    assert model.sent == ["planner", "planner-2", "executor", *["executor-2"] * 3]
+    calls = deps.repos.model_calls.list_by_request(req.message_id)
+    answered = [c for c in calls if c.outcome == "COMPLETED"]
+    assert {(c.model, c.metadata["requested_model"]) for c in answered} == {
+        ("bedrock/planner-2", "planner"),
+        ("bedrock/executor-2", "executor"),
+    }
