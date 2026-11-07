@@ -42,7 +42,7 @@ def test_recording_client_writes_one_model_call_per_invocation() -> None:
     client.invoke(_req("execute"))
     calls = repos.model_calls.list_by_request("m1")
     assert [c.stage for c in calls] == ["plan"]
-    assert calls[0].context_version == "mem:1|prompt:plan.2"
+    assert calls[0].context_version == "mem:1|prompt:plan.3"
 
 
 def test_recording_client_records_error_and_reraises() -> None:
@@ -145,8 +145,8 @@ def test_spend_cap_admits_more_than_ten_cheap_calls() -> None:
 
 
 def test_prompt_version_mapping() -> None:
-    assert prompt_version(Stage.PLAN) == "plan.2"
-    assert prompt_version(Stage.CITE) == "none"
+    stages = (Stage.PLAN, Stage.EXECUTE, Stage.COMPRESS, Stage.CITE)
+    assert [prompt_version(s) for s in stages] == ["plan.3", "execute.3", "compress.2", "none"]
 
 
 def test_load_prompt_reads_file() -> None:
