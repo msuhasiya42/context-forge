@@ -19,6 +19,7 @@ from contextforge.core.models.errors import (
     ModelThrottled,
     ModelTimeout,
     ModelUnavailable,
+    ModelUnreachable,
 )
 
 _THROTTLED = {"ThrottlingException", "TooManyRequestsException"}
@@ -46,10 +47,13 @@ def map_boto_error(exc: ClientError | BotoCoreError) -> ModelError:
     """The model error class for a botocore failure; its message never carries the payload."""
     if isinstance(exc, ClientError):
         return _client_error(exc)
-    if isinstance(exc, ReadTimeoutError | ConnectTimeoutError):
+    # No connection was made, so nothing was sent (review M6): retried and charged nothing.
+    if isinstance(exc, ConnectTimeoutError | EndpointConnectionError):
+        return ModelUnreachable(f"AWS could not be reached; check network connectivity: {exc}")
+    if isinstance(exc, ReadTimeoutError):
         return ModelTimeout(f"AWS call timed out: {exc}")
-    if isinstance(exc, EndpointConnectionError | ConnectionClosedError):
-        return ModelUnavailable(f"AWS could not be reached; check network connectivity: {exc}")
+    if isinstance(exc, ConnectionClosedError):
+        return ModelUnavailable(f"AWS closed the connection before answering: {exc}")
     return ModelError(f"AWS call failed before reaching the service: {exc}")
 
 

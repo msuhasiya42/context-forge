@@ -8,12 +8,14 @@ from contextforge.core.context.prompts import prompt_version
 from contextforge.core.entities.model_call import ModelCall, Outcome
 from contextforge.core.ids import new_ulid, now_iso
 from contextforge.core.models.base import ModelClient, ModelRequest, ModelResponse, ToolSpec
-from contextforge.core.models.errors import ModelError, ModelTimeout
+from contextforge.core.models.errors import ModelError, ModelTimeout, ModelUnreachable
 from contextforge.core.repositories.base import ModelCallRepository
 from contextforge.core.values import Usage
 
 # config/models.yaml prices: model id -> price kind (inputPerMTok, ...) -> USD per million tokens.
 PriceTable = Mapping[str, Mapping[str, float]]
+# The usage of a call that never reached the provider: known, and zero.
+_NOT_SENT = Usage(input_tokens=0, output_tokens=0)
 
 
 def price_row(prices: PriceTable, model: str) -> Mapping[str, float] | None:
@@ -57,8 +59,9 @@ class RecordingModelClient:
 
     ``estimated_cost_usd`` is priced from the reported usage and ``prices``, so it can be
     recomputed later; a call whose usage is unknown (a timeout, an error) or whose model has no
-    price is charged ``unknown_cost_usd``, since unknown is never zero. ``model`` is recorded as
-    ``<provider>/<model id>`` (spec 3.5).
+    price is charged ``unknown_cost_usd``, since unknown is never zero. A call that never
+    reached the provider (``ModelUnreachable``) used no tokens, so it is charged nothing.
+    ``model`` is recorded as ``<provider>/<model id>`` (spec 3.5).
     """
 
     def __init__(
@@ -96,6 +99,7 @@ class RecordingModelClient:
                     model_call_id,
                     started_at,
                     outcome=Outcome.TIMEOUT if isinstance(exc, ModelTimeout) else Outcome.ERROR,
+                    usage=_NOT_SENT if isinstance(exc, ModelUnreachable) else None,
                     failure_reason=str(exc),
                     langsmith_run_id=exc.langsmith_run_id if isinstance(exc, ModelError) else None,
                 )
@@ -108,6 +112,7 @@ class RecordingModelClient:
                     model_call_id,
                     started_at,
                     outcome=Outcome.COMPLETED,
+                    usage=response.usage,
                     response=response,
                     langsmith_run_id=response.langsmith_run_id,
                 )
@@ -121,13 +126,14 @@ class RecordingModelClient:
         started_at: str,
         *,
         outcome: Outcome,
+        usage: Usage | None,
         response: ModelResponse | None = None,
         failure_reason: str | None = None,
         langsmith_run_id: str | None = None,
     ) -> ModelCall:
         context_version = f"mem:{self._memory_version}|prompt:{prompt_version(request.stage)}"
-        usage = response.usage if response is not None else None
-        cost = cost_usd(self._prices, request.model, usage)
+        # A call never sent costs nothing, whether or not its model has a price.
+        cost = 0.0 if usage is _NOT_SENT else cost_usd(self._prices, request.model, usage)
         return ModelCall(
             model_call_id=model_call_id,
             request_message_id=self._request_message_id,

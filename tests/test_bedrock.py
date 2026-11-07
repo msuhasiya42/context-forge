@@ -1,6 +1,6 @@
 import botocore.session
 import pytest
-from botocore.exceptions import ReadTimeoutError
+from botocore.exceptions import ConnectTimeoutError, ReadTimeoutError
 from botocore.stub import Stubber
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from pydantic import BaseModel
@@ -155,7 +155,18 @@ def test_bedrock_failures_map_to_model_error_classes(stub, error, text) -> None:
     assert raised.value.retryable is (error is ModelThrottled)
 
 
-def test_read_timeout_is_retried_once_and_each_attempt_recorded(monkeypatch) -> None:
+@pytest.mark.parametrize(
+    ("failure", "outcome", "charged_the_reserve"),
+    [
+        # Bedrock may have received the call and may bill it: usage unknown, the reserve held.
+        (ReadTimeoutError, "TIMEOUT", True),
+        # No connection was made, so nothing was sent and nothing is charged (review M6).
+        (ConnectTimeoutError, "ERROR", False),
+    ],
+)
+def test_a_timeout_is_retried_once_and_each_attempt_recorded(
+    monkeypatch, failure, outcome, charged_the_reserve
+) -> None:
     client, stubber = _stubbed_runtime()
     stubber.add_response("converse", _reply([{"text": "done"}]))
 
@@ -165,7 +176,7 @@ def test_read_timeout_is_retried_once_and_each_attempt_recorded(monkeypatch) -> 
         def converse(self, **payload):
             self.attempts += 1
             if self.attempts == 1:
-                raise ReadTimeoutError(endpoint_url="https://bedrock-runtime.example")
+                raise failure(endpoint_url="https://bedrock-runtime.example")
             return client.converse(**payload)
 
     deps = make_deps(BedrockModel(TimesOutOnce()))
@@ -174,8 +185,10 @@ def test_read_timeout_is_retried_once_and_each_attempt_recorded(monkeypatch) -> 
     plain = _execute_request().model_copy(update={"output_schema": None})
     with stubber:
         assert deps.model_for("r1").invoke(plain).text == "done"
-    outcomes = [c.outcome for c in deps.repos.model_calls.list_by_request("r1")]
-    assert outcomes == ["TIMEOUT", "COMPLETED"]
+    failed, completed = deps.repos.model_calls.list_by_request("r1")
+    assert (failed.outcome, completed.outcome) == (outcome, "COMPLETED")
+    reserve = deps.settings.call_reserve_usd
+    assert failed.estimated_cost_usd == (reserve if charged_the_reserve else 0.0)
 
 
 def test_compress_history_is_delimited_and_escaped_and_json_fallback_needs_a_schema() -> None:

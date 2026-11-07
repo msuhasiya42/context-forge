@@ -18,9 +18,15 @@ class ModelTimeout(ModelError):
 
 
 class ModelUnavailable(ModelError):
-    """The provider could not be reached or had a transient fault (5xx, connection closed)."""
+    """The provider had a transient fault (5xx, a connection closed mid-call). The call may
+    have reached it, so its usage is unknown."""
 
     retryable = True
+
+
+class ModelUnreachable(ModelUnavailable):
+    """No connection to the provider could be made (a connect timeout, an unreachable
+    endpoint), so the call was never sent: it used no tokens and costs nothing."""
 
 
 class ModelThrottled(ModelError):
