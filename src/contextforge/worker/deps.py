@@ -23,7 +23,7 @@ from contextforge.core.repositories.memory import Repositories
 from contextforge.core.settings import Settings
 from contextforge.core.storage import BlobStore
 from contextforge.core.tools.base import Tool
-from contextforge.infra.tracing import RequestTracer
+from contextforge.core.tracing import NullTracer, Tracer
 from contextforge.worker.calls import BudgetedModel
 
 
@@ -54,9 +54,9 @@ class WorkerDeps:
     activity: ActivityBus = field(default_factory=ActivityBus)
     # time.monotonic() at the start of each request's current segment (see ``segment``).
     segment_started: dict[str, float] = field(default_factory=dict)
-    # Opens the trace runs; the default traces nothing. A tracing tracer also wraps ``model``
-    # and ``tools`` (see ``RequestTracer.model`` and ``.tools``).
-    tracer: RequestTracer = field(default_factory=RequestTracer)
+    # Opens the trace runs; the default traces nothing. The runtime's LangSmith tracer also
+    # wraps ``model`` and ``tools`` before they get here (infra.tracing.RequestTracer).
+    tracer: Tracer = field(default_factory=NullTracer)
 
     def __post_init__(self) -> None:
         self.semaphore = threading.BoundedSemaphore(self.budgets.tasks_in_flight)

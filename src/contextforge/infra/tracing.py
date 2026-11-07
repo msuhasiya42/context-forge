@@ -54,7 +54,8 @@ def langsmith_client(api_key: str, *, include_content: bool) -> Client:
 
 
 class RequestTracer:
-    """Builds the trace tree. Without a client it traces nothing, so its hooks cost nothing."""
+    """Builds the trace tree; implements ``core.tracing.Tracer``. Without a client it traces
+    nothing, so its hooks cost nothing."""
 
     def __init__(
         self,
