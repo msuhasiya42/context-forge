@@ -292,10 +292,71 @@ def test_cite_keeps_only_facts_quoting_their_snapshot_by_url():
     citations = check_citations(brief, deps)
     assert citations["facts"] == [quoted, ampersand, from_snippet]
     assert citations["uncertainties"] == [
-        f"unsupported excerpt for artifact {page_id}: web evidence needs a url locator",
+        f"unsupported excerpt for artifact {page_id}: no page or search hit it saved holds it",
         f"unsupported excerpt for {DOCS_URL}",
         "unsupported excerpt for https://invented.example/",
     ]
+
+
+def test_a_web_fact_cited_with_another_locator_is_pointed_at_the_url_quoting_it():
+    """Live run 1: Nova cited a search hit as {"kind": "row", "value": "0"}, and cite dropped
+    a correctly quoted fact. The snapshot knows which URL holds the excerpt, so the fact is
+    re-pointed there; the excerpt must still match, or the fact is dropped."""
+    snippet = "Python 3.13 adds an experimental free-threaded build."
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "html.duckduckgo.com":
+            hits = [("https://example.org/py", "Blog", "A post."), (DOCS_URL, "New", snippet)]
+            return httpx.Response(200, text=_search_page(*hits))
+        return _page("<p>Python 3.13 ships a new interactive interpreter.</p>")
+
+    deps = make_deps(ScriptedModel({}))
+    tools = web_tools(_web(handler), deps.repos, deps.blobs)
+    rows_id = tools["web_search"].run({"query": "python 3.13"}, _ctx("q1")).artifact_ids[0]
+    page_id = tools["fetch_url"].run({"url": DOCS_URL}, _ctx("f1")).artifact_ids[0]
+
+    def fact(artifact_id: str, kind: str, value: str, excerpt: str) -> dict:
+        ref = {"artifactId": artifact_id, "locator": {"kind": kind, "value": value}}
+        return {"text": excerpt, "evidence_refs": [{**ref, "excerpt": excerpt}]}
+
+    brief = initial_brief(_request("research"))
+    brief["facts"] = [
+        fact(rows_id, "row", "0", "adds an experimental free-threaded build"),
+        fact(page_id, "section", "intro", "ships a new interactive interpreter"),
+        fact(rows_id, "row", "1", "Python 3.13 removes the GIL for good"),
+    ]
+    citations = check_citations(brief, deps)
+    kept = [(f["text"], f["evidence_refs"][0]["locator"]) for f in citations["facts"]]
+    assert kept == [
+        ("adds an experimental free-threaded build", {"kind": "url", "value": DOCS_URL}),
+        ("ships a new interactive interpreter", {"kind": "url", "value": DOCS_URL}),
+    ]
+    assert citations["uncertainties"] == [
+        f"unsupported excerpt for artifact {rows_id}: no page or search hit it saved holds it"
+    ]
+
+
+def test_a_result_without_its_optional_lists_still_completes_the_task():
+    """Live run 1: Nova Lite left out artifactRefs and the task failed twice. Only summary is
+    required; the lists and maps a model may omit default to empty."""
+    snippet = "Python 3.13 adds an experimental free-threaded build."
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text=_search_page((DOCS_URL, "What's New", snippet)))
+
+    def finish(request: ModelRequest) -> ModelResponse:
+        rows_id = _rows(_results(request)["s1"])[0]["artifactId"]
+        ref = _url_ref(rows_id, DOCS_URL, "adds an experimental free-threaded build")
+        facts = [{"text": "Python 3.13 has a free-threaded build.", "evidenceRefs": [ref]}]
+        return ModelResponse(structured={"summary": "Python 3.13 changes.", "facts": facts})
+
+    agent = _WebAgent([lambda request: _tool_call("web_search", "s1", query="python 3.13"), finish])
+    deps = make_deps(agent)
+    assert _run(deps, agent, handler, "What changed in Python 3.13?")["status"] == "COMPLETED"
+    (task, _) = sorted(deps.repos.tasks.list_by_request("r1"), key=lambda t: t.task_id)
+    assert task.status == "COMPLETED" and task.result.artifact_refs == []
+    report = next(m for m in deps.repos.messages.list_by_chat("c1") if m.kind == "report")
+    assert [c.text for c in report.report.claims] == ["Python 3.13 has a free-threaded build."]
 
 
 def _request(content: str) -> RequestMessage:

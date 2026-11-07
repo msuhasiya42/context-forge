@@ -35,14 +35,17 @@ class Fact(Entity):
 
 
 class TaskResult(Entity):
+    """Only ``summary`` is required. A model often leaves out a list or map it has nothing
+    for (live run 1: ``artifactRefs``), so those default to empty rather than fail the task."""
+
     summary: str
     # What the request brief accumulates; refs are checked against inputArtifactIds by the caller.
     facts: list[Fact] = Field(default=[], max_length=MAX_FACTS_PER_RESULT)
-    structured_data: dict[str, Any]
-    evidence_refs: list[EvidenceRef]
-    artifact_refs: list[ArtifactRef]
-    uncertainties: list[str]
-    coverage: dict[str, Any]
+    structured_data: dict[str, Any] = {}
+    evidence_refs: list[EvidenceRef] = []
+    artifact_refs: list[ArtifactRef] = []
+    uncertainties: list[str] = []
+    coverage: dict[str, Any] = {}
 
 
 class Task(Entity):
