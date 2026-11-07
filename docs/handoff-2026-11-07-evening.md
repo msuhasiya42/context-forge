@@ -10,9 +10,8 @@ task briefs and implementer reports in `.superpowers/sdd/2026-11-04-phase-1-engi
 
 | Repo | Branch | HEAD at handoff | Tests |
 |---|---|---|---|
-| backend `/Users/mayursuhasiya/Desktop/Projects/context-forge` | `phase-1-engine` | `3ec6e97` + docs commits (F9 complete) | 192 pytest, ruff, format, mypy strict green |
-| backend worktree `.claude/worktrees/fix-F10` | `fix-F10` | work in progress, see §4 | |
-| frontend `/Users/mayursuhasiya/Desktop/Projects/context-forge-frontend` | `web-first` | `96f415f` | 19 vitest, lint, typecheck, build green |
+| backend `/Users/mayursuhasiya/Desktop/Projects/context-forge` | `phase-1-engine` | `22e1101` (F9 + F10 merged, seam fixed) | 195 pytest, ruff, format, mypy strict green |
+| frontend `/Users/mayursuhasiya/Desktop/Projects/context-forge-frontend` | `web-first` | `4e745af` | 20 vitest, lint, typecheck, build green |
 
 `main` in both repos is stale (backend main = phase 1 start; frontend main = pre-web-first UI).
 Merging `phase-1-engine` → `main` and `web-first` → `main` is the first thing to do once F9 and
@@ -77,23 +76,23 @@ gpt-oss-120b → Nova Pro; compress Nova 2 Lite → Nova Lite. Then run ONE live
 and check in the Deep Dive / LangSmith that the planner call used gpt-oss-120b and that a
 reasoning block did not break parsing.
 
-**F10 — report summary covering every subject + conclusions as first-class** is COMPLETE on
-branch `fix-F10` (HEAD `650691b`; backend 185 tests green there, frontend commit `4e745af` on
-`web-first`, 20 tests green). It was written against the pre-F9 `WorkerDeps.model_for` and a
-trial merge into `phase-1-engine` gave 37 failures from that one seam (`summary.py` uses
-`deps.executor_model`; F9 routes by stage). The controller reset `phase-1-engine` to `0e8a0dd`
-(green) and dispatched **F11** (brief `fix-wave-2/F11-brief.md`): merge `fix-F10`, add a `summary`
-stage to `config/models.yaml` routed like `compress`, make the summary request take its model from
-the stage route, green the suite, delete the worktree. **If `F11-report.md` does not exist, F11 did
-not finish: do its brief yourself.** F10's open points (its report): short reports keep their
-findings text under the summary (no deliverable), the Deep Dive UI does not yet show the summary
-call under the report, follow-up requests do not carry conclusions as prior context, `reconcile`
-tasks are still a stub without a model call.
+**F10 — report summary covering every subject + conclusions as first-class** is MERGED
+(`23c2726`) and the F9 seam is fixed (`22e1101`: the `summary` stage is routed like `compress`
+via a new `summary` entry in `config/models.yaml`; the summary request takes its model from the
+stage route). Backend 195 tests green; frontend `4e745af` (20 tests). The worktree and branch
+are deleted. The API was restarted on `22e1101`, so the UI now shows the summary as the message
+body and the Assessment section in the full report. **Not yet exercised live**: one request
+through the new routes (gpt-oss-120b planner, Qwen3-235B executor, Nova 2 Lite summary). F10's
+open points (its report): short reports keep their findings text under the summary (no
+deliverable), the Deep Dive UI does not yet show the summary call under the report, follow-up
+requests do not carry conclusions as prior context, `reconcile` tasks are still a stub without a
+model call. Nothing is in flight; no agent is running.
 
 ## 5. Remaining work, in order
 
-1. **Verify and merge.** F9 checks → F10 finish → merge both → merge `phase-1-engine` into `main`
-   (backend) and `web-first` into `main` (frontend). Delete worktrees. Then the SDD workspace can
+1. **Verify and merge.** One live request (cap $0.25) on the new routes; if the planner or
+   executor misbehaves, set the override keys in `.env` (see `.env.example`) and open a fix. Then
+   merge `phase-1-engine` into `main` (backend) and `web-first` into `main` (frontend). Then the SDD workspace can
    be deleted after copying the rulings you still need.
 2. **Config hygiene.** (`.env` overrides already removed.) Add an S3 lifecycle rule for `transcripts/` (they never expire
    today); add `aws-marketplace:ViewSubscriptions` only if the user upgrades for Claude.
