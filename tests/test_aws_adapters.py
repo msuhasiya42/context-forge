@@ -487,7 +487,11 @@ def test_sqs_send_receive_and_ack_by_that_receipt() -> None:
         stub.assert_no_pending_responses()
 
 
-def test_malformed_bodies_are_logged_and_left_for_the_dead_letter_queue(caplog) -> None:
+def test_malformed_bodies_are_released_at_once_for_the_dead_letter_queue(caplog) -> None:
+    """Never acked, and made visible again at once, so the redrive policy moves the message
+    to the DLQ after maxReceiveCount quick receives rather than one visibility timeout each
+    (live: a stray {"kind": "smoke"} would have taken about 48 minutes). A release that fails
+    is logged and the message still never acked."""
     sqs = client("sqs")
     bodies = [
         "not json",
@@ -500,12 +504,27 @@ def test_malformed_bodies_are_logged_and_left_for_the_dead_letter_queue(caplog) 
         for i, body in enumerate(bodies):
             message = {"MessageId": f"id{i}", "ReceiptHandle": f"receipt-{i}", "Body": body}
             stub.add_response("receive_message", {"Messages": [message]}, receive_params())
-        # Only receives are stubbed: a delete_message would fail the stub.
+            release = {
+                "QueueUrl": QUEUE_URL,
+                "ReceiptHandle": f"receipt-{i}",
+                "VisibilityTimeout": 0,
+            }
+            if i == len(bodies) - 1:
+                stub.add_client_error(
+                    "change_message_visibility",
+                    service_error_code="AccessDenied",
+                    expected_params=release,
+                )
+            else:
+                stub.add_response("change_message_visibility", {}, release)
+        # No delete_message is stubbed: one would fail the stub.
         assert [SqsQueue(sqs, QUEUE_URL).receive() for _ in bodies] == [None] * len(bodies)
         stub.assert_no_pending_responses()
-    assert [r.getMessage() for r in caplog.records] == [
+    messages = [r.getMessage() for r in caplog.records]
+    assert messages[:-1] == [
         f"Malformed work message id{i} left for the DLQ" for i in range(len(bodies))
     ]
+    assert "Could not release malformed message id4 (AccessDenied)" in messages[-1]
 
 
 def test_ack_after_the_receipt_expired_raises_queue_error() -> None:

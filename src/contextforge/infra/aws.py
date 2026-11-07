@@ -515,10 +515,30 @@ class SqsQueue:
         row = rows[0]
         work = _decode_work(row["Body"], row["ReceiptHandle"])
         if work is None:
-            # Never acked: after the queue's maxReceiveCount the redrive policy moves it to the
-            # DLQ. The body is untrusted, so only its id is logged.
-            logger.warning("Malformed work message %s left for the DLQ", row.get("MessageId"))
+            self._reject(row)
         return work
+
+    def _reject(self, row: dict[str, Any]) -> None:
+        """Leave a malformed message for the DLQ: never acked, and visible again at once.
+
+        The redrive policy moves it after the queue's maxReceiveCount receives. Released at
+        once, those take seconds; held for the receive's visibility timeout (the request
+        deadline plus a minute) they took most of an hour. The body is untrusted, so only its
+        id is logged.
+        """
+        logger.warning("Malformed work message %s left for the DLQ", row.get("MessageId"))
+        try:
+            self.client.change_message_visibility(
+                QueueUrl=self.url, ReceiptHandle=row["ReceiptHandle"], VisibilityTimeout=0
+            )
+        except ClientError as exc:
+            # Still never acked: it reaches the DLQ, only later.
+            logger.warning(
+                "Could not release malformed message %s (%s); it stays hidden until its "
+                "visibility timeout ends",
+                row.get("MessageId"),
+                error_code(exc),
+            )
 
     def ack(self, msg: WorkMessage) -> None:
         if not msg.receipt:
