@@ -37,3 +37,10 @@ class ModelThrottled(ModelError):
 
 class ModelRejected(ModelError):
     """The provider refused the content: a content filter or guardrail stopped the response."""
+
+
+class ModelMalformed(ModelError):
+    """The provider stopped on output it could not form (Nova's malformed_tool_use on a nested
+    tool schema). The same call often succeeds on another try, so it is retried once."""
+
+    retryable = True

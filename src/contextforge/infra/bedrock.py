@@ -9,7 +9,7 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMe
 
 from contextforge.core.entities.model_call import Stage
 from contextforge.core.models.base import ModelRequest, ModelResponse, ToolCall
-from contextforge.core.models.errors import ModelError, ModelRejected
+from contextforge.core.models.errors import ModelError, ModelMalformed, ModelRejected
 from contextforge.core.values import Usage
 from contextforge.infra.boto_errors import map_boto_error
 
@@ -170,12 +170,13 @@ class BedrockModel:
 
 def parse_response(raw: dict[str, Any], *, expects_result: bool) -> ModelResponse:
     """The Converse response as a ModelResponse. A filtered or guardrail stop raises
-    ``ModelRejected``; a malformed stop or an unreadable response raises ``ModelError``."""
+    ``ModelRejected``; a malformed stop raises the retryable ``ModelMalformed``; an unreadable
+    response raises ``ModelError``."""
     stop = raw.get("stopReason")
     if stop in _REJECTED_STOPS:
         raise ModelRejected(f"Bedrock stopped the response: {stop}.")
     if stop in _MALFORMED_STOPS:
-        raise ModelError(f"Bedrock stopped the response: {stop}.")
+        raise ModelMalformed(f"Bedrock stopped the response: {stop}.")
     try:
         return _response(raw, expects_result=expects_result)
     except (KeyError, TypeError, ValueError) as exc:  # pydantic's ValidationError is a ValueError

@@ -14,7 +14,9 @@ from contextforge.core.settings import Settings
 from contextforge.infra.bedrock import BedrockModel, converse_payload, nova_schema, parse_response
 from contextforge.infra.runtime import build_worker
 from contextforge.worker import calls
-from tests.helpers import make_deps
+from contextforge.worker.stages.plan import plan_stage
+from contextforge.worker.workflow import initial_brief_from_repo
+from tests.helpers import make_deps, seed_chat_with_dataset, six_task_plan
 
 
 class Answer(BaseModel):
@@ -211,6 +213,24 @@ def test_compress_history_is_delimited_and_escaped_and_json_fallback_needs_a_sch
     fenced = _reply([{"text": '```json\n{"kind":"plan"}\n```'}])
     assert parse_response(fenced, expects_result=True).structured == {"kind": "plan"}
     assert parse_response(fenced, expects_result=False).structured is None
+
+
+def test_a_malformed_planner_stop_is_retried_once_and_the_plan_completes(monkeypatch) -> None:
+    """Re-review I-4: Nova stops with malformed_tool_use on nested tool schemas (the planner's
+    is one); a single such stop must not fail the request."""
+    client, stubber = _stubbed_runtime()
+    plan = {"toolUse": {"toolUseId": "r", "name": "return_result", "input": six_task_plan()}}
+    stubber.add_response("converse", _reply([], "malformed_tool_use"))
+    stubber.add_response("converse", _reply([plan], "tool_use"))
+    deps = make_deps(BedrockModel(client))
+    deps.settings = Settings(_env_file=None, model_retries=1)
+    monkeypatch.setattr(calls.time, "sleep", lambda seconds: None)
+    request = seed_chat_with_dataset(deps, chat_id="c1", user_id="u1", dataset_id="a2")
+    with stubber:
+        planned = plan_stage(initial_brief_from_repo(deps, "c1", request.message_id), 0, deps)
+    assert planned["kind"] == "plan" and len(planned["tasks"]) == 6
+    outcomes = [c.outcome for c in deps.repos.model_calls.list_by_request(request.message_id)]
+    assert sorted(outcomes) == ["COMPLETED", "ERROR"]
 
 
 def test_unusual_responses_and_schemas_become_model_errors_not_raw_exceptions() -> None:
