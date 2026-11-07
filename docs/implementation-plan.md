@@ -27,7 +27,7 @@ ArtifactRef
   role                input | output
 
 Usage                 null when the provider did not report usage; unknown is never zero
-  inputTokens, outputTokens, cacheReadTokens?, cacheWriteTokens?
+  inputTokens, outputTokens, cacheReadTokens?, cacheWriteTokens?, thinkingTokens?   cache and thinking columns required from phase 2 (7 Nov 2026)
 ```
 
 ## 3. Entities
@@ -91,10 +91,11 @@ Shape `kind=report`, sender assistant. Exactly one per completed request; a revi
 
 | Field | Required | Requirement |
 |---|---|---|
-| report.claims | yes | `{ claimId, text, evidenceRefs[] }` per claim |
+| report.claims | yes | `{ claimId, text, evidenceRefs[], status: CONFIRMED | REJECTED | UNKNOWN, value? }` per claim. `status` and the numeric `value` added 7 Nov 2026: CONFIRMED needs two independent sources and no contradiction; code reads `value` at the first evidence locator and compares before the report is written |
 | report.inputsConsulted | yes | ArtifactRefs the synthesis relied on |
 | report.deliverables | no | ArtifactRefs for generated files |
 | report.uncertainties | yes | May be empty |
+| report.constraints | yes | The request's constraints with their source (request, clarification message id, standing instruction) and date, so the next request's prior context can carry them (7 Nov 2026, phase 7) |
 | report.coverage | yes | Periods compared, exclusions applied, status-check date |
 
 Shape `kind=proposed_action`, sender assistant. Created before any WRITE or DESTRUCTIVE tool runs.
@@ -142,7 +143,7 @@ m9  user       request                  messageId=m9   (new work)
 | createdAt | yes | Audit |
 | updatedAt | yes | Progress and stale-task reconciliation |
 
-`inputArtifactIds` is what the task was allowed to use; `result.evidenceRefs` and `result.artifactRefs` are what it actually used or produced. `structuredData` holds totals, matches and classifications, never row sets. `coverage` is task-kind specific. No chatId.
+`inputArtifactIds` is what the task was allowed to use; `result.evidenceRefs` and `result.artifactRefs` are what it actually used or produced. `structuredData` holds totals, matches and classifications, never row sets. `coverage` is task-kind specific; an empty coverage or a named `gap` is what may trigger the one bounded replan. For `reconcile`, `structuredData.hypotheses[]` carry `{ text, status: CONFIRMED | REJECTED | UNKNOWN, evidenceRefs[], failuresExplained? }` (7 Nov 2026). No chatId.
 
 ### 3.5 ModelCall
 
@@ -155,14 +156,17 @@ m9  user       request                  messageId=m9   (new work)
 | model | yes | Actual provider and model identity, one string, e.g. `bedrock/anthropic.claude-opus-5-5` |
 | contextVersion | yes | Agent memory version plus stage prompt version, e.g. `mem:3|prompt:plan.1` |
 | usage | yes, nullable | Usage value type; null when unknown |
-| estimatedCostUsd | no | Budget admission when tracing is unavailable |
+| estimatedCostUsd | no | Budget admission when tracing is unavailable; always recomputable from `usage` and the price table |
+| priceVersion | yes | The `config/models.yaml` version the cost was computed with, so a price change never rewrites history (7 Nov 2026) |
+| stopReason | no | end_turn, tool_use, max_tokens; diagnosis of truncation (restored 7 Nov 2026) |
+| toolSetHash | no | Hash of the sorted tool definitions sent, to measure cache hit rate against tool-set variation (7 Nov 2026) |
 | outcome | yes | COMPLETED, ERROR, TIMEOUT, CANCELLED |
 | failureReason | when not COMPLETED | Diagnosis |
 | langsmithRunId | no | Bridge into the trace |
 | startedAt | yes | Latency |
 | endedAt | no | Latency; absent on timeout |
 
-A replayed saved output never creates a ModelCall. Removed: attempt, promptVersion (in contextVersion), offeredToolIds, contextSnapshotArtifactId, redacted, stopReason, errorMessage.
+A replayed saved output never creates a ModelCall. Each retry attempt is its own ModelCall, so attempts per task are countable by `taskId` and `outcome`. Removed: attempt, promptVersion (in contextVersion), offeredToolIds, contextSnapshotArtifactId, redacted, errorMessage.
 
 ### 3.6 Artifact
 
@@ -432,6 +436,19 @@ Which stage fills which section (recorded 6 November 2026; the phase 1 plan assu
 
 The planner sees sources and prior context but no tools, because it names tasks, not calls. Execute sees everything. Cite sees facts and evidence only, so it cannot wander. Compress sees only the messages it must shrink, so brief fields can never be lost to compaction. The builder is a pure function: stages fetch, the builder assembles and measures.
 
+The planner's user turn also carries a `<context>` block written by code (7 Nov 2026): the resolved period in the user's timezone, today's date, the index status of each requested artifact and the reachability of each public MCP server. Dates never enter the system prompt; sections 1 and 2 are byte-stable within a request.
+
+Between two execute calls in one task:
+
+| | Preserved unchanged | Changed | Sent | Persisted |
+|---|---|---|---|---|
+| Sections 1 to 7 | yes, byte-identical | only facts (section 3) when a sibling task completed | yes | no; rebuilt from records each call |
+| Section 8 messages | the earlier messages | two turns appended: the AI message with tool calls, the tool results | yes, compacted only when over the window | no; dropped when the task ends |
+| Tool results over the row cap | the raw_result Artifact | | the stub | yes, the Artifact |
+| Task.result and facts | | written once at task end | | yes, repository and checkpoint |
+
+Deliberately not in the context: raw rows beyond the cap, sibling tasks' transcripts, earlier requests' transcripts, the model's own thinking from earlier calls (phase 2 decides whether tool-use continuations require it), any credential, and the chat's full artifact list beyond the sources block.
+
 ### 8.3 Reading artifacts back
 
 | Model asks | Tool | Returns | If too big |
@@ -439,6 +456,8 @@ The planner sees sources and prior context but no tools, because it names tasks,
 | "monthly totals by category" | `sql_query(dataset_id, sql)` | ≤ 50 rows plus row count | rest to a raw_result Artifact plus a stub |
 | "what does the bill say" | `search_chunks(query, artifact_ids)` | ≤ 5 chunks with page refs | already bounded |
 | "rows 40 to 80 of a5" | `read_artifact(id, locator)` | that slice only | already bounded |
+
+Shaping rules on every result (7 Nov 2026): the text always starts "showing N of M rows"; zero rows is a valid outcome and the tool descriptions and execute prompt say so; at most 20 columns and 200 characters per cell with a visible `…[+N chars]` marker on the kept rows, the full rows living in the raw_result Artifact; a failed call returns `{ status: "error", error, errorClass: code | system, retryable }` as the tool result, where `code` errors (bad SQL, bad arguments) go back to the model and `system` errors (DuckDB crash, MCP timeout) are the worker's one retry; a call that never ran returns `{ status: "not_executed", reason }`. A repeated call with the same tool and canonical input returns the existing result and spends no slot.
 
 ### 8.4 The example, step by step
 
@@ -474,7 +493,7 @@ The planner sees sources and prior context but no tools, because it names tasks,
 
 | Term | Value | Why |
 |---|---|---|
-| Cost cap per call | 40k input tokens, config | Spend control |
+| Context cap per call | 40k input tokens, config | Window control; cost is bounded by the call budget, not by this cap (renamed 7 Nov 2026) |
 | Response allowance | 4k | Room to answer |
 | Safety margin | 10 percent | Pre-call counting is approximate |
 | Messages budget | cap minus allowance minus margin minus fixed parts | What `messages` may use |
@@ -482,11 +501,11 @@ The planner sees sources and prior context but no tools, because it names tasks,
 
 Levels, lightest first:
 
-1. Stub tool results older than the last two turns: tool name, arguments, outcome, artifactId if offloaded. No model call.
+1. Stub tool results older than the last two turns: tool name, arguments, outcome, artifactId if offloaded. No model call. Runs at a task boundary or when the loop is already over the window, never as a per-call trim, because rewriting bytes already sent costs more than re-reading them once caching is on. Idempotent: the stub for a message never changes once emitted.
 2. Isolate task branches as subgraphs with their own `messages`; on completion the transcript is not carried into the parent. Decided from day one; retrofitting is painful.
 3. Summarize all but the last K messages with a `stage=compress` call. The summary states which tools were called with which arguments, errors, and what was concluded. It never restates goal, constraints or facts.
 
-Hard rules: never split a tool call from its result; the boundary falls between turns. Recall before precision: the summarizer keeps anything it is unsure about.
+Hard rules: never split a tool call from its result; the boundary falls between turns. Recall before precision: the summarizer keeps anything it is unsure about. A prefix is summarised at most once. Compaction is a window tool, not a cost tool: with caching the break-even is about ten further calls on the same transcript, and a task loop runs two to six.
 
 Counting: estimate with a tokenizer before the call; record actual provider usage on the ModelCall; watch the gap to tune the margin.
 
@@ -593,9 +612,9 @@ output format: structured, schema = PlannerOutput
 tools:         none
 ```
 
-System prompt, part one is `agent-memory.md` (section 10.1), part two the plan stage prompt (section 10.2).
+System prompt, part one is `agent-memory.md` (section 10.1), part two the plan stage prompt (section 10.2). Both are byte-stable within a request.
 
-User turn, assembled by the Context Builder:
+User turn, assembled by the Context Builder, starting with the code-written `<context>` block (resolved period, today's date, artifact index status, MCP reachability; 7 Nov 2026):
 
 ```text
 <request message_id="m1">
@@ -740,7 +759,7 @@ Worker: validate against the sql_analysis result schema; write to `REQ#m1 / TASK
 
 ### 9.3 One request end to end: every write, every call, the cost
 
-Recorded 4 November 2026. The request is the section 9.1 example. Chat c1 already holds a1 bank-export.xlsx with dataset a2, and card statements a4 and a6, indexed. Models are Bedrock in Sydney: inference profile `au.anthropic.claude-opus-5-5` for plan and cite, `au.anthropic.claude-haiku-5-5` for execute and compress, `amazon.titan-embed-text-v2:0` for indexing.
+Estimated 4 November 2026 on the design, not measured; phase 2 adds a measured column beside each number and keeps both so price and efficiency drift stay visible. The request is the section 9.1 example. Chat c1 already holds a1 bank-export.xlsx with dataset a2, and card statements a4 and a6, indexed. Models are Bedrock in Sydney: inference profile `au.anthropic.claude-opus-5-5` for plan and cite, `au.anthropic.claude-haiku-5-5` for execute and compress, `amazon.titan-embed-text-v2:0` for indexing.
 
 **1. Submit.** `POST /chats/c1/requests` with `Idempotency-Key` and `{ content, artifactIds: [a2, a4, a6] }`. The API checks the artifacts are AVAILABLE in c1 and writes one transaction; 202 with the Message.
 
@@ -1129,6 +1148,7 @@ context-forge/
       tools/base.py                                       Tool Protocol, ToolContext, ToolResult, projection rule
       context/budgets.py  tokens.py  prompts.py           config, estimates, prompt loading and versions
       context/builder.py  tool_results.py  compaction.py  eight sections; cap, offload, project, stub; levels 1 and 3
+      context/resolver.py                                 period, date, source readiness -> the planner's <context> block (code, no model)
       services/submit.py  replies.py  artifacts.py  usage.py   idempotent submit; interrupt verification; upload and delete rules; usage sums
     worker/
       deps.py  workflow.py  runner.py  consumer.py        wiring; the @entrypoint: plan -> interrupt -> gate -> task waves -> cite -> report; start/resume/restart; queue loop
@@ -1155,6 +1175,7 @@ Rules fixed by the LLD review:
 - Every log line carries `requestMessageId` and, inside a task, `taskId`; the LangSmith run id joins them when present. LangSmith is a wrapper on the graph entry and on `ModelClient.invoke`, with `thread_id = requestMessageId`, and a single masking hook in `infra/langsmith.py`. Budget checks never read LangSmith.
 - The transient `activity` SSE event works only while API and worker share a process (phases 4 to 9). In phase 10 it is dropped, or carried by a short-TTL DynamoDB item if it proves worth keeping.
 - Routes call services; services hold the rules and are tested without HTTP.
+- Limits from `config/budgets.yaml` (7 Nov 2026 additions): `noProgressTurns: 3`, `columnCap: 20`, `cellCharCap: 200`, and per-task-kind `deadlineSeconds` enforced from phase 2. `config/models.yaml` carries `priceVersion` and a pinned `effort` per stage.
 
 Python 3.12, `uv` with a committed lockfile, `pytest`, `ruff`, `mypy` strict. Tests before implementation for every behavior in section 13. No AWS resources before phase 10; SQLite checkpointer, in-memory repositories and local disk storage until then.
 

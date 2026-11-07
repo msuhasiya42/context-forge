@@ -162,6 +162,8 @@ Rules:
 - Retrieval checks owner, active status and expiry in application code. A retrieved permission claim never grants access. Credentials never enter any memory tier.
 - Concurrent updates need revision checks; two requests must not silently overwrite a shared profile. Deletion must remove retrieval entries, with an explicit policy for retained checkpoints. Deletion cannot undo context already sent to a provider.
 - DynamoDBStore is a candidate building block for later learned memory, not a memory policy. Its search without a vector index is namespace listing with filters.
+- Promotion gate (7 Nov 2026): when automatic promotion arrives, only claims the cite stage verified, carrying no uncertainty, may become learned memory, stored with `sourceRefs` and `expiresAt`. Write to memory only from verified findings so a wrong conclusion cannot pollute later requests. Every memory write names its reader; a summary nothing reads is not written.
+- Constraints outlive a request (7 Nov 2026, phase 7): the report stores the request's constraints with their source (the request text, a clarification answer, a standing instruction) and date; the planner's prior context shows them with that provenance and may drop one with a stated reason. Without this, "always exclude test accounts" fades after a few requests.
 
 Later record envelope, not part of the initial build: `AgentMemoryRecord { memoryId, userId, kind: semantic | episodic, content or artifactRef, tags, sourceRefs, revision, status: candidate | active | superseded | deleted, createdAt, updatedAt, lastVerifiedAt?, expiresAt? }`.
 
@@ -196,13 +198,19 @@ The Context Builder selects, in this order:
 
 Define a token budget with a response allowance and a margin; count actual inputs. No universal fixed compaction threshold. Never silently drop a pinned constraint, qualifier, or failed-source coverage flag.
 
+Byte stability (7 Nov 2026). Sections 1 and 2 are byte-identical for every call of one request and change only with `contextVersion`: no timestamps, request ids, resolved dates or unsorted collections in them; dates and the resolved period go in the user turn. The tool definitions are part of the cache key, so they are sorted deterministically and the tool set is a function of task kind until measurement shows per-task retrieval keeps the hit rate. Effort is pinned per stage and never changes inside a loop. A test builds the same call twice and asserts identical prefix bytes. Prompt caching is a bonus at this prefix size (about 3.5k tokens) until phase 9 measures the read share per stage; the docs make no saving claim before that.
+
 ### Tool Result Processor
 
-Sits between every tool and the model. Filters, paginates, aggregates or extracts before model input. Large results go to a raw_result Artifact and are replaced with a stub naming the artifact and how to read a slice. The model decides whether it needs more. Deterministic SQL computes monetary totals; a summarizer never does.
+Sits between every tool and the model. Filters, paginates, aggregates or extracts before model input. Large results go to a raw_result Artifact and are replaced with a stub naming the artifact and how to read a slice. The model decides whether it needs more. Deterministic SQL computes monetary totals; a summarizer never does, and code checks that the report repeats them.
+
+Rules added 7 Nov 2026: every result states "showing N of M", including zero rows, and an empty result is a valid outcome the model must report rather than retry; small results are shaped once at birth with a column cap and a cell-width cap with a visible truncation marker; a failed tool is a result, never an exception the model does not see, carrying `status`, `error`, `error_class: code | system` and `retryable`, and a call that never ran gets a `not_executed` result. The row cap is not a token guarantee; the context cap catches wide rows, and the eval asserts on tokens as well as rows.
 
 ### Compaction
 
 Only the brief's `messages` is ever compacted. Three levels, lightest first: stub old tool results; isolate task branches as subgraphs whose transcripts are dropped on completion; summarize all but the last few messages with a compress-stage call. Compaction keeps decisions, constraints, exact results, uncertainty, source references and next steps. Recall before precision. Never split a tool call from its result. Details and numbers are in the implementation plan.
+
+Compaction is a context-window tool, not a cost tool (7 Nov 2026). With prompt caching, rewriting bytes already sent costs more than re-reading them, and the break-even sits around ten further calls on the same transcript; our task loops run two to six calls, so in-loop compaction never pays on cost. Level 1 runs at a task boundary or when the loop is already over the window, never as a per-call trim; every transform is idempotent, so stubbing the same transcript twice yields identical bytes and a prefix is summarised at most once.
 
 ## 7. Tool retrieval
 
@@ -227,6 +235,7 @@ Task goal -> connected + authorized candidates -> rank -> schema budget
 - An Integration whose `auth.kind` is `none` (public servers such as fetch, DuckDuckGo search and time, run over stdio) needs no IntegrationConnection; its tools are usable by every user once synced. Everything else in this section still applies to them: catalog sync, our own READ classification, ranking, schema validation. Fetched pages and search hits are untrusted data; fetch is limited to http and https on public hosts, with a size cap and a timeout enforced before the call.
 - Provider-native tool search and LangChain's LLMToolSelectorMiddleware are optional optimizations with their own costs and platform limits. The baseline is application-owned and provider-neutral.
 - Real catalogs are large: five Box tools carried about 6,000 characters of description. Loading a whole catalog into every call is the failure mode this design prevents.
+- Catalog hygiene (7 Nov 2026): each stdio server is pinned to a version in `config/integrations.yaml`; on catalog sync, a changed `description` or `inputSchema` is logged and flagged for review, as a flag and a log line until phase 8, as a block afterwards. Tool poisoning arrives through descriptions that change.
 
 ## 8. LangGraph execution and ownership
 
@@ -234,10 +243,14 @@ Hybrid flow: understand and plan in one call, which returns either a plan or a c
 
 LangGraph coordinates nodes, branches, dependencies, retries, checkpointing and interruptions. Our code defines allowed tools, permissions, plan validation, accounting rules, context policy, completion criteria and step and spend limits.
 
+- A context resolver runs in code before the planner (7 Nov 2026): it turns relative periods such as "September and October" into an explicit window in the user's timezone, checks each requested artifact's index status and each public MCP server's reachability, and hands the planner a `<context>` block in the user turn. The window is copied into `constraints` and into `report.coverage.period`. A model-interpreted window is a silent error the eval cannot see.
+- The planner is retried once with its validation errors before the request fails. A fixed fallback plan is a later extension, not the current behaviour.
+- Replanning is bounded (7 Nov 2026): a task result with empty coverage, or a reconcile result that names a gap, may trigger at most one further planner call per request that adds or edits PLANNED tasks only and returns only new tasks. Plans go stale at the first surprise; this is the escape hatch that keeps the plan gate and the parallel waves.
 - Transient retries, semantic corrections and replanning are distinct. Accepted outputs are preserved; a replayed saved output is never counted as a fresh model call.
-- Checkpoint resume does not guarantee exactly-once external writes. A node interrupted for approval can restart from its beginning. Resume verifies the actor, the pending state and the payload before continuing.
-- All integrations are read-only until phase 11. A WRITE or DESTRUCTIVE tool requires a proposed_action Message; approval is distinct from execution; a failed write becomes UNCERTAIN and the model reads to verify before any retry.
-- Deadlines, maximum steps and tool calls, concurrency and spend limits are enforced in code. Per-request budget is the sum of ModelCall usage.
+- Inside a task loop: at the last allowed tool call the runtime appends a labelled user turn asking for the structured result, and never forces tool choice; at the cap the task returns what it has with "tool budget exhausted" under uncertainties. A repeated tool call with the same input hash returns the existing result without spending a slot. Three turns without a new fact or artifact end the task with what exists.
+- Checkpoint resume does not guarantee exactly-once external writes. A node interrupted for approval can restart from its beginning. Resume verifies the actor, the pending state and the payload before continuing. `interrupt()` is called only in the entrypoint, so a task can never pause; this is the reason tasks may be nested at all, and nobody adds an interrupt inside the execute loop.
+- All integrations are read-only until phase 11. A WRITE or DESTRUCTIVE tool requires a proposed_action Message; approval is distinct from execution; a failed write becomes UNCERTAIN and the model reads to verify before any retry. A proposed action is emitted only when the claims it depends on are CONFIRMED and no required task FAILED; on a critical gap the report states the gap and proposes nothing.
+- Deadlines, maximum steps and tool calls, concurrency and spend limits are enforced in code. Per-request budget is the sum of ModelCall usage. Deadlines exist per model call, per task kind (config, so a stuck web search fails on its own clock) and per request; the model never sets a limit. The lazy reaper marks an overdue request FAILED; it cannot resume work, which is why "retry from the failure point" is the matching later extension. Error classes: validation, authentication and access errors are never retried; throttling, 5xx and timeouts are retried once with backoff; each attempt is its own ModelCall.
 
 ## 9. Dispatch, files and API outline
 
@@ -260,9 +273,16 @@ LangSmith records nested runs for planning, retrieval, tools, models, compressio
 | Are tools selected well? | Necessary-tool recall, unauthorized-tool exclusion, invalid-argument rate |
 | Is context effective? | Input tokens, retained constraints, citation coverage, recovery after compaction |
 | Does memory help? | Cross-Chat recall, stale-memory rate, edit, delete and isolation tests |
-| What does it cost? | Provider usage, estimated model cost, separate AWS costs |
+| What does it cost? | Provider usage, estimated model cost, separate AWS costs; reconciled once against the Bedrock line in Cost Explorer in phase 9 |
+| What does a correct answer cost? | Cost per correct completed request: the sum of every call of every request in the eval run, failures and retries included, divided by the requests that pass the deterministic checks and the judge. The phase 9 headline |
+| Is caching working? | Cache read share of input per stage; calls with no cache read after the first in a loop; cold writes as a share of spend |
+| Are retries healthy? | Attempts per task, error class per attempt |
 
-Fewer calls do not prove better behavior. LangSmith shows behavior; fixtures, verifiers and review establish quality. Unknown usage after a timeout is not zero. Do not add parent trace totals to child usage. Budget admission runs in the application, independent of tracing. Begin tracing on synthetic data; mask payloads for real financial or Gmail data.
+Fewer calls do not prove better behavior. LangSmith shows behavior; fixtures, verifiers and review establish quality. Unknown usage after a timeout is not zero. Do not add parent trace totals to child usage. Budget admission runs in the application, independent of tracing. Begin tracing on synthetic data; mask payloads for real financial or Gmail data. Alert on ratios, not totals. Every number in the docs is labelled estimated, measured or verified; a price change re-prices history from recorded usage with the versioned price table rather than rewriting it.
+
+Correctness is checked in code first (7 Nov 2026). A verifier model shares the model's blind spots, so numeric claims carry a `value` and an evidence reference and code reads the value at the locator and compares before the report is written, with one send-back to the cite stage on mismatch; the model checks only that every claim has a source. Reconcile results and report claims carry `status: CONFIRMED | REJECTED | UNKNOWN`, and CONFIRMED needs at least two independent sources and no contradiction.
+
+Model swap decision rule (phase 9): paired on the same requests, both arms priced from recorded usage with one price-table version, numeric checks non-inferior with zero tolerance, judge score non-inferior within three points, P95 latency not worse, every diff read by hand. Twenty requests detect large effects only, which is accepted.
 
 Required evaluation scenarios:
 
@@ -276,13 +296,18 @@ Required evaluation scenarios:
 - Tool search finds search-then-read companions; revoked or write-only capabilities stay blocked.
 - Duplicate queue events, resumed nodes and tool timeouts do not create duplicate work or blind repeated external writes.
 - Model usage, selection and compression calls, and provider changes remain visible and budgeted.
+- Nothing went up: a request whose premise is false yields a report that says so, with no invented increase.
+- A source is down: a PDF index missing or an MCP server unreachable produces a stated gap, not a guess.
+- An injected instruction inside a fetched page or a tool result is quoted as data and never acted on.
+- Two causes at once are both reported with their own evidence.
+- Each case may assert `mustCall`, `mustNot`, `maxCalls` and `maxUsd` against ModelCall and tool records, on task kinds and tool names only, never on call order.
 
 Start with about twenty representative requests; large effects show at that size. Use an LLM judge with a rubric plus end-state checks; human review stays essential.
 
 ## 11. Provider adapter, credits, region and cost
 
 - The model boundary accepts normalized messages, selected tools, response schema and generation limits, and returns normalized results, actual model identity, usage and errors. Memory and entities stay application-owned. Changing generation provider does not change stored embedding compatibility; changing embedding model requires re-embedding into a versioned index.
-- Model split: a strong model for plan and cite, one call each; a cheap model for execute, tool_select and compress loops. Verify tool use and structured output support per model in the account and region. Bedrock pricing differs from first-party rates.
+- Model split: a strong model for plan and cite, one call each; a cheap model for execute, tool_select and compress loops. Verify tool use and structured output support per model in the account and region. Bedrock on-demand prices match Anthropic's list prices (verified 6 Nov 2026); the price table is versioned in `config/models.yaml`.
 - Credits are not a budget. The AWS Free Plan ends after six months or depleted credits; plan a cost and continuity decision and data export before then. No automatic paid upgrade is approved.
 - One region. Prior inspection found Sydney (`ap-southeast-2`) assigned; Mumbai was a preference, not a migration. Reverify account state, model access, the $5 usage alert and MFA before provisioning.
 - Keep fixtures small, limits explicit, retention short, and sensitive payloads out of generic logs.
@@ -343,6 +368,7 @@ Dated decisions that later work must not silently reverse.
 | 6 Nov 2026 | `golden-001` is the headline request and the per-phase yardstick (`evals/cases/golden-001.md`): SQL, PDF retrieval, web search over MCP, reconciliation, a clarification, a plan that must merge to fit the cap, one gated write, all against planted fixtures | One request that exercises every capability with a checkable answer; the eval score is the phase report |
 | 6 Nov 2026 | Phase 1 plan tasks 8 to 10 rewritten for the Functional API: stages are plain functions wrapped once as `@task`s; `interrupt()` only in the entrypoint; dependency-driven waves with five in flight; crash restart by invoking the thread with `None`; the grill limits (call budget, in-flight, tool calls per task, one retry) in `config/budgets.yaml`; deadlines and the spend cap deferred to the phase 2 adapter | Matches the 5 November decision; replaces the `await_user` node and the skip-on-replay loop |
 | 6 Nov 2026 | Naming: snake_case in Python and LangGraph state, camelCase on the wire, in DynamoDB attributes and YAML keys, enum values and error codes as the spec writes them; Pydantic aliases are the bridge (implementation-plan 12.1). Context Builder stage-by-section table (8.2) and tool inventory (12.2) recorded | PEP 8 inside, the TypeScript client's convention outside, one translation point |
+| 7 Nov 2026 | Twenty-four changes adopted from Cimba system-design docs 24, 25 and 26 (reviewed 6 to 7 Nov): tool error envelope; finish-now nudge; shaping caps and "showing N of M"; cache counters and byte-stability tests; versioned price table; bounded replan; compaction as a window tool; tool set in the cache key; effort pinned per stage; cost per correct completed request as the phase 9 headline with a swap decision rule; error classes; cross-request constraints; context resolver before the planner; hypothesis status on reconcile and claims; code-side number check; duplicate-call and no-progress detectors; planner retry with errors; trace assertions and negative eval cases; no proposed action on a critical gap plus per-kind deadlines; memory promotion gate; MCP version pinning and description diff; the who-decides table and durable-execution vocabulary; docs labelled and the Bedrock price line corrected | Cimba learned these by incident at a 101k-token prefix; the mechanisms about results, errors, budgets, replanning and measurement transfer, the cache engineering mostly does not. Not copied: 1h TTL, hand-placed breakpoints, pre-warm, answer caches, provider ladders, per-org quotas, Batch API, leases and heartbeats, speculative task start, a model-writable scratchpad, a guardrails call per question, planner-chosen timeouts, the `edit` approval decision |
 | 6 Nov 2026 | AWS region is Sydney ap-southeast-2 (Mumbai unavailable on the account plan); Claude via the `au.` inference profiles; resources created in the console for phases 1 to 9 and imported into CDK in phase 10 | Plan limitation; data at rest in Sydney, Claude calls routed within the Australia geo |
 
 ## 14. Implementation phases
@@ -382,6 +408,20 @@ One line: LangGraph runs the work, our context and memory policies choose the in
 Why separate checkpoints from cross-chat memory? Checkpoints preserve the execution state of one workflow. Cross-chat memory holds selected reusable information with its own scope, provenance and lifecycle; copying every checkpoint into future prompts would inject stale and irrelevant state.
 
 Does tool retrieval replace access control? No. Relevance neither proves authorization nor guarantees correctness; filter by permission before ranking and enforce it again at execution.
+
+Who decides the next step? If our code decides, it is a workflow; if the model decides at runtime, it is an agent. ContextForge is agentic where the path is unknown and deterministic where safety matters:
+
+| Step | Who decides | Why |
+|---|---|---|
+| Which tasks to run and in what order | model (planner) | the path depends on the request |
+| Whether a plan is allowed to run | code (plan gate) | inputs, dependencies and caps are safety |
+| Which tool to call next inside a task | model (execute loop) | exploration |
+| Whether that call may run, and with what credentials | code | authorization is never the model's |
+| When to stop a loop | code (budgets, detectors, deadlines) | every loop has a counter |
+| Which claims reach the user | model proposes, code verifies numbers and references | correctness |
+| Whether a write happens | the user (approval), then code | blast radius |
+
+Durable execution vocabulary, for anyone who knows Temporal: the entrypoint is the workflow, a task is an activity, the checkpoint is the event history, `interrupt()` is a signal wait, the queue is the task queue, and resume with `None` is replay. An LLM call is not deterministic, so its output is stored and reused on replay; it could answer differently and send the run down another path.
 
 ## 16. Readings
 
