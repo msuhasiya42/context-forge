@@ -11,6 +11,7 @@ from typing import Annotated, Any, NotRequired, TypedDict
 from langchain_core.messages import AnyMessage
 from langgraph.graph.message import add_messages
 
+from contextforge.core.entities.task import Confidence
 from contextforge.core.services.memory import MemorySnapshot
 
 
@@ -29,6 +30,15 @@ class Fact(TypedDict):
 
     text: str
     evidence_refs: list[dict[str, Any]]
+
+
+class Conclusion(TypedDict):
+    """A task's judgement and the texts of the facts it rests on; the report links it to the
+    claims those facts became (F10 ruling 1)."""
+
+    text: str
+    based_on: list[str]
+    confidence: Confidence
 
 
 class OpenQuestion(TypedDict):

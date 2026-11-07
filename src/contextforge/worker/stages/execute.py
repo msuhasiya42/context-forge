@@ -10,7 +10,7 @@ import logging
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from functools import partial
-from typing import Any, TypedDict
+from typing import Any, NotRequired, TypedDict
 
 from langchain_core.messages import (
     AIMessage,
@@ -58,7 +58,7 @@ from contextforge.core.models.base import (
 )
 from contextforge.core.models.errors import ModelError
 from contextforge.core.repositories.base import StaleStatusError
-from contextforge.core.state import Fact, RequestState, TaskState
+from contextforge.core.state import Conclusion, Fact, RequestState, TaskState
 from contextforge.core.tools.base import Tool, ToolContext, ToolResult
 from contextforge.worker.brief import load_request
 from contextforge.worker.deps import WorkerDeps
@@ -105,6 +105,8 @@ class TaskOutcome(TypedDict):
     status: str  # a TaskStatus value
     summary: str | None
     facts: list[Fact]
+    # Absent from an outcome checkpointed before conclusions existed (F10).
+    conclusions: NotRequired[list[Conclusion]]
     uncertainties: list[str]
     # Why the task was SKIPPED or FAILED; the report lists it under uncertainties.
     failure_reason: str | None
@@ -396,6 +398,7 @@ def _outcome(task: Task) -> TaskOutcome:
         status=task.status.value,
         summary=result.summary if result else None,
         facts=[_brief_fact(fact) for fact in result.facts] if result else [],
+        conclusions=_brief_conclusions(result) if result else [],
         uncertainties=list(result.uncertainties) if result else [],
         failure_reason=task.failure_reason,
     )
@@ -404,6 +407,20 @@ def _outcome(task: Task) -> TaskOutcome:
 def _brief_fact(fact: ResultFact) -> Fact:
     refs = [ref.model_dump(mode="json", exclude_none=True) for ref in fact.evidence_refs]
     return Fact(text=fact.text, evidence_refs=refs)
+
+
+def _brief_conclusions(result: TaskResult) -> list[Conclusion]:
+    """The result's conclusions, each naming the facts it rests on by their text: the report
+    finds the claim a fact became by its text, as cite merges facts."""
+    facts = result.facts
+    return [
+        Conclusion(
+            text=conclusion.text,
+            based_on=[facts[i].text for i in conclusion.supporting_facts if i < len(facts)],
+            confidence=conclusion.confidence,
+        )
+        for conclusion in result.conclusions
+    ]
 
 
 def _after_model(state: TaskState) -> str:
@@ -580,11 +597,30 @@ def _parse_result(response: ModelResponse, task: Task, produced: list[str]) -> T
     """
     result = TaskResult.model_validate(response.structured)
     validate_structured_data(task.kind, result.structured_data)
-    grounded = [f for f in result.facts if _is_grounded(f, [*task.input_artifact_ids, *produced])]
+    citable = [*task.input_artifact_ids, *produced]
+    grounded = [i for i, fact in enumerate(result.facts) if _is_grounded(fact, citable)]
     if len(grounded) < len(result.facts):
         dropped = len(result.facts) - len(grounded)
         logger.info("dropped %d facts that cite no task input", dropped)
-    return result.model_copy(update={"facts": grounded})
+    return _keeping_facts(result, grounded)
+
+
+def _keeping_facts(result: TaskResult, kept: list[int]) -> TaskResult:
+    """``result`` with only its facts at the positions ``kept``; each conclusion points at the
+    facts it rested on in their new positions, and no longer at a dropped one."""
+    position = {old: new for new, old in enumerate(kept)}
+    conclusions = [
+        conclusion.model_copy(
+            update={
+                "supporting_facts": [
+                    position[i] for i in conclusion.supporting_facts if i in position
+                ]
+            }
+        )
+        for conclusion in result.conclusions
+    ]
+    facts = [result.facts[i] for i in kept]
+    return result.model_copy(update={"facts": facts, "conclusions": conclusions})
 
 
 def _is_grounded(fact: ResultFact, input_artifact_ids: list[str]) -> bool:

@@ -4,6 +4,7 @@ import threading
 
 from langchain_core.messages import AIMessage, SystemMessage, ToolMessage
 
+from contextforge.core.entities.message import ReportMessage
 from contextforge.core.models.base import ModelRequest, ModelResponse, ToolCall
 from contextforge.core.models.scripted import ScriptedModel
 from contextforge.core.tools.base import ToolContext
@@ -431,16 +432,23 @@ ANSWER = "Combine the weather, distance and trains into one answer."
 
 def _f7_plan() -> dict:
     """The plan of the live F7 run (7 Nov, Nova Pro) on the fixture chat."""
-    tasks = [
-        ("t1", WEATHER, []),
-        ("t2", WHEN_TO_VISIT, ["t1"]),
-        ("t3", DISTANCE, []),
-        ("t4", TRAINS, []),
-        ("t5", ANSWER, ["t1", "t2", "t3", "t4"]),
-    ]
+    return _sql_plan(
+        "Weather, a good time to visit, distance and trains for Ajmer and Palanpur.",
+        [
+            ("t1", WEATHER, []),
+            ("t2", WHEN_TO_VISIT, ["t1"]),
+            ("t3", DISTANCE, []),
+            ("t4", TRAINS, []),
+            ("t5", ANSWER, ["t1", "t2", "t3", "t4"]),
+        ],
+    )
+
+
+def _sql_plan(goal: str, tasks: list[tuple[str, str, list[str]]]) -> dict:
+    """A plan of sql_analysis tasks over the fixture dataset, as (ref, goal, dependsOn)."""
     return {
         "kind": "plan",
-        "goal": "Weather, a good time to visit, distance and trains for Ajmer and Palanpur.",
+        "goal": goal,
         "constraints": [],
         "openQuestions": [],
         "tasks": [
@@ -453,7 +461,7 @@ def _f7_plan() -> dict:
             }
             for ref, goal, depends_on in tasks
         ],
-        "nextAction": "Run t1, t3 and t4, then t2, then t5.",
+        "nextAction": "Run the tasks in dependency order.",
     }
 
 
@@ -546,12 +554,100 @@ def test_the_report_leads_with_answers_then_names_what_was_not_answered() -> Non
     report = next(m for m in deps.repos.messages.list_by_chat("c1") if m.kind == "report")
     paragraphs = report.content.split("\n\n")
     assert paragraphs[:4] == [
-        "Ajmer to Palanpur is approximately 350+ kms.",
-        "Two trains a day run from Ajmer to Palanpur.",
+        "1. Ajmer to Palanpur is approximately 350+ kms.",
+        "2. Two trains a day run from Ajmer to Palanpur.",
         f"Not answered: {WEATHER}",
         f"Not answered: {WHEN_TO_VISIT}",
     ]
     assert paragraphs[4].startswith("Limitations:\n") and len(paragraphs) == 5
+
+
+AJMER = "Weather in Ajmer over the next two weeks."
+PALANPUR = "Weather in Palanpur over the next two weeks."
+VISIT = "Whether now is a good time to visit, comparing the two cities."
+RAIL = "Trains between Ajmer and Palanpur."
+AJMER_FACT = "Ajmer highs range from 63°F to 90°F."
+PALANPUR_FACT = "Palanpur highs range from 86°F to 93°F."
+VISIT_CONCLUSION = "Both cities suit a visit now; Ajmer is the milder of the two."
+
+
+def _row(row: str, artifact_id: str = "a2") -> dict:
+    return {"artifactId": artifact_id, "locator": {"kind": "row", "value": row}}
+
+
+def _visit_result() -> ModelResponse:
+    """The comparison task of the 7 Nov chat: it restates the two weather facts and puts its
+    judgement in conclusions. Its first fact cites nothing it may read, so the fact goes, and
+    the conclusion resting only on it goes with it, in the report's limitations."""
+    facts = [
+        {"text": "Fares start at 230.", "evidenceRefs": [_row("9", "elsewhere")]},
+        {"text": AJMER_FACT, "evidenceRefs": [_row("1")]},
+        {"text": PALANPUR_FACT, "evidenceRefs": [_row("2")]},
+    ]
+    conclusions = [
+        {"text": VISIT_CONCLUSION, "supportingFacts": [1, 2], "confidence": "medium"},
+        {"text": "Book the cheapest fare early.", "supportingFacts": [0]},
+    ]
+    return ModelResponse(
+        structured={"summary": "Both suit a visit.", "facts": facts, "conclusions": conclusions}
+    )
+
+
+class _VisitAgent:
+    """The 7 Nov chat on the fixture chat: weather in each city, a task judging the visit from
+    both, and a trains task whose results are invalid, so it fails."""
+
+    def invoke(self, request: ModelRequest) -> ModelResponse:
+        if request.stage == "plan":
+            plan = [
+                ("t1", AJMER, []),
+                ("t2", PALANPUR, []),
+                ("t3", VISIT, ["t1", "t2"]),
+                ("t4", RAIL, []),
+            ]
+            return ModelResponse(structured=_sql_plan("Ajmer and Palanpur visit.", plan))
+        return {
+            AJMER: _f7_result(AJMER_FACT, "1"),
+            PALANPUR: _f7_result(PALANPUR_FACT, "2"),
+            VISIT: _visit_result(),
+            RAIL: ModelResponse(structured={}),
+        }[_F7Agent.goal_of(request)]
+
+
+def _visit_report(agent: _VisitAgent) -> ReportMessage:
+    """The report of the 7 Nov chat's request, run serially with ``agent``."""
+    deps = make_deps(agent, tasks_in_flight=1)
+    req = seed_chat_with_dataset(deps, chat_id="c1", user_id="u1", dataset_id="a2")
+    _start(deps, req)
+    out = build_workflow(deps, checkpointer=None).invoke(
+        {"chat_id": "c1", "message_id": req.message_id}, _cfg(req)
+    )
+    assert out["status"] == "COMPLETED"
+    return next(m for m in deps.repos.messages.list_by_chat("c1") if m.kind == "report")
+
+
+def test_a_judgement_is_a_conclusion_under_assessment_linked_to_its_claims() -> None:
+    """F10 rulings 1 and 3: the comparison task's judgement had no excerpt to cite and was
+    dropped. It is now a conclusion resting on the claims it compares, shown under Assessment
+    after the answers and before what was not answered, never with a source link."""
+    report = _visit_report(_VisitAgent())
+    ajmer, palanpur = report.report.claims
+    (conclusion,) = report.report.conclusions
+    assert (ajmer.text, palanpur.text) == (AJMER_FACT, PALANPUR_FACT)
+    assert conclusion.text == VISIT_CONCLUSION and conclusion.confidence == "medium"
+    assert conclusion.based_on == [ajmer.claim_id, palanpur.claim_id]
+    paragraphs = report.content.split("\n\n")
+    assert paragraphs[:4] == [
+        f"1. {AJMER_FACT}",
+        f"2. {PALANPUR_FACT}",
+        f"Assessment:\n- {VISIT_CONCLUSION} (based on findings 1 and 2; medium confidence)",
+        f"Not answered: {RAIL}",
+    ]
+    assert paragraphs[4].startswith("Limitations:\n")
+    assert (
+        "unsupported conclusion, no finding it rests on held: Book the cheapest fare early."
+        in report.report.uncertainties
+    )
 
 
 def test_scripted_exhaustion_fails_request_with_reason() -> None:

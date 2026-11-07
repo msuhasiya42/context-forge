@@ -6,6 +6,7 @@ from typing import Annotated, Any, Literal
 from pydantic import Field, TypeAdapter
 
 from contextforge.core.entities import Entity
+from contextforge.core.entities.task import Confidence
 from contextforge.core.values import ArtifactRef, EvidenceRef
 
 
@@ -61,6 +62,16 @@ class Claim(Entity):
     value: float | None = None
 
 
+class ReportConclusion(Entity):
+    """A judgement, comparison or recommendation of the report (F10 ruling 1), resting on the
+    claims ``based_on`` names by claim id. It cites no evidence of its own, so it is never
+    shown with a source link."""
+
+    text: str
+    based_on: list[str]
+    confidence: Confidence
+
+
 class ReportConstraint(Entity):
     """A constraint the request ran under, carried into the next request's prior context."""
 
@@ -73,6 +84,8 @@ class ReportConstraint(Entity):
 
 class ReportBody(Entity):
     claims: list[Claim]
+    # The assessment drawn from the claims; reports saved before F10 have none.
+    conclusions: list[ReportConclusion] = []
     inputs_consulted: list[ArtifactRef]
     deliverables: list[ArtifactRef] = []
     uncertainties: list[str]

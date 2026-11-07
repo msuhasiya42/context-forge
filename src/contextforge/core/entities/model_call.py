@@ -17,6 +17,9 @@ class Stage(StrEnum):
     CITE = "cite"
     COMPRESS = "compress"
     TOOL_SELECT = "tool_select"
+    # The few sentences that open a report (F10 ruling 2); not ``summarize``, which maps over an
+    # artifact's items.
+    SUMMARY = "summary"
 
 
 class Outcome(StrEnum):

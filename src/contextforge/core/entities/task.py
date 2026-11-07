@@ -1,14 +1,15 @@
 """Task entity (implementation plan section 3.4) and the structured-data guard."""
 
 from enum import StrEnum
-from typing import Any
+from typing import Any, Literal
 
-from pydantic import Field
+from pydantic import Field, NonNegativeInt
 
 from contextforge.core.entities import Entity
 from contextforge.core.values import ArtifactRef, EvidenceRef
 
 MAX_FACTS_PER_RESULT = 6
+MAX_CONCLUSIONS_PER_RESULT = 3
 MAX_STRUCTURED_LIST_ENTRIES = 50
 
 
@@ -29,9 +30,23 @@ class TaskStatus(StrEnum):
     CANCELLED = "CANCELLED"
 
 
+Confidence = Literal["high", "medium", "low"]
+
+
 class Fact(Entity):
     text: str
     evidence_refs: list[EvidenceRef]
+
+
+class Conclusion(Entity):
+    """A judgement, comparison or recommendation drawn from the result's facts (F10 ruling 1).
+    No source states it, so it is never a fact and cites no evidence of its own:
+    ``supporting_facts`` are the positions, from 0, of the facts of this result it rests on."""
+
+    text: str
+    supporting_facts: list[NonNegativeInt] = []
+    # Low when the model leaves it out: an unstated confidence is never read as a high one.
+    confidence: Confidence = "low"
 
 
 class TaskResult(Entity):
@@ -41,6 +56,7 @@ class TaskResult(Entity):
     summary: str
     # What the request brief accumulates; refs are checked against inputArtifactIds by the caller.
     facts: list[Fact] = Field(default=[], max_length=MAX_FACTS_PER_RESULT)
+    conclusions: list[Conclusion] = Field(default=[], max_length=MAX_CONCLUSIONS_PER_RESULT)
     structured_data: dict[str, Any] = {}
     evidence_refs: list[EvidenceRef] = []
     artifact_refs: list[ArtifactRef] = []

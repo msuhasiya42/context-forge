@@ -194,7 +194,7 @@ def test_a_long_report_becomes_a_deliverable_that_the_content_route_serves(tmp_p
         missing = client.get("/chats/c1/artifacts/none/content")
     claims = report["report"]["claims"]
     assert ref["role"] == "output" and len(claims) == 6
-    assert len(report["content"]) < 1500 and report["content"].startswith(claims[0]["text"])
+    assert len(report["content"]) < 1500 and report["content"].startswith(f"1. {claims[0]['text']}")
     assert "Full report attached: 6 findings" in report["content"]
     assert served.status_code == 200 and served.headers["content-type"].startswith("text/markdown")
     assert served.headers["x-content-type-options"] == "nosniff"
