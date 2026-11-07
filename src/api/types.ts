@@ -60,6 +60,8 @@ export interface Message {
   failureReason?: string;
   requestMessageId?: string;
   inReplyToMessageId?: string;
+  /** On a report too long for the chat: the deliverable Artifacts holding the full report. */
+  deliverableArtifactIds?: string[];
 }
 
 export type StreamEvent =

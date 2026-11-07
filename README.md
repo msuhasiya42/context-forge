@@ -22,7 +22,7 @@ Copy `.env.example` to `.env.local` and set the API base URL:
 VITE_API_BASE_URL=http://localhost:8000
 ```
 
-When `VITE_API_BASE_URL` is unset or empty the mock client is used. The UI calls these endpoints: `POST /chats`, `GET /chats`, `GET /chats/{chatId}/messages`, `POST /chats/{chatId}/requests` (with an `Idempotency-Key` header), `PATCH /chats/{chatId}` (rename from the sidebar) and `DELETE /chats/{chatId}` (archive, after an in-app confirmation). New chats get their title from the server after the first request. The backend must allow the dev origin via CORS. `crypto.randomUUID` (used for the idempotency key) needs a secure context, so serve the UI from `localhost` or HTTPS.
+When `VITE_API_BASE_URL` is unset or empty the mock client is used. The UI calls these endpoints: `POST /chats`, `GET /chats`, `GET /chats/{chatId}/messages`, `POST /chats/{chatId}/requests` (with an `Idempotency-Key` header), `PATCH /chats/{chatId}` (rename from the sidebar), `DELETE /chats/{chatId}` (archive, after an in-app confirmation) and `GET /chats/{chatId}/artifacts/{artifactId}/content` (a long report's full markdown, opened from its message with "View full report" in a right-side panel with a Download button; raw HTML in the report is dropped and unsafe link targets removed). New chats get their title from the server after the first request. The backend must allow the dev origin via CORS. `crypto.randomUUID` (used for the idempotency key) needs a secure context, so serve the UI from `localhost` or HTTPS.
 
 ## Checks
 

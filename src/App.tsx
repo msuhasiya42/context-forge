@@ -74,6 +74,7 @@ export function App({ client, pollIntervalMs = DEFAULT_POLL_INTERVAL_MS }: AppPr
         />
         {messages.activity && <p role="status">{messages.activity}</p>}
         <PaneContent
+          client={client}
           activeChat={activeChat}
           chatsLoaded={app.chats.state.status === 'success'}
           messages={messages.state}

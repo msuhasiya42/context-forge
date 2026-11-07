@@ -43,6 +43,12 @@ export function createHttpClient(baseUrl: string): ApiClient {
         await call('POST', `${chatPath(chatId)}/requests/${encodeURIComponent(requestId)}/cancel`),
       ),
     getMemory: async () => parseMemory(await call('GET', '/me')),
+    getArtifactContent: async (chatId, artifactId) => {
+      const path = `${chatPath(chatId)}/artifacts/${encodeURIComponent(artifactId)}/content`;
+      const response = await fetchWithTimeout(`${root}${path}`, { method: 'GET' });
+      if (!response.ok) throw parseApiError(response.status, await readJson(response));
+      return response.text();
+    },
     saveMemory: async (instructions) => parseMemory(await call('PATCH', '/me', { instructions })),
     listChats: async () =>
       parsePageItems(await call('GET', `/chats?limit=${CHAT_PAGE_SIZE}`), parseChat),

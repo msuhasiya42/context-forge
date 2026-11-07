@@ -49,6 +49,16 @@ function readStatus(record: JsonRecord, kind: MessageKind): MessageStatus | unde
   return allowed && !isAbsent(record.status) ? readEnum(record, 'status', allowed) : undefined;
 }
 
+/** The artifact ids in a report's `report.deliverables`; undefined when there are none. */
+function readDeliverables(record: JsonRecord): string[] | undefined {
+  if (isAbsent(record.report)) return undefined;
+  const refs = asRecord(record.report).deliverables;
+  if (isAbsent(refs)) return undefined;
+  if (!Array.isArray(refs)) throw invalidResponse();
+  const ids = refs.map((ref) => readString(asRecord(ref), 'artifactId'));
+  return ids.length > 0 ? ids : undefined;
+}
+
 export function parseChat(value: unknown): Chat {
   const record = asRecord(value);
   return {
@@ -76,6 +86,7 @@ export function parseMessage(value: unknown): Message {
     createdAt: readString(record, 'createdAt'),
     status: readStatus(record, kind),
     failureReason: readOptionalString(record, 'failureReason'),
+    deliverableArtifactIds: kind === 'report' ? readDeliverables(record) : undefined,
   };
 }
 

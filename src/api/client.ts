@@ -17,6 +17,8 @@ export interface ApiClient {
   ): Promise<Message>;
   cancelRequest?(chatId: string, requestId: string): Promise<Message>;
   getMemory?(): Promise<UserMemory>;
+  /** The stored text of a deliverable Artifact, such as a long report's markdown. */
+  getArtifactContent?(chatId: string, artifactId: string): Promise<string>;
   saveMemory?(instructions: string): Promise<UserMemory>;
   /** E2: my chats, most recently updated first (first page). */
   listChats(): Promise<Chat[]>;
