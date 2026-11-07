@@ -5,6 +5,7 @@ clock and invents no ids, so the same inputs give byte-identical output and the 
 (the two system blocks) stays cacheable across calls.
 """
 
+import html
 import json
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -119,13 +120,30 @@ def _render_brief(inputs: ContextInputs) -> str:
             f"<next_action>{inputs.next_action}</next_action>" if inputs.next_action else "",
             _block(
                 "sources",
-                [f"{s.artifact_id}  {s.kind}  {s.name}  {s.detail}" for s in inputs.sources],
+                [_source_text(source) for source in inputs.sources],
                 attrs=f' chat_id="{inputs.chat_id}"',
                 empty="(none)",
             ),
             _block("prior_context", [line for m in inputs.prior_messages for line in _prior(m)]),
         ]
     )
+
+
+# Longest name or detail a ``<sources>`` line shows, in characters, "…" included.
+_SOURCE_FIELD_CAP = 120
+
+
+def _source_text(source: SourceLine) -> str:
+    """One ``<sources>`` line. A name or detail can come from outside (an upload's file name or
+    columns, a web snapshot saved before names stopped using page titles), so each field is put
+    on one line, capped and escaped: no value can close the block or forge a tag."""
+    fields = [source.artifact_id, source.kind, _capped(source.name), _capped(source.detail)]
+    return "  ".join(html.escape(field, quote=False) for field in fields)
+
+
+def _capped(text: str) -> str:
+    flat = " ".join(text.split())
+    return flat if len(flat) <= _SOURCE_FIELD_CAP else flat[: _SOURCE_FIELD_CAP - 1] + "…"
 
 
 def _request_block(request: RequestMessage | None) -> str:

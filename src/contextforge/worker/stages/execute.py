@@ -588,12 +588,22 @@ def _result_message(
     if result.status != "ok":
         return _tool_message(call, _error_content(result), status=result.status)
     if result.rows is None:
-        return _tool_message(call, result.text or "", status="ok")
+        return _tool_message(call, result.text or "", status="ok", artifact_id=_saved(result))
     shaped = _shape_rows(call, result.rows, state, deps)
     content = f"{shaped.text}\n{json.dumps(shaped.rows, sort_keys=True)}"
     return _tool_message(
-        call, content, status="ok", row_count=shaped.total_rows, artifact_id=shaped.artifact_id
+        call,
+        content,
+        status="ok",
+        row_count=shaped.total_rows,
+        artifact_id=shaped.artifact_id or _saved(result),
     )
+
+
+def _saved(result: ToolResult) -> str | None:
+    """The Artifact a tool saved its own result in (the web tools' snapshots), so compaction
+    keeps that handle; None for a tool that saves nothing."""
+    return result.artifact_ids[0] if result.artifact_ids else None
 
 
 def _shape_rows(
