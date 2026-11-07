@@ -169,7 +169,7 @@ def call_model(state: TaskState, runtime: Runtime[TaskRun], *, deps: WorkerDeps)
         check_call_budget(deps, state["request_message_id"])
         model = deps.model_for(
             state["request_message_id"],
-            memory_version=run.brief["memory"]["version"] if "memory" in run.brief else None,
+            memory_version=run.brief["memory"]["version"],
             created_at=run.brief.get("created_at"),
         )
         specs = [tool.spec for tool in _allowed_tools(run.task.kind, deps).values()]
@@ -235,7 +235,12 @@ def _run_sql_analysis(
     run = TaskRun(task=task, brief=brief, sources=_task_sources(task, brief["chat_id"], deps))
     config: RunnableConfig = {"recursion_limit": _recursion_limit(deps.budgets)}
     error = ""
-    for attempt in range(1, deps.budgets.task_retries + 2):
+    attempts = deps.budgets.task_retries + 1
+    for attempt in range(1, attempts + 1):
+        if attempt > 1:
+            # ModelCall has no metadata field, so the retry is on record as activity (L-3).
+            retry = f"Task retry {attempt - 1} of {attempts - 1}"
+            deps.activity.emit(task.request_message_id, task.task_id, retry)
         state = _fresh_state(task, brief, dependency_summaries)
         final = subgraph.invoke(state, config, context=run)
         if final["result"] is not None:
@@ -416,11 +421,11 @@ def _execute_inputs(
     """Section 8.2 for an execute call: the brief, the task goal, its sources and its tools."""
     brief = run.brief
     return ContextInputs(
-        memory=brief["memory"]["text"] if "memory" in brief else load_prompt("agent-memory"),
+        memory=brief["memory"]["text"],
         stage_prompt=load_prompt(prompt_version(Stage.EXECUTE)),
         chat_id=state["chat_id"],
         request=load_request(deps.repos.messages, brief["chat_id"], brief["request_message_id"]),
-        preferences=brief["memory"]["preferences"] if "memory" in brief else {},
+        preferences=brief["memory"]["preferences"],
         constraints=[*state["constraints"], f"Task goal: {run.task.goal}"],
         facts=brief["facts"],
         open_questions=brief["open_questions"],

@@ -28,7 +28,13 @@ from contextforge.worker.deps import WorkerDeps
 from contextforge.worker.stages.cite import cite_stage
 from contextforge.worker.stages.execute import TaskOutcome, execute_stage
 from contextforge.worker.stages.guards import Cancelled, check_not_cancelled
-from contextforge.worker.stages.plan import PlanFailed, PlanResult, plan_gate, plan_stage
+from contextforge.worker.stages.plan import (
+    PlanFailed,
+    PlanResult,
+    answer_constraint,
+    plan_gate,
+    plan_stage,
+)
 from contextforge.worker.stages.report import fail_request, write_report
 
 logger = logging.getLogger(__name__)
@@ -116,13 +122,21 @@ def _plan(brief: RequestState, stages: _StageTasks) -> RequestState:
     planned = stages.plan(brief, attempt).result()
     while (pending := planned["pending"]) is not None:
         answer = interrupt(pending)
-        brief = _with_constraints(
-            brief, [f"User answered '{pending['question']}': {answer['content']}"]
-        )
+        brief = _with_answer(brief, pending["question"], answer)
         attempt += 1
         planned = stages.plan(brief, attempt).result()
     brief = _with_plan(brief, planned)
     return {**brief, "plan": stages.gate(brief, planned).result()}
+
+
+def _with_answer(brief: RequestState, question: str, answer: dict[str, str]) -> RequestState:
+    """The brief with the user's answer as a constraint; an answer holding a credential is left
+    out (the report says so)."""
+    constraint = answer_constraint(question, answer["content"])
+    if constraint is None:
+        logger.warning("answer %s looks like a credential; not used", answer["message_id"])
+        return brief
+    return _with_constraints(brief, [constraint])
 
 
 def _with_constraints(brief: RequestState, added: Iterable[str]) -> RequestState:

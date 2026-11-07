@@ -3,11 +3,13 @@ from datetime import date
 
 import pytest
 
+from contextforge.core.entities.user import User
 from contextforge.core.models.base import ModelResponse
 from contextforge.core.models.scripted import ScriptedModel
+from contextforge.core.services.memory import memory_snapshot
 from contextforge.worker.stages.guards import Cancelled
 from contextforge.worker.stages.plan import PlanFailed, clarification_id, plan_gate, plan_stage
-from tests.helpers import initial_brief, make_deps, seed_chat_with_dataset  # written in this task
+from tests.helpers import initial_brief, make_deps, seed_chat_with_dataset
 
 
 def _plan(ids: list[str]) -> dict:
@@ -168,3 +170,33 @@ def test_call_budget_stops_the_planner() -> None:
     with pytest.raises(PlanFailed) as e:
         plan_stage(initial_brief(req), 0, deps)
     assert "budget" in e.value.reason
+
+
+def test_planner_runs_on_the_briefs_memory_snapshot_which_is_required() -> None:
+    deps = make_deps(ScriptedModel({"plan": [ModelResponse(structured=_plan(["a2"]))]}))
+    seen = []
+    deps.model.on_request = seen.append  # type: ignore[attr-defined]
+    req = seed_chat_with_dataset(deps, chat_id="c1", user_id="u1", dataset_id="a2")
+    user = User(
+        user_id="u1",
+        email="local@example.invalid",
+        instructions="Quote every figure in INR.",
+        preferences={"timezone": "Europe/London"},
+        status="ACTIVE",
+        created_at="t",
+        updated_at="t",
+    )
+    memory = memory_snapshot(user)
+    brief = {**initial_brief(req), "memory": memory}
+    plan_stage(brief, 0, deps)
+    assert "Quote every figure in INR." in seen[0].system[0]
+    assert (
+        "today: " in seen[0].messages[0].content
+        and "(Europe/London)" in seen[0].messages[0].content
+    )
+    [call] = deps.repos.model_calls.list_by_request(req.message_id)
+    assert call.context_version.startswith(f"mem:{memory['version']}|")
+    # No default stands in for a missing snapshot: a brief without one is a bug, not a user.
+    del brief["memory"]
+    with pytest.raises(KeyError):
+        plan_stage(brief, 0, deps)
