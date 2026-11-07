@@ -7,6 +7,8 @@ from langchain_core.messages import AIMessage, SystemMessage, ToolMessage
 from contextforge.core.models.base import ModelRequest, ModelResponse, ToolCall
 from contextforge.core.models.scripted import ScriptedModel
 from contextforge.core.tools.base import ToolContext
+from contextforge.infra.bedrock import converse_payload
+from contextforge.worker.stages.execute import NO_CALLS_REMAIN
 from contextforge.worker.tools.sql_query import SqlQueryTool
 from contextforge.worker.workflow import build_workflow
 from tests.helpers import (
@@ -218,7 +220,57 @@ def test_cancel_between_waves_stops_the_run() -> None:
     assert not [m for m in deps.repos.messages.list_by_chat("c1") if m.kind == "report"]
 
 
-def test_tool_call_cap_fails_the_task_not_the_request() -> None:
+def test_a_task_out_of_tool_calls_returns_the_facts_it_has() -> None:
+    """F7 ruling 1 (live run, 7 Nov): the weather task kept searching until its tool-call budget
+    ran out and failed, losing all it had read. The call after the last slot now offers no tool,
+    so return_result is forced, and the task completes with its facts and says why it stopped."""
+
+    class KeepsQuerying(ScriptedModel):
+        """Runs a new query whenever a tool is offered; returns its script's result otherwise."""
+
+        def invoke(self, request):
+            if request.stage != "execute" or not request.tools:
+                return super().invoke(request)
+            turn = len(request.messages)  # the transcript grows, so every query is new
+            sql = f"SELECT {turn}"
+            call = ToolCall(
+                id=f"q{turn}", name="sql_query", arguments={"dataset_id": "a2", "sql": sql}
+            )
+            return ModelResponse(tool_calls=[call], stop_reason="tool_use")
+
+    model = KeepsQuerying(
+        {
+            "plan": [ModelResponse(structured=six_task_plan())],
+            "execute": [ModelResponse(structured=t1_result())] * 3,
+        }
+    )
+    requests: list[ModelRequest] = []
+    model.on_request = requests.append
+    deps = make_deps(model, tasks_in_flight=1)
+    req = seed_chat_with_dataset(deps, chat_id="c1", user_id="u1", dataset_id="a2")
+    _start(deps, req)
+    out = build_workflow(deps, checkpointer=None).invoke(
+        {"chat_id": "c1", "message_id": req.message_id}, _cfg(req)
+    )
+    assert out["status"] == "COMPLETED"
+    sql_tasks = [
+        t for t in deps.repos.tasks.list_by_request(req.message_id) if t.kind == "sql_analysis"
+    ]
+    stopped = "stopped at the tool-call budget; 6 pages read"
+    for task in sql_tasks:
+        assert (task.status, task.attempt, len(task.result.facts)) == ("COMPLETED", 1, 2)
+        assert task.result.uncertainties[-1] == stopped
+    last_calls = [r for r in requests if r.stage == "execute" and not r.tools]
+    assert len(last_calls) == len(sql_tasks)  # one per task, after its sixth query
+    assert last_calls[0].messages[-1].content == NO_CALLS_REMAIN
+    forced = converse_payload(last_calls[0])["toolConfig"]
+    assert forced["toolChoice"] == {"tool": {"name": "return_result"}}
+    report = next(m for m in deps.repos.messages.list_by_chat("c1") if m.kind == "report")
+    assert report.report.claims and stopped in report.report.uncertainties
+
+
+def test_no_result_even_at_the_tool_call_cap_fails_the_task_not_the_request() -> None:
+    # A model that still calls a tool when only return_result is offered has nothing usable.
     calls = [
         ModelResponse(
             tool_calls=[
@@ -311,30 +363,33 @@ def test_tool_error_is_a_result_the_model_sees() -> None:
 
 
 def test_duplicate_tool_call_spends_no_slot() -> None:
+    # Three repeats in a row run nothing new, so the next call may only return the result.
     call = ModelResponse(
         tool_calls=[
             ToolCall(id="x", name="sql_query", arguments={"dataset_id": "a2", "sql": "SELECT 1"})
         ],
         stop_reason="tool_use",
     )
-    deps = make_deps(
-        ScriptedModel(
-            {
-                "plan": [ModelResponse(structured=six_task_plan())],
-                "execute": [call] * 8 + [ModelResponse(structured=t1_result())] * 3,
-            }
-        ),
-        tasks_in_flight=1,
+    model = ScriptedModel(
+        {
+            "plan": [ModelResponse(structured=six_task_plan())],
+            "execute": [call] * 4 + [ModelResponse(structured=t1_result())] * 3,
+        }
     )
+    requests: list[ModelRequest] = []
+    model.on_request = requests.append
+    deps = make_deps(model, tasks_in_flight=1)
     req = seed_chat_with_dataset(deps, chat_id="c1", user_id="u1", dataset_id="a2")
     _start(deps, req)
     build_workflow(deps, checkpointer=None).invoke(
         {"chat_id": "c1", "message_id": req.message_id}, _cfg(req)
     )
     t1 = deps.repos.tasks.list_by_request(req.message_id)[0]
-    assert (
-        t1.status == "FAILED" and t1.failure_reason == "no progress"
-    )  # the duplicate never counted; no-progress ended it
+    assert (t1.status, t1.attempt) == ("COMPLETED", 1)
+    # the duplicates never counted: one query read, then the no-progress limit ended the loop
+    assert t1.result.uncertainties[-1] == "stopped after 3 turns without progress; 1 page read"
+    turns = [r for r in requests if r.task_id == t1.task_id]
+    assert [bool(r.tools) for r in turns] == [True] * 4 + [False]
 
 
 def test_failed_dependency_fails_its_dependents() -> None:
