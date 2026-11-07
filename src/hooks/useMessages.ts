@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useState } from 'react';
 import type { ApiClient } from '../api/client';
-import type { Message } from '../api/types';
+import type { Message, RequestTask } from '../api/types';
 import { LOADING, success, type AsyncState } from '../utils/asyncState';
+import { upsertBy } from '../utils/collections';
 import { hasActiveRequest, mergeMessages, sortMessages } from '../utils/messages';
 import { useLatestRequest } from './useLatestRequest';
 import { useSendRequest } from './useSendRequest';
@@ -43,6 +44,8 @@ export function useMessages(
   const [owned, setOwned] = useState<OwnedMessages>(fresh(null, LOADING));
   const runLatest = useLatestRequest();
   const [activity, setActivity] = useState<{ chatId: string; text: string } | null>(null);
+  // The plan of the request streamed last; it stays after the request ends.
+  const [plan, setPlan] = useState<{ requestId: string; tasks: RequestTask[] } | null>(null);
   const current = owned.chatId === chatId ? owned : fresh(chatId, LOADING);
 
   const load = useCallback(
@@ -91,17 +94,31 @@ export function useMessages(
       if (event.kind === 'message') {
         appendMessage(event.message);
         refresh();
+      } else if (event.kind === 'task') {
+        setPlan((prev) => ({
+          requestId: activeRequest,
+          tasks: upsertBy(
+            prev?.requestId === activeRequest ? prev.tasks : [],
+            event.task,
+            (task) => task.taskId,
+          ),
+        }));
       } else setActivity({ chatId, text: event.text });
     });
   }, [client, chatId, activeRequest, appendMessage, refresh]);
   const sender = useSendRequest(client, chatId, appendMessage);
   const reload = useCallback(() => load('replace'), [load]);
+  const latestRequest =
+    current.state.status === 'success'
+      ? current.state.data.filter((m) => m.kind === 'request').at(-1)?.messageId
+      : undefined;
   return {
     state: current.state,
     refreshError: current.refreshError,
     reload,
     upsert: appendMessage,
     activity: activeRequest && activity?.chatId === chatId ? activity.text : null,
+    planTasks: plan && plan.requestId === latestRequest ? plan.tasks : [],
     ...sender,
   };
 }

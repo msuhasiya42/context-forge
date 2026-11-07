@@ -1,4 +1,5 @@
 import { MemoryPanel } from './components/MemoryPanel/MemoryPanel';
+import { PlanTasks } from './components/PlanTasks/PlanTasks';
 import { RequestControls } from './components/RequestControls/RequestControls';
 import type { ApiClient } from './api/client';
 import { ChatPane } from './components/ChatPane/ChatPane';
@@ -72,6 +73,7 @@ export function App({ client, pollIntervalMs = DEFAULT_POLL_INTERVAL_MS }: AppPr
           }
           onUpdate={messages.upsert}
         />
+        <PlanTasks tasks={messages.planTasks} />
         {messages.activity && <p role="status">{messages.activity}</p>}
         <PaneContent
           client={client}

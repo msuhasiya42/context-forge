@@ -24,8 +24,15 @@ it('streams an answer and closes the stream when the view is unmounted', async (
   renderApp(client);
   await screen.findByText('Research Python');
   await waitFor(() => expect(emit).toBeDefined());
+  const task = (taskId: string, goal: string, status: string) => ({
+    kind: 'task' as const,
+    task: { taskId, kind: 'web_search', goal, status },
+  });
   await act(async () => {
+    emit?.(task('t1', 'US market this week', 'RUNNING'));
+    emit?.(task('t2', 'India market this week', 'PLANNED'));
     emit?.({ kind: 'activity', text: 'Calling web_search' });
+    emit?.(task('t1', 'US market this week', 'COMPLETED'));
     emit?.({
       kind: 'message',
       message: agentText('answer', 'c1', 'Python sources found.', '2026-11-07T10:01:00Z'),
@@ -33,6 +40,13 @@ it('streams an answer and closes the stream when the view is unmounted', async (
   });
   expect(await screen.findByText('Python sources found.')).toBeInTheDocument();
   expect(screen.getByText('Calling web_search')).toBeInTheDocument();
+  // The plan shows each task once, updated in place, with its status in words.
+  const plan = screen.getByRole('region', { name: 'Plan' });
+  expect(
+    within(plan)
+      .getAllByRole('listitem')
+      .map((item) => item.textContent),
+  ).toEqual(['US market this weekDone', 'India market this weekWaiting']);
   cleanup();
   expect(close).toHaveBeenCalled();
 });

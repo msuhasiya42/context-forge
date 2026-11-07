@@ -64,8 +64,20 @@ export interface Message {
   deliverableArtifactIds?: string[];
 }
 
+/** One task of a request's plan, as the event stream sends it. */
+export interface RequestTask {
+  taskId: string;
+  /** web_search, sql_analysis, ... */
+  kind: string;
+  goal: string;
+  /** PLANNED, RUNNING, COMPLETED, FAILED, SKIPPED or CANCELLED. */
+  status: string;
+}
+
 export type StreamEvent =
-  { kind: 'message'; message: Message } | { kind: 'activity'; text: string };
+  | { kind: 'message'; message: Message }
+  | { kind: 'activity'; text: string }
+  | { kind: 'task'; task: RequestTask };
 export interface UserMemory {
   instructions: string | null;
   preferences: Record<string, string> | null;

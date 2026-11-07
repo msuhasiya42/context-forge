@@ -1,4 +1,4 @@
-import { parseMessage } from './parse';
+import { parseMessage, parseTask } from './parse';
 import type { StreamEvent } from './types';
 
 /** One stream per active request; polling remains the recovery path after any disconnect. */
@@ -43,19 +43,9 @@ export function streamRequest(
   });
   stream.addEventListener('task', (event) => {
     try {
-      const data: unknown = JSON.parse((event as MessageEvent<string>).data);
-      if (
-        typeof data === 'object' &&
-        data !== null &&
-        'goal' in data &&
-        'status' in data &&
-        typeof data.goal === 'string' &&
-        typeof data.status === 'string'
-      ) {
-        onEvent({ kind: 'activity', text: `${data.goal}: ${data.status}` });
-      }
+      onEvent({ kind: 'task', task: parseTask(JSON.parse((event as MessageEvent<string>).data)) });
     } catch {
-      /* Polling will recover persisted task state. */
+      /* An unreadable task update must not stop the stream; the report still arrives. */
     }
   });
   stream.onerror = () => stream.close();

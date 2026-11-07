@@ -9,6 +9,7 @@ import {
   type Message,
   type MessageKind,
   type MessageStatus,
+  type RequestTask,
 } from './types';
 
 // Only these kinds carry a lifecycle status; each has its own set of values.
@@ -87,6 +88,16 @@ export function parseMessage(value: unknown): Message {
     status: readStatus(record, kind),
     failureReason: readOptionalString(record, 'failureReason'),
     deliverableArtifactIds: kind === 'report' ? readDeliverables(record) : undefined,
+  };
+}
+
+export function parseTask(value: unknown): RequestTask {
+  const record = asRecord(value);
+  return {
+    taskId: readString(record, 'taskId'),
+    kind: readString(record, 'kind'),
+    goal: readString(record, 'goal'),
+    status: readString(record, 'status'),
   };
 }
 
