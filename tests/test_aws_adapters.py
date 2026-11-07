@@ -3,6 +3,7 @@ the process. The behaviour checked is the in-memory reference contract (tests/te
 plus the DynamoDB, S3 and SQS details the memory backend has no equivalent for."""
 
 import json
+import logging
 from decimal import Decimal
 from hashlib import sha256
 from io import BytesIO
@@ -24,6 +25,7 @@ from contextforge.core.entities.message import (
 )
 from contextforge.core.entities.model_call import ModelCall
 from contextforge.core.entities.task import Task, TaskResult
+from contextforge.core.queue import WorkMessage
 from contextforge.core.repositories.base import StaleStatusError
 from contextforge.core.values import Usage
 from contextforge.infra.aws import (
@@ -35,6 +37,7 @@ from contextforge.infra.aws import (
     DynamoStore,
     DynamoTasks,
     ItemTooLargeError,
+    QueueError,
     S3Blobs,
     SqsQueue,
 )
@@ -448,22 +451,73 @@ def test_s3_missing_key_is_lookup_error_like_the_memory_store() -> None:
             S3Blobs(s3, BUCKET).get(f"s3://{BUCKET}/raw_result/c1/gone.jsonl")
 
 
-def test_sqs_receipt_round_trip():
+# SQS
+
+
+def receive_params(visibility: int = 1260) -> dict[str, Any]:
+    return {
+        "QueueUrl": QUEUE_URL,
+        "MaxNumberOfMessages": 1,
+        "WaitTimeSeconds": 20,
+        "VisibilityTimeout": visibility,
+    }
+
+
+def test_sqs_send_receive_and_ack_by_that_receipt() -> None:
     sqs = client("sqs")
-    queue = SqsQueue(sqs, "https://sqs.ap-southeast-2.amazonaws.com/123/work")
+    queue = SqsQueue(sqs, QUEUE_URL, visibility_timeout_seconds=960)
+    work = WorkMessage(kind="resume", chat_id="c1", message_id="m1", reply_message_id="m4")
+    body = json.dumps(
+        {"kind": "resume", "chat_id": "c1", "message_id": "m1", "reply_message_id": "m4"}
+    )
     with Stubber(sqs) as stub:
+        stub.add_response("send_message", {}, {"QueueUrl": QUEUE_URL, "MessageBody": body})
         stub.add_response(
             "receive_message",
-            {
-                "Messages": [
-                    {
-                        "ReceiptHandle": "receipt",
-                        "Body": json.dumps({"kind": "start", "chat_id": "c1", "message_id": "r1"}),
-                    }
-                ]
-            },
+            {"Messages": [{"MessageId": "id1", "ReceiptHandle": "receipt-1", "Body": body}]},
+            receive_params(visibility=960),
         )
-        stub.add_response("delete_message", {})
-        work = queue.receive()
-        assert work.message_id == "r1" and work.receipt == "receipt"
-        queue.ack(work)
+        stub.add_response(
+            "delete_message", {}, {"QueueUrl": QUEUE_URL, "ReceiptHandle": "receipt-1"}
+        )
+        queue.send(work)
+        received = queue.receive()
+        assert received == work and received.receipt == "receipt-1"
+        queue.ack(received)
+        stub.assert_no_pending_responses()
+
+
+def test_malformed_bodies_are_logged_and_left_for_the_dead_letter_queue(caplog) -> None:
+    sqs = client("sqs")
+    bodies = [
+        "not json",
+        "[1, 2]",
+        '{"kind": "smoke"}',
+        json.dumps({"kind": "resume", "chat_id": "c1", "message_id": "m1"}),
+        json.dumps({"kind": "start", "chat_id": "c1", "message_id": "m1", "extra": 1}),
+    ]
+    with Stubber(sqs) as stub, caplog.at_level(logging.WARNING, logger="contextforge.infra.aws"):
+        for i, body in enumerate(bodies):
+            message = {"MessageId": f"id{i}", "ReceiptHandle": f"receipt-{i}", "Body": body}
+            stub.add_response("receive_message", {"Messages": [message]}, receive_params())
+        # Only receives are stubbed: a delete_message would fail the stub.
+        assert [SqsQueue(sqs, QUEUE_URL).receive() for _ in bodies] == [None] * len(bodies)
+        stub.assert_no_pending_responses()
+    assert [r.getMessage() for r in caplog.records] == [
+        f"Malformed work message id{i} left for the DLQ" for i in range(len(bodies))
+    ]
+
+
+def test_ack_after_the_receipt_expired_raises_queue_error() -> None:
+    sqs = client("sqs")
+    with Stubber(sqs) as stub:
+        stub.add_client_error(
+            "delete_message",
+            service_error_code="InvalidParameterValue",
+            service_message="Reason: The receipt handle has expired.",
+            expected_params={"QueueUrl": QUEUE_URL, "ReceiptHandle": "stale"},
+        )
+        with pytest.raises(QueueError, match="receipt expired"):
+            SqsQueue(sqs, QUEUE_URL).ack(
+                WorkMessage(kind="start", chat_id="c1", message_id="m1", receipt="stale")
+            )

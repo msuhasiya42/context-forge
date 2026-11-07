@@ -8,8 +8,9 @@ Each adapter keeps the contract of its in-memory reference (``core/repositories/
 
 import hashlib
 import json
+import logging
 import time
-from dataclasses import asdict
+from dataclasses import asdict, fields
 from decimal import Decimal
 from pathlib import PurePosixPath
 from typing import Any
@@ -36,6 +37,8 @@ from contextforge.core.repositories.base import StaleStatusError
 from contextforge.core.repositories.memory import Repositories
 from contextforge.core.repositories.shared import sum_known_usage, unanswered
 from contextforge.core.values import Usage
+
+logger = logging.getLogger(__name__)
 
 # DynamoDB's item limit. Sizes are measured on the JSON encoding, which overstates DynamoDB's own
 # count, so the guard trips before DynamoDB would.
@@ -466,9 +469,43 @@ class S3Blobs:
             body.close()
 
 
+class QueueError(Exception):
+    """A queue operation that cannot do what was asked, such as acking with an expired receipt."""
+
+
+_WORK_FIELDS = frozenset(f.name for f in fields(WorkMessage)) - {"receipt"}
+# Long polling: one ReceiveMessage waits up to 20 s (the SQS maximum) for work to arrive.
+_WAIT_SECONDS = 20
+
+
+def _is_id(value: Any) -> bool:
+    return isinstance(value, str) and bool(value)
+
+
+def _decode_work(body: str, receipt: str) -> WorkMessage | None:
+    """The WorkMessage in an SQS body, or None when the body is not one."""
+    try:
+        data = json.loads(body)
+    except ValueError:
+        return None
+    if not isinstance(data, dict) or not data.keys() <= _WORK_FIELDS:
+        return None
+    kind, reply = data.get("kind"), data.get("reply_message_id")
+    valid = (
+        kind in {"start", "resume"}
+        and _is_id(data.get("chat_id"))
+        and _is_id(data.get("message_id"))
+        and (_is_id(reply) if kind == "resume" else reply is None or _is_id(reply))
+    )
+    return WorkMessage(**data, receipt=receipt) if valid else None
+
+
 class SqsQueue:
-    def __init__(self, client: Any, url: str) -> None:
+    def __init__(self, client: Any, url: str, *, visibility_timeout_seconds: int = 1260) -> None:
+        # A received message stays hidden this long. It must outlast the request deadline, or
+        # SQS redelivers a request that is still running; the caller passes deadline + 60 s.
         self.client, self.url = client, url
+        self.visibility_timeout_seconds = visibility_timeout_seconds
 
     def send(self, msg: WorkMessage) -> None:
         self.client.send_message(
@@ -478,23 +515,30 @@ class SqsQueue:
 
     def receive(self) -> WorkMessage | None:
         rows = self.client.receive_message(
-            QueueUrl=self.url, MaxNumberOfMessages=1, WaitTimeSeconds=1
+            QueueUrl=self.url,
+            MaxNumberOfMessages=1,
+            WaitTimeSeconds=_WAIT_SECONDS,
+            VisibilityTimeout=self.visibility_timeout_seconds,
         ).get("Messages", [])
         if not rows:
             return None
         row = rows[0]
-        try:
-            data = json.loads(row["Body"])
-            if data.get("kind") not in {"start", "resume"} or not all(
-                isinstance(data.get(k), str) and data[k] for k in ("chat_id", "message_id")
-            ):
-                return None  # Do not acknowledge: SQS redrive policy sends malformed work to DLQ.
-            if data["kind"] == "resume" and not isinstance(data.get("reply_message_id"), str):
-                return None
-            return WorkMessage(**data, receipt=row["ReceiptHandle"])
-        except (ValueError, TypeError, KeyError):
-            return None
+        work = _decode_work(row["Body"], row["ReceiptHandle"])
+        if work is None:
+            # Never acked: after the queue's maxReceiveCount the redrive policy moves it to the
+            # DLQ. The body is untrusted, so only its id is logged.
+            logger.warning("Malformed work message %s left for the DLQ", row.get("MessageId"))
+        return work
 
     def ack(self, msg: WorkMessage) -> None:
-        if msg.receipt:
+        if not msg.receipt:
+            return
+        try:
             self.client.delete_message(QueueUrl=self.url, ReceiptHandle=msg.receipt)
+        except ClientError as exc:
+            if _error_code(exc) in {"ReceiptHandleIsInvalid", "InvalidParameterValue"}:
+                raise QueueError(
+                    f"Cannot ack work for request {msg.message_id}: its receipt expired after "
+                    f"{self.visibility_timeout_seconds} s, so SQS will deliver it again."
+                ) from exc
+            raise
