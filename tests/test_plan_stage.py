@@ -3,7 +3,8 @@ import pytest
 
 from contextforge.core.models.base import ModelResponse
 from contextforge.core.models.scripted import ScriptedModel
-from contextforge.worker.stages.plan import PlanFailed, plan_gate, plan_stage
+from contextforge.worker.stages.guards import Cancelled
+from contextforge.worker.stages.plan import PlanFailed, clarification_id, plan_gate, plan_stage
 from tests.helpers import initial_brief, make_deps, seed_chat_with_dataset  # written in this task
 
 
@@ -76,7 +77,7 @@ def test_gate_rejects_artifact_from_another_chat() -> None:
 def test_clarification_writes_one_message_and_pending_payload() -> None:
     deps = make_deps(
         ScriptedModel(
-            {"plan": [ModelResponse(structured=_clarification("Which accounts are yours?"))] * 2}
+            {"plan": [ModelResponse(structured=_clarification("Which accounts are yours?"))] * 3}
         )
     )
     req = seed_chat_with_dataset(deps, chat_id="c1", user_id="u1", dataset_id="a2")
@@ -94,6 +95,15 @@ def test_clarification_writes_one_message_and_pending_payload() -> None:
     assert (
         len([m for m in deps.repos.messages.list_by_chat("c1") if m.kind == "clarification"]) == 1
     )
+    # A cancel that lands while the planner is answering stops the run before any question is
+    # written for that attempt.
+    deps.repos.messages.update_request_status("c1", req.message_id, "WAITING_USER", "RUNNING")
+    deps.model.on_request = lambda _: deps.repos.messages.update_request_status(  # type: ignore[attr-defined]
+        "c1", req.message_id, "RUNNING", "CANCELLED"
+    )
+    with pytest.raises(Cancelled):
+        plan_stage(initial_brief(req), 1, deps)
+    assert deps.repos.messages.get("c1", clarification_id(req.message_id, 1)) is None
 
 
 def test_third_question_fails_the_plan() -> None:

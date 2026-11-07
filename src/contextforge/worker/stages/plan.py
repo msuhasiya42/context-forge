@@ -38,6 +38,7 @@ from contextforge.worker.brief import load_request
 from contextforge.worker.deps import WorkerDeps
 from contextforge.worker.stages.guards import (
     CallBudgetExceeded,
+    Cancelled,
     check_call_budget,
     check_not_cancelled,
 )
@@ -243,14 +244,18 @@ def _one_line(error: ValidationError) -> str:
 def _ask_user(
     brief: RequestState, attempt: int, output: PlannerOutput, deps: WorkerDeps
 ) -> PendingInterrupt:
-    """Save the question as a Message, mark the request waiting, and return the payload."""
+    """Mark the request waiting, then save the question as a Message; return the payload.
+
+    The status moves first so a request cancelled during the planner call never gets a question.
+    A crash between the two heals on re-run: WAITING_USER is accepted and the id is derived.
+    """
     if attempt >= MAX_CLARIFICATIONS:
         raise PlanFailed("planner asked a third question")
-    # PlannerOutput's validator rejects a clarification without a question.
-    assert output.question
+    if not output.question:
+        raise PlanFailed("planner asked without a question")
+    _wait_for_user(brief, deps)
     message_id = clarification_id(brief["request_message_id"], attempt)
     deps.repos.messages.save(_clarification(brief, message_id, output.question))
-    _wait_for_user(brief, deps)
     return PendingInterrupt(
         kind=MessageKind.CLARIFICATION.value,
         message_id=message_id,
@@ -275,7 +280,11 @@ def _clarification(brief: RequestState, message_id: str, question: str) -> Clari
 
 
 def _wait_for_user(brief: RequestState, deps: WorkerDeps) -> None:
-    """RUNNING -> WAITING_USER; a re-run that finds the request already waiting changes nothing."""
+    """RUNNING -> WAITING_USER; a re-run that finds the request already waiting changes nothing.
+
+    Raises ``Cancelled`` when the user cancelled during the planner call, and
+    ``StaleStatusError`` for any other unexpected status.
+    """
     try:
         deps.repos.messages.update_request_status(
             brief["chat_id"],
@@ -284,6 +293,10 @@ def _wait_for_user(brief: RequestState, deps: WorkerDeps) -> None:
             RequestStatus.WAITING_USER,
         )
     except StaleStatusError as exc:
+        if exc.actual == RequestStatus.CANCELLED:
+            raise Cancelled(
+                f"request {brief['request_message_id']} was cancelled while the planner ran"
+            ) from exc
         if exc.actual != RequestStatus.WAITING_USER:
             raise
 
