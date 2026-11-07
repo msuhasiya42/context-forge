@@ -15,57 +15,110 @@ from contextforge.worker.runner import RequestRunner
 
 logger = logging.getLogger(__name__)
 
+FAILED_RUN = "Research could not finish. Check provider access or retry as a new request."
+
 
 class QueueConsumer:
+    """Runs queued starts and resumes on one background thread; ``start`` after ``stop`` runs a
+    new thread."""
+
     def __init__(self, deps: WorkerDeps, runner: RequestRunner) -> None:
         self.deps, self.runner = deps, runner
-        self.stop_event = threading.Event()
-        self.thread = threading.Thread(target=self.run, name="contextforge-worker", daemon=True)
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
 
     def handle(self, work: WorkMessage) -> None:
+        """Run one delivery, then ack it, unless it failed before the request was claimed: that
+        request is still ACCEPTED, so the delivery stays on the queue to be redelivered. A run
+        that fails after its claim moves the request to FAILED."""
         try:
-            if work.kind == "start":
-                self.runner.start(work.chat_id, work.message_id)
-            elif work.reply_message_id:
-                reply = self.deps.repos.messages.get(work.chat_id, work.reply_message_id)
-                if isinstance(reply, ClarificationResponseMessage):
-                    self.runner.resume_claimed(work.chat_id, work.message_id, reply)
+            self._dispatch(work)
         except Exception:
-            logger.exception("Request execution failed: %s", work.message_id)
-            request = self.deps.repos.messages.get(work.chat_id, work.message_id)
-            if isinstance(request, RequestMessage) and request.status == RequestStatus.RUNNING:
-                try:
-                    self.deps.repos.messages.update_request_status(
-                        work.chat_id,
-                        work.message_id,
-                        RequestStatus.RUNNING,
-                        RequestStatus.FAILED,
-                        "Research could not finish. Check provider access "
-                        "or retry as a new request.",
-                    )
-                except StaleStatusError:
-                    pass
+            logger.exception("request %s failed", work.message_id)
+            if self._unclaimed(work):
+                logger.warning(
+                    "request %s is still ACCEPTED; not acked, so it is redelivered", work.message_id
+                )
+                return
+            self._fail_running(work)
         finally:
-            request = self.deps.repos.messages.get(work.chat_id, work.message_id)
-            if isinstance(request, RequestMessage):
-                self.deps.touch_chat(work.chat_id, request.user_id)
+            self._touch_chat(work)
         self.deps.queue.ack(work)
 
     def run(self) -> None:
-        while not self.stop_event.is_set():
+        while not self._stop.is_set():
             try:
                 work = self.deps.queue.receive()
                 if work is not None:
                     self.handle(work)
                 else:
-                    self.stop_event.wait(0.1)
+                    self._stop.wait(0.1)
             except Exception:
                 logger.exception("Queue delivery failed; retaining work for retry.")
-                self.stop_event.wait(1)
+                self._stop.wait(1)
 
     def start(self) -> None:
-        self.thread.start()
+        """Start the consumer thread; a no-op while one is running."""
+        if self.running:
+            return
+        self._stop.clear()
+        self._thread = threading.Thread(target=self.run, name="contextforge-worker", daemon=True)
+        self._thread.start()
 
     def stop(self) -> None:
-        self.stop_event.set()
-        self.thread.join(timeout=5)
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=5)
+
+    @property
+    def running(self) -> bool:
+        return self._thread is not None and self._thread.is_alive()
+
+    def _dispatch(self, work: WorkMessage) -> None:
+        if work.kind == "start":
+            self.runner.start(work.chat_id, work.message_id)
+            return
+        reply = (
+            self.deps.repos.messages.get(work.chat_id, work.reply_message_id)
+            if work.reply_message_id
+            else None
+        )
+        if not isinstance(reply, ClarificationResponseMessage):
+            logger.warning(
+                "resume of request %s names %s, which is not a clarification answer; dropped",
+                work.message_id,
+                work.reply_message_id,
+            )
+            return
+        self.runner.resume_claimed(work.chat_id, work.message_id, reply)
+
+    def _unclaimed(self, work: WorkMessage) -> bool:
+        """True for a start whose request is still ACCEPTED: the run failed before its claim."""
+        request = self.deps.repos.messages.get(work.chat_id, work.message_id)
+        return (
+            work.kind == "start"
+            and isinstance(request, RequestMessage)
+            and request.status == RequestStatus.ACCEPTED
+        )
+
+    def _fail_running(self, work: WorkMessage) -> None:
+        request = self.deps.repos.messages.get(work.chat_id, work.message_id)
+        if not isinstance(request, RequestMessage) or request.status != RequestStatus.RUNNING:
+            return
+        try:
+            self.deps.repos.messages.update_request_status(
+                work.chat_id,
+                work.message_id,
+                RequestStatus.RUNNING,
+                RequestStatus.FAILED,
+                FAILED_RUN,
+            )
+        except StaleStatusError as stale:
+            logger.info(
+                "request %s became %s meanwhile; left as it is", work.message_id, stale.actual
+            )
+
+    def _touch_chat(self, work: WorkMessage) -> None:
+        request = self.deps.repos.messages.get(work.chat_id, work.message_id)
+        if isinstance(request, RequestMessage):
+            self.deps.touch_chat(work.chat_id, request.user_id)

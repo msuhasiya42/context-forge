@@ -5,6 +5,7 @@ stage returns the clarification as a ``pending`` payload and the workflow interr
 """
 
 import logging
+import re
 from dataclasses import replace
 from datetime import date, datetime
 from typing import Any, TypedDict
@@ -33,6 +34,8 @@ from contextforge.core.logging import request_context
 from contextforge.core.models.base import ModelRequest
 from contextforge.core.models.errors import ModelError
 from contextforge.core.planner import PlannedTask, PlannerOutput
+from contextforge.core.services.credentials import contains_credential
+from contextforge.core.services.memory import user_timezone
 from contextforge.core.state import PendingInterrupt, PlanEntry, RequestState
 from contextforge.worker.brief import load_request
 from contextforge.worker.deps import WorkerDeps
@@ -47,11 +50,14 @@ from contextforge.worker.stages.sources import available_artifacts, source_line
 
 logger = logging.getLogger(__name__)
 
-# Phase 1 has no User record to read it from; phase 7 takes it from the user's settings.
-USER_TIMEZONE = "Asia/Kolkata"
 # Attempts 0 and 1 may each ask one question; from attempt 2 the planner must plan.
 MAX_CLARIFICATIONS = 2
 NO_MORE_QUESTIONS = "Do not ask another question; plan with stated assumptions"
+# A constraint naming these is the planner restating its own output rules (live finding L-2),
+# not something the user stated; the report drops it so no later request inherits it.
+_PLAN_MECHANICS = re.compile(
+    r"\b(?:plan|task|tasks|kind|schema|inputArtifactIds|JSON|format)\b", re.IGNORECASE
+)
 
 
 class PlanFailed(Exception):
@@ -94,20 +100,13 @@ def plan_stage(
     failed model call; ``Cancelled`` propagates. ``today`` defaults to the user's local date.
     """
     with request_context(brief["request_message_id"]):
-        timezone = (
-            brief["memory"]["preferences"].get("timezone", USER_TIMEZONE)
-            if "memory" in brief
-            else USER_TIMEZONE
-        )
-        inputs = _planner_inputs(brief, attempt, deps, today or local_today(timezone))
+        request = load_request(deps.repos.messages, brief["chat_id"], brief["request_message_id"])
+        artifacts = available_artifacts(deps.repos.artifacts, brief["chat_id"])
+        timezone = user_timezone(brief["memory"])
         resolved = resolve_context(
-            load_request(
-                deps.repos.messages, brief["chat_id"], brief["request_message_id"]
-            ).content,
-            [],
-            today=today or local_today(timezone),
-            timezone=timezone,
+            request.content, artifacts, today=today or local_today(timezone), timezone=timezone
         )
+        inputs = _planner_inputs(brief, attempt, deps, request, artifacts, resolved)
         output = _plan_or_fail(brief, inputs, deps)
         logger.info("planner returned a %s", output.kind)
         pending = None if output.kind == "plan" else _ask_user(brief, attempt, output, deps)
@@ -146,30 +145,41 @@ def plan_gate(brief: RequestState, planned: PlanResult, deps: WorkerDeps) -> lis
         return [_plan_entry(task) for task in tasks]
 
 
-def local_today(timezone: str = USER_TIMEZONE) -> date:
-    """Today in the user's timezone."""
+def local_today(timezone: str) -> date:
+    """Today in ``timezone``, the user's."""
     return datetime.now(ZoneInfo(timezone)).date()
 
 
+def answer_constraint(question: str, answer: str) -> str | None:
+    """The constraint a clarification answer adds to the brief; None when the answer holds a
+    credential, which never enters the brief or a report (system design section 5)."""
+    if contains_credential(answer):
+        return None
+    return f"User answered '{question}': {answer}"
+
+
+def is_plan_mechanics(constraint: str) -> bool:
+    """True when ``constraint`` is about the plan's format rather than the user's request."""
+    return _PLAN_MECHANICS.search(constraint) is not None
+
+
 def _planner_inputs(
-    brief: RequestState, attempt: int, deps: WorkerDeps, today: date
+    brief: RequestState,
+    attempt: int,
+    deps: WorkerDeps,
+    request: RequestMessage,
+    artifacts: list[Artifact],
+    resolved: ResolvedContext,
 ) -> ContextInputs:
-    """Section 8.2 for the planner: request, sources and prior messages; no tools or facts."""
-    request = load_request(deps.repos.messages, brief["chat_id"], brief["request_message_id"])
-    artifacts = available_artifacts(deps.repos.artifacts, brief["chat_id"])
-    timezone = (
-        brief["memory"]["preferences"].get("timezone", USER_TIMEZONE)
-        if "memory" in brief
-        else USER_TIMEZONE
-    )
-    resolved = resolve_context(request.content, artifacts, today=today, timezone=timezone)
+    """Section 8.2 for the planner: request, sources and prior messages; no tools or facts.
+    The memory snapshot supplies the system prefix (with the user's instructions) and the
+    preferences."""
     return ContextInputs(
-        memory=brief["memory"]["text"] if "memory" in brief else load_prompt("agent-memory"),
+        memory=brief["memory"]["text"],
         stage_prompt=load_prompt(prompt_version(Stage.PLAN)),
         chat_id=brief["chat_id"],
         request=request,
-        # Phase 1 has no User repository; User.instructions arrive in phase 7.
-        preferences=brief["memory"]["preferences"] if "memory" in brief else {},
+        preferences=brief["memory"]["preferences"],
         constraints=_planner_constraints(brief, attempt, resolved),
         facts=[],
         open_questions=[],
@@ -205,7 +215,7 @@ def _context_block(resolved: ResolvedContext) -> str:
 
 
 def _prior_messages(deps: WorkerDeps, request: RequestMessage) -> list[Message]:
-    """The chat's other Messages, oldest first."""
+    """The chat's two newest reports from before ``request``, oldest first."""
     in_chat = deps.repos.messages.list_by_chat(request.chat_id)
     others: list[Message] = [
         m for m in in_chat if isinstance(m, ReportMessage) and m.created_at < request.created_at
@@ -233,6 +243,8 @@ def _plan_with_one_retry(
     except ValidationError as rejected:
         errors = one_line(rejected)
         logger.warning("planner output rejected, retrying once: %s", errors)
+        # ModelCall has no metadata field, so the retry is on record as activity (finding L-3).
+        deps.activity.emit(brief["request_message_id"], "", "Plan was invalid; retry 1 of 1")
         rejection = f"Previous plan was rejected: {errors}"
         retry_inputs = replace(inputs, constraints=[*inputs.constraints, rejection])
     try:
@@ -256,7 +268,7 @@ def _call_planner(brief: RequestState, inputs: ContextInputs, deps: WorkerDeps) 
     )
     response = deps.model_for(
         brief["request_message_id"],
-        memory_version=brief["memory"]["version"] if "memory" in brief else None,
+        memory_version=brief["memory"]["version"],
         created_at=brief.get("created_at"),
     ).invoke(request)
     return PlannerOutput.model_validate(response.structured)

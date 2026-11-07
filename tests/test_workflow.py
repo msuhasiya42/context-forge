@@ -9,7 +9,14 @@ from contextforge.core.models.scripted import ScriptedModel
 from contextforge.core.tools.base import ToolContext
 from contextforge.worker.tools.sql_query import SqlQueryTool
 from contextforge.worker.workflow import build_workflow
-from tests.helpers import make_deps, seed_chat_with_dataset, six_task_plan, t1_result
+from tests.helpers import (
+    clarification,
+    make_deps,
+    run_answering_the_question,
+    seed_chat_with_dataset,
+    six_task_plan,
+    t1_result,
+)
 
 
 def _cfg(req) -> dict:
@@ -365,3 +372,39 @@ def test_scripted_exhaustion_fails_request_with_reason() -> None:
     m = deps.repos.messages.get("c1", req.message_id)
     assert out["status"] == "FAILED" and m.status == "FAILED" and m.failure_reason
     assert any(c.outcome == "ERROR" for c in deps.repos.model_calls.list_by_request(req.message_id))
+
+
+def test_report_constraints_keep_the_users_facts_with_provenance_and_drop_plan_rules() -> None:
+    # Live finding L-2: the planner restated its own output rules as constraints, and the
+    # report carried them into the next request as if the user had stated them.
+    plan = six_task_plan()
+    plan["constraints"] = [
+        "The plan must include 2 to 6 tasks.",
+        "Each task must have a clear goal, kind, and inputArtifactIds.",
+        "Exclude transfers between the user's own accounts from spending.",
+    ]
+    deps = make_deps(
+        ScriptedModel(
+            {
+                "plan": [
+                    ModelResponse(structured=clarification("Which months?")),
+                    ModelResponse(structured=plan),
+                ],
+                "execute": [ModelResponse(structured=t1_result())] * 3,
+            }
+        ),
+        tasks_in_flight=1,
+    )
+    req = seed_chat_with_dataset(deps, chat_id="c1", user_id="u1", dataset_id="a2")
+    status = run_answering_the_question(
+        deps, req, "September and October", answered_at="2026-11-06T09:30:00Z"
+    )
+    assert status == "COMPLETED"
+    report = next(m for m in deps.repos.messages.list_by_chat("c1") if m.kind == "report")
+    kept = {c.text: (c.source, c.date) for c in report.report.constraints}
+    assert kept["User answered 'Which months?': September and October"] == (
+        "clarification",
+        "2026-11-06",
+    )
+    assert kept["Exclude transfers between the user's own accounts from spending."][0] == "request"
+    assert not [text for text in kept if "plan" in text.lower() or "task" in text.lower()]

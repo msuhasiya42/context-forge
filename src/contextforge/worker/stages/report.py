@@ -2,9 +2,12 @@
 
 import logging
 from collections import Counter
+from dataclasses import dataclass
 
 from contextforge.core.entities.message import (
     Claim,
+    ClarificationMessage,
+    ClarificationResponseMessage,
     MessageKind,
     ReportBody,
     ReportConstraint,
@@ -15,17 +18,31 @@ from contextforge.core.entities.message import (
 from contextforge.core.entities.task import TaskStatus
 from contextforge.core.ids import derived_id, now_iso
 from contextforge.core.logging import request_context
+from contextforge.core.services.memory import user_timezone
 from contextforge.core.state import Fact, RequestState
 from contextforge.core.values import ArtifactRef, EvidenceRef
 from contextforge.worker.deps import WorkerDeps
 from contextforge.worker.stages.execute import TaskOutcome
 from contextforge.worker.stages.guards import check_not_cancelled, leave_running
-from contextforge.worker.stages.plan import local_today
+from contextforge.worker.stages.plan import answer_constraint, is_plan_mechanics, local_today
 
 logger = logging.getLogger(__name__)
 
 EVERY_TASK_FAILED = "every task failed"
 NO_CLAIMS = "No finding could be supported with evidence."
+WITHHELD_ANSWER = (
+    "Your answer to '{question}' was not used because it looked like a password, key or token."
+)
+
+
+@dataclass(frozen=True)
+class _Answer:
+    """One clarification answer of the request: its question, the constraint it added (None
+    when withheld as a credential) and the UTC date it was given."""
+
+    question: str
+    constraint: str | None
+    date: str
 
 
 def write_report(brief: RequestState, outcomes: list[TaskOutcome], deps: WorkerDeps) -> str:
@@ -36,7 +53,7 @@ def write_report(brief: RequestState, outcomes: list[TaskOutcome], deps: WorkerD
     """
     with request_context(brief["request_message_id"]):
         check_not_cancelled(deps, brief["chat_id"], brief["request_message_id"])
-        report = _report_message(brief, outcomes)
+        report = _report_message(brief, outcomes, _answers(brief, deps))
         deps.repos.messages.save(report)
         completed = any(o["status"] == TaskStatus.COMPLETED for o in outcomes)
         status = RequestStatus.COMPLETED if completed else RequestStatus.FAILED
@@ -55,10 +72,14 @@ def fail_request(brief: RequestState, reason: str, deps: WorkerDeps) -> None:
         )
 
 
-def _report_message(brief: RequestState, outcomes: list[TaskOutcome]) -> ReportMessage:
+def _report_message(
+    brief: RequestState, outcomes: list[TaskOutcome], answers: list[_Answer]
+) -> ReportMessage:
     request_message_id = brief["request_message_id"]
     report_id = derived_id(f"{request_message_id}:report")
     claims = _claims(report_id, brief["facts"])
+    withheld = [WITHHELD_ANSWER.format(question=a.question) for a in answers if not a.constraint]
+    uncertainties = [*withheld, *_uncertainties(outcomes)]
     now = now_iso()
     return ReportMessage(
         message_id=report_id,
@@ -67,20 +88,44 @@ def _report_message(brief: RequestState, outcomes: list[TaskOutcome]) -> ReportM
         sender=Sender.ASSISTANT,
         kind=MessageKind.REPORT,
         request_message_id=request_message_id,
-        content=_answer_text(claims, _uncertainties(outcomes)),
+        content=_answer_text(claims, uncertainties),
         created_at=now,
         updated_at=now,
         report=ReportBody(
             claims=claims,
             inputs_consulted=_inputs_consulted(claims),
-            uncertainties=_uncertainties(outcomes),
-            constraints=_constraints(brief["constraints"]),
+            uncertainties=uncertainties,
+            constraints=_constraints(brief, answers),
             coverage={
                 **_coverage(outcomes),
                 **({"period": brief["period"]} if brief.get("period") else {}),
             },
         ),
     )
+
+
+def _answers(brief: RequestState, deps: WorkerDeps) -> list[_Answer]:
+    """The request's clarification answers, read back from the chat, oldest first."""
+    in_chat = deps.repos.messages.list_by_chat(brief["chat_id"])
+    questions = {m.message_id: m.content for m in in_chat if isinstance(m, ClarificationMessage)}
+    replies = sorted(
+        (
+            m
+            for m in in_chat
+            if isinstance(m, ClarificationResponseMessage)
+            and m.request_message_id == brief["request_message_id"]
+            and m.in_reply_to_message_id in questions
+        ),
+        key=lambda m: (m.created_at, m.message_id),
+    )
+    return [
+        _Answer(
+            question=questions[m.in_reply_to_message_id],
+            constraint=answer_constraint(questions[m.in_reply_to_message_id], m.content),
+            date=m.created_at[:10],
+        )
+        for m in replies
+    ]
 
 
 def _claims(report_id: str, facts: list[Fact]) -> list[Claim]:
@@ -113,10 +158,22 @@ def _uncertainties(outcomes: list[TaskOutcome]) -> list[str]:
     return list(dict.fromkeys([*reported, *unfinished]))
 
 
-def _constraints(constraints: list[str]) -> list[ReportConstraint]:
-    """The constraints the request ran under, dated so a later request knows when they held."""
-    today = local_today().isoformat()
-    return [ReportConstraint(text=text, source="request", date=today) for text in constraints]
+def _constraints(brief: RequestState, answers: list[_Answer]) -> list[ReportConstraint]:
+    """The constraints the request ran under, dated so a later request knows when they held.
+
+    A clarification answer carries ``source="clarification"`` and the date it was given; the
+    rest are the request's, dated today in the user's timezone. The planner's restatements of
+    its own output rules are dropped, so no later request inherits them as the user's.
+    """
+    answered = {a.constraint: a.date for a in answers if a.constraint}
+    today = local_today(user_timezone(brief["memory"])).isoformat()
+    return [
+        ReportConstraint(text=text, source="clarification", date=answered[text])
+        if text in answered
+        else ReportConstraint(text=text, source="request", date=today)
+        for text in brief["constraints"]
+        if text in answered or not is_plan_mechanics(text)
+    ]
 
 
 def _coverage(outcomes: list[TaskOutcome]) -> dict[str, dict[str, int]]:

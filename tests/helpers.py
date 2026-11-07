@@ -1,22 +1,36 @@
-"""Builders shared by the worker tests: dependencies, a seeded chat, an empty brief, a plan."""
+"""Builders shared by the worker tests: dependencies, a seeded chat, an empty brief, a plan,
+and a run that answers the planner's one question."""
 
 import dataclasses
 from pathlib import Path
 from typing import Any
 
+from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.types import Command
+
 from contextforge.core.context.budgets import Budgets, load_budgets
 from contextforge.core.entities.artifact import Artifact, ArtifactKind, ArtifactStatus, IndexStatus
 from contextforge.core.entities.chat import Chat, ChatStatus
-from contextforge.core.entities.message import MessageKind, RequestMessage, RequestStatus, Sender
+from contextforge.core.entities.message import (
+    ClarificationResponseMessage,
+    MessageKind,
+    RequestMessage,
+    RequestStatus,
+    Sender,
+)
 from contextforge.core.ids import new_ulid, now_iso
 from contextforge.core.models.base import ModelClient
 from contextforge.core.models.config import load_models_config
 from contextforge.core.queue import InProcessQueue
 from contextforge.core.repositories.memory import Repositories
+from contextforge.core.services.memory import memory_snapshot
+from contextforge.core.settings import Settings
+from contextforge.core.state import RequestState
 from contextforge.core.storage import MemoryBlobStore, dataset_key
-from contextforge.worker.brief import initial_brief as initial_brief
+from contextforge.worker import brief
 from contextforge.worker.deps import WorkerDeps
 from contextforge.worker.tools.sql_query import SqlQueryTool
+from contextforge.worker.workflow import build_workflow
 
 # Resolved from this file, not the CWD, so the helpers work wherever pytest is launched.
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -25,10 +39,15 @@ FIXTURE_REQUEST = REPO_ROOT / "fixtures" / "request.txt"
 
 
 def make_deps(
-    model: ModelClient, *, call_budget: int | None = None, tasks_in_flight: int | None = None
+    model: ModelClient,
+    *,
+    call_budget: int | None = None,
+    tasks_in_flight: int | None = None,
+    settings: Settings | None = None,
 ) -> WorkerDeps:
     """In-memory WorkerDeps over ``model``, with the configured budgets and per-stage models,
-    and the real ``sql_query`` tool over the same repositories and blob store."""
+    and the real ``sql_query`` tool over the same repositories and blob store. ``settings``
+    turns on the production call path: spend reservation, call admission and the deadline."""
     models = load_models_config(REPO_ROOT / "config" / "models.yaml")
     repos = Repositories.in_memory()
     blobs = MemoryBlobStore()
@@ -42,7 +61,14 @@ def make_deps(
         price_version=models.price_version,
         planner_model=models.stages["plan"].model,
         executor_model=models.stages["execute"].model,
+        settings=settings,
     )
+
+
+def initial_brief(request: RequestMessage) -> RequestState:
+    """The brief a run starts from, with the memory snapshot of a user who has set no
+    instructions or preferences: the snapshot every stage requires."""
+    return {**brief.initial_brief(request), "memory": memory_snapshot(None)}
 
 
 def _budgets(**overrides: int | None) -> Budgets:
@@ -137,6 +163,35 @@ def clarification(question: str) -> dict[str, Any]:
         "question": question,
         "nextAction": "wait for the answer",
     }
+
+
+def run_answering_the_question(
+    deps: WorkerDeps, request: RequestMessage, answer: str, *, answered_at: str
+) -> str:
+    """Run ``request`` until the planner asks, answer the pending question as the API does
+    (save the answer, claim the request) at ``answered_at``, and run on; the final status."""
+    workflow = build_workflow(deps, InMemorySaver())
+    thread = {"configurable": {"thread_id": request.message_id}}
+    messages = deps.repos.messages
+    messages.update_request_status(request.chat_id, request.message_id, "ACCEPTED", "RUNNING")
+    workflow.invoke({"chat_id": request.chat_id, "message_id": request.message_id}, thread)
+    question = messages.pending_for_request(request.chat_id, request.message_id)[0]
+    reply = ClarificationResponseMessage(
+        message_id=new_ulid(),
+        chat_id=request.chat_id,
+        user_id=request.user_id,
+        sender=Sender.USER,
+        kind=MessageKind.CLARIFICATION_RESPONSE,
+        content=answer,
+        request_message_id=request.message_id,
+        in_reply_to_message_id=question.message_id,
+        created_at=answered_at,
+        updated_at=answered_at,
+    )
+    messages.save(reply)
+    messages.update_request_status(request.chat_id, request.message_id, "WAITING_USER", "RUNNING")
+    resume = Command(resume={"message_id": reply.message_id, "content": answer})
+    return str(workflow.invoke(resume, thread)["status"])
 
 
 def _planned(
