@@ -1,0 +1,61 @@
+row_id,txn_date,amount,direction,merchant,account_id,category,description
+1,2026-09-01,649.00,DEBIT,Netflix,ACC-CARD-HDFC,subscriptions,Netflix monthly plan
+2,2026-09-01,119.00,DEBIT,Spotify,ACC-CARD-HDFC,subscriptions,Spotify Premium individual
+3,2026-09-01,1180.00,DEBIT,ACT Fibernet,ACC-CUR-2,utilities,Broadband bill September
+4,2026-09-01,1834.50,DEBIT,BigBasket,ACC-CARD-ICICI,groceries,Monthly groceries
+5,2026-09-02,2140.00,DEBIT,BESCOM,ACC-CUR-2,utilities,Electricity bill August
+6,2026-09-02,286.00,DEBIT,Uber,ACC-CARD-HDFC,transport,Cab to office
+7,2026-09-02,412.00,DEBIT,Swiggy,ACC-CARD-HDFC,dining,Dinner delivery
+8,2026-09-02,599.00,DEBIT,Airtel,ACC-SAV-1,utilities,Postpaid mobile bill autopay
+9,2026-09-03,1499.00,DEBIT,Amazon,ACC-CARD-ICICI,shopping,Kitchen storage set
+10,2026-09-03,345.00,DEBIT,Starbucks,ACC-CUR-2,dining,Coffee
+11,2026-09-03,2500.00,DEBIT,Indian Oil,ACC-CUR-2,transport,Fuel
+12,2026-09-03,25000.00,DEBIT,Self transfer,ACC-SAV-1,transfer,Transfer to current
+13,2026-09-04,25000.00,CREDIT,Self transfer,ACC-CUR-2,transfer,Transfer from savings
+14,2026-09-05,1265.75,DEBIT,DMart,ACC-CUR-2,groceries,Groceries
+15,2026-09-06,1393.00,DEBIT,Truffles,ACC-CARD-HDFC,dining,Lunch
+16,2026-09-07,238.00,DEBIT,Ola,ACC-CARD-ICICI,transport,Cab ride
+17,2026-09-08,1642.30,DEBIT,BigBasket,ACC-CARD-ICICI,groceries,Fruits and vegetables
+18,2026-09-10,1899.00,DEBIT,Myntra,ACC-CARD-ICICI,shopping,Clothing
+19,2026-09-11,520.00,DEBIT,Zomato,ACC-CARD-ICICI,dining,Dinner delivery
+20,2026-09-12,310.00,DEBIT,Uber,ACC-CARD-HDFC,transport,Cab ride
+21,2026-09-14,1388.40,DEBIT,DMart,ACC-SAV-1,groceries,Groceries
+22,2026-09-15,499.00,DEBIT,Swiggy,ACC-CARD-ICICI,dining,Lunch delivery
+23,2026-09-16,2800.00,DEBIT,Indian Oil,ACC-CARD-ICICI,transport,Fuel
+24,2026-09-18,2999.00,DEBIT,Decathlon,ACC-CARD-ICICI,shopping,Running shoes
+25,2026-09-19,1710.60,DEBIT,BigBasket,ACC-CARD-ICICI,groceries,Monthly top-up
+26,2026-09-20,875.00,DEBIT,Toit,ACC-CARD-HDFC,dining,Dinner
+27,2026-09-22,268.00,DEBIT,Uber,ACC-CARD-HDFC,transport,Cab ride
+28,2026-09-24,1199.00,DEBIT,Amazon,ACC-CARD-ICICI,shopping,Phone case and charger
+29,2026-09-25,1302.80,DEBIT,DMart,ACC-CUR-2,groceries,Groceries
+30,2026-09-26,455.00,DEBIT,Zomato,ACC-CARD-ICICI,dining,Dinner delivery
+31,2026-09-29,1524.90,DEBIT,BigBasket,ACC-CARD-ICICI,groceries,Weekly groceries
+32,2026-10-01,799.00,DEBIT,Netflix,ACC-CARD-HDFC,subscriptions,Netflix monthly plan
+33,2026-10-01,119.00,DEBIT,Spotify,ACC-CARD-HDFC,subscriptions,Spotify Premium individual
+34,2026-10-01,119.00,DEBIT,Spotify,ACC-CARD-ICICI,subscriptions,Spotify Premium individual
+35,2026-10-01,1180.00,DEBIT,ACT Fibernet,ACC-CUR-2,utilities,Broadband bill October
+36,2026-10-01,2615.40,DEBIT,BigBasket,ACC-CARD-ICICI,groceries,Monthly groceries
+37,2026-10-02,2265.00,DEBIT,BESCOM,ACC-CUR-2,utilities,Electricity bill September
+38,2026-10-02,599.00,DEBIT,Airtel,ACC-SAV-1,utilities,Postpaid mobile bill autopay
+39,2026-10-02,298.00,DEBIT,Uber,ACC-CARD-HDFC,transport,Cab to office
+40,2026-10-02,15000.00,DEBIT,Self transfer,ACC-SAV-1,transfer,Transfer to current
+41,2026-10-02,15000.00,CREDIT,Self transfer,ACC-CUR-2,transfer,Transfer from savings
+42,2026-10-03,2650.00,DEBIT,Indian Oil,ACC-CUR-2,transport,Fuel
+43,2026-10-03,1480.00,DEBIT,Toit,ACC-CARD-HDFC,dining,Dinner with friends
+44,2026-10-04,562.00,DEBIT,Swiggy,ACC-CARD-ICICI,dining,Dinner delivery
+45,2026-10-05,2687.60,DEBIT,DMart,ACC-CUR-2,groceries,Groceries
+46,2026-10-06,4299.00,DEBIT,Amazon,ACC-CARD-ICICI,shopping,Festival sale order
+47,2026-10-07,410.00,DEBIT,Starbucks,ACC-CUR-2,dining,Coffee
+48,2026-10-08,2180.00,DEBIT,Byg Brewski,ACC-CARD-HDFC,dining,Birthday dinner
+49,2026-10-09,324.00,DEBIT,Uber,ACC-CARD-HDFC,transport,Cab ride
+50,2026-10-09,4312.00,DEBIT,HDFC Bank,ACC-CUR-2,card_payment,HDFC card bill payment
+51,2026-10-09,4312.00,CREDIT,HDFC Bank,ACC-CARD-HDFC,card_payment,Payment received
+52,2026-10-11,1175.00,DEBIT,Truffles,ACC-CARD-HDFC,dining,Lunch
+53,2026-10-13,2524.70,DEBIT,BigBasket,ACC-CARD-ICICI,groceries,Weekly groceries
+54,2026-10-15,610.00,DEBIT,Zomato,ACC-CARD-ICICI,dining,Dinner delivery
+55,2026-10-17,2890.00,DEBIT,Indian Oil,ACC-CARD-ICICI,transport,Fuel
+56,2026-10-18,2240.00,DEBIT,Karavalli,ACC-CARD-HDFC,dining,Anniversary dinner
+57,2026-10-21,2799.00,DEBIT,Myntra,ACC-CARD-ICICI,shopping,Festive clothing
+58,2026-10-24,1320.00,DEBIT,Toit,ACC-CARD-HDFC,dining,Dinner with team
+59,2026-10-27,2456.30,DEBIT,DMart,ACC-SAV-1,groceries,Groceries
+60,2026-10-30,545.00,DEBIT,Swiggy,ACC-CARD-ICICI,dining,Dinner delivery
