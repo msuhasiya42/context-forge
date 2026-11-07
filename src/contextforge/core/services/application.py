@@ -3,6 +3,7 @@ stream's view of a request and paging. Routes stay thin; every rule here runs wi
 
 import base64
 import json
+import logging
 import threading
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -11,6 +12,7 @@ from typing import Any, Protocol
 from pydantic import ValidationError
 
 from contextforge.core.activity import ActivityBus
+from contextforge.core.entities import wire
 from contextforge.core.entities.artifact import Artifact, ArtifactKind, ArtifactStatus
 from contextforge.core.entities.chat import Chat, ChatStatus
 from contextforge.core.entities.message import (
@@ -22,8 +24,10 @@ from contextforge.core.entities.message import (
     RequestStatus,
     Sender,
 )
+from contextforge.core.entities.model_call import ModelCall
 from contextforge.core.entities.user import User
 from contextforge.core.ids import new_ulid, now_iso
+from contextforge.core.models.transcript import Transcript
 from contextforge.core.queue import Queue, WorkMessage
 from contextforge.core.repositories.base import StaleStatusError
 from contextforge.core.repositories.memory import Repositories
@@ -33,6 +37,7 @@ from contextforge.core.services.memory import (
     merged_preferences,
 )
 from contextforge.core.services.submit import submit_request
+from contextforge.core.services.trace import TraceRecords, build_trace
 from contextforge.core.storage import BlobStore
 
 TERMINAL = {RequestStatus.COMPLETED, RequestStatus.FAILED, RequestStatus.CANCELLED}
@@ -40,6 +45,8 @@ TERMINAL = {RequestStatus.COMPLETED, RequestStatus.FAILED, RequestStatus.CANCELL
 READABLE_KINDS = {ArtifactKind.DELIVERABLE, ArtifactKind.RAW_RESULT}
 TITLE_CHARS = 60
 NOT_PENDING = "This request is not waiting for an answer to that message."
+
+logger = logging.getLogger(__name__)
 
 
 class ServiceDeps(Protocol):
@@ -224,23 +231,86 @@ class Application:
     def detail(self, chat_id: str, message_id: str) -> dict[str, Any]:
         request = self.request(chat_id, message_id)
         calls = self.deps.repos.model_calls.list_by_request(message_id)
-        usage = self.deps.repos.model_calls.sum_usage(message_id)
         return {
             "request": wire(request),
             "tasks": [wire(t) for t in self.deps.repos.tasks.list_by_request(message_id)],
-            "usage": {
-                **(wire(usage) if usage else {}),
-                "modelCalls": len(calls),
-                "estimatedCostUsd": sum(c.estimated_cost_usd or 0 for c in calls),
-                "usageComplete": all(c.usage is not None for c in calls),
-                "costBasis": (
-                    "each finished call priced from its token usage at config/models.yaml "
-                    "prices; a call with unknown usage counts at the per-call reserve; calls "
-                    "in flight are not shown (the spend cap holds the reserve for them); not "
-                    "verified billing"
-                ),
-            },
+            "usage": self._usage(message_id, calls),
         }
+
+    def _usage(self, message_id: str, calls: list[ModelCall]) -> dict[str, Any]:
+        """The request's summed usage and estimated cost over its recorded ``calls``."""
+        usage = self.deps.repos.model_calls.sum_usage(message_id)
+        return {
+            **(wire(usage) if usage else {}),
+            "modelCalls": len(calls),
+            "estimatedCostUsd": sum(c.estimated_cost_usd or 0 for c in calls),
+            "usageComplete": all(c.usage is not None for c in calls),
+            "costBasis": (
+                "each finished call priced from its token usage at config/models.yaml "
+                "prices; a call with unknown usage counts at the per-call reserve; calls "
+                "in flight are not shown (the spend cap holds the reserve for them); not "
+                "verified billing"
+            ),
+        }
+
+    def trace(self, chat_id: str, message_id: str) -> dict[str, Any]:
+        """The Deep Dive of one request (``core.services.trace``): what the planner was asked
+        and answered, the tasks it created, each task's model and tool calls, and the report.
+
+        Only task calls' transcripts are read, to derive their tool calls; the client fetches
+        a transcript itself when it shows one.
+        """
+        request = self.request(chat_id, message_id)
+        calls = sorted(
+            self.deps.repos.model_calls.list_by_request(message_id),
+            key=lambda c: (c.started_at, c.model_call_id),
+        )
+        transcripts = {
+            c.model_call_id: record
+            for c in calls
+            if c.task_id is not None and (record := self._stored_transcript(c)) is not None
+        }
+        entries = [
+            m
+            for m in self.deps.repos.messages.list_by_chat(chat_id)
+            if getattr(m, "request_message_id", None) == message_id
+        ]
+        return build_trace(
+            TraceRecords(
+                request=request,
+                usage=self._usage(message_id, calls),
+                tasks=self.deps.repos.tasks.list_by_request(message_id),
+                calls=calls,
+                entries=entries,
+                transcripts=transcripts,
+            )
+        )
+
+    def transcript(self, chat_id: str, message_id: str, model_call_id: str) -> bytes:
+        """The stored transcript JSON of one ModelCall of this user's request; 404 when the
+        call is not the request's, recorded none, or its blob is gone."""
+        self.request(chat_id, message_id)
+        call = self.deps.repos.model_calls.get(message_id, model_call_id)
+        if call is None or call.transcript_ref is None:
+            raise ServiceError(404, "not_found", "No transcript was recorded for that call.")
+        try:
+            return self.deps.blobs.get(call.transcript_ref)
+        except LookupError as gone:
+            raise ServiceError(404, "not_found", "That transcript is no longer stored.") from gone
+
+    def _stored_transcript(self, call: ModelCall) -> Transcript | None:
+        """The call's transcript, or None when none was recorded or it cannot be read; the
+        trace then shows the call without its tool calls."""
+        if call.transcript_ref is None:
+            return None
+        try:
+            record: Transcript = json.loads(self.deps.blobs.get(call.transcript_ref))
+        except (LookupError, ValueError):
+            logger.warning(
+                "transcript of model call %s could not be read", call.model_call_id, exc_info=True
+            )
+            return None
+        return record
 
     def request_view(self, chat_id: str, message_id: str) -> RequestView:
         """The request, its Tasks and its assistant Messages as the event stream shows them.
@@ -377,10 +447,6 @@ def title_from(content: str) -> str:
     if len(text) <= TITLE_CHARS:
         return text
     return text[: TITLE_CHARS - 1].rstrip() + "…"
-
-
-def wire(value: Any) -> dict[str, Any]:
-    return dict(value.model_dump(mode="json", by_alias=True))
 
 
 def page(

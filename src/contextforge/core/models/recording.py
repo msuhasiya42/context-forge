@@ -6,9 +6,10 @@ from collections.abc import Mapping
 
 from contextforge.core.context.prompts import prompt_version
 from contextforge.core.entities.model_call import ModelCall, Outcome
-from contextforge.core.ids import new_ulid, now_iso
+from contextforge.core.ids import new_ulid, now_iso_ms
 from contextforge.core.models.base import ModelClient, ModelRequest, ModelResponse, ToolSpec
 from contextforge.core.models.errors import ModelError, ModelTimeout, ModelUnreachable
+from contextforge.core.models.transcript import TranscriptWriter, transcript
 from contextforge.core.repositories.base import ModelCallRepository
 from contextforge.core.values import Usage
 
@@ -68,7 +69,8 @@ class RecordingModelClient:
     recomputed later; a call whose usage is unknown (a timeout, an error) or whose model has no
     price is charged ``unknown_cost_usd``, since unknown is never zero. A call that never
     reached the provider (``ModelUnreachable``) used no tokens, so it is charged nothing.
-    ``model`` is recorded as ``<provider>/<model id>`` (spec 3.5).
+    ``model`` is recorded as ``<provider>/<model id>`` (spec 3.5). With ``transcripts``, each
+    record also gets its call's transcript (the exact request and the response or error).
     """
 
     def __init__(
@@ -82,6 +84,7 @@ class RecordingModelClient:
         prices: PriceTable | None = None,
         unknown_cost_usd: float | None = None,
         provider: str = "bedrock",
+        transcripts: TranscriptWriter | None = None,
     ) -> None:
         self._inner = inner
         self._model_calls = model_calls
@@ -91,12 +94,13 @@ class RecordingModelClient:
         self._prices: PriceTable = prices or {}
         self._unknown_cost_usd = unknown_cost_usd
         self._provider = provider
+        self._transcripts = transcripts
 
     def invoke(self, request: ModelRequest) -> ModelResponse:
         # Id and start time are taken before the call so records sort by when calls began.
         request = request.model_copy(update={"request_message_id": self._request_message_id})
         model_call_id = new_ulid()
-        started_at = now_iso()
+        started_at = now_iso_ms()
         try:
             response = self._inner.invoke(request)
         except Exception as exc:
@@ -138,15 +142,18 @@ class RecordingModelClient:
         failure_reason: str | None = None,
         langsmith_run_id: str | None = None,
     ) -> ModelCall:
+        # Taken first, so the latency never includes the transcript write.
+        ended_at = None if outcome == Outcome.TIMEOUT else now_iso_ms()
         context_version = f"mem:{self._memory_version}|prompt:{prompt_version(request.stage)}"
         # A call never sent costs nothing, whether or not its model has a price.
         cost = 0.0 if usage is _NOT_SENT else cost_usd(self._prices, request.model, usage)
+        model = f"{self._provider}/{request.model}"
         return ModelCall(
             model_call_id=model_call_id,
             request_message_id=self._request_message_id,
             task_id=request.task_id,
             stage=request.stage,
-            model=f"{self._provider}/{request.model}",
+            model=model,
             context_version=context_version,
             usage=usage,
             price_version=self._price_version,
@@ -154,8 +161,26 @@ class RecordingModelClient:
             stop_reason=response.stop_reason if response is not None else None,
             tool_set_hash=tool_set_hash(request.tools),
             langsmith_run_id=langsmith_run_id,
+            transcript_ref=self._transcript(
+                request, model_call_id, model, response=response, error=failure_reason
+            ),
             outcome=outcome,
             failure_reason=failure_reason,
             started_at=started_at,
-            ended_at=None if outcome == Outcome.TIMEOUT else now_iso(),
+            ended_at=ended_at,
         )
+
+    def _transcript(
+        self,
+        request: ModelRequest,
+        model_call_id: str,
+        model: str,
+        *,
+        response: ModelResponse | None,
+        error: str | None,
+    ) -> str | None:
+        """Store the call's transcript; its ref, or None when transcripts are off."""
+        if self._transcripts is None:
+            return None
+        record = transcript(request, model, response=response, error=error)
+        return self._transcripts.write(self._request_message_id, model_call_id, record)

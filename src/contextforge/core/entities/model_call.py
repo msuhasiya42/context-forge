@@ -47,5 +47,9 @@ class ModelCall(Entity):
     outcome: Outcome
     failure_reason: str | None = None
     langsmith_run_id: str | None = None
+    # Storage ref of the call's transcript (the exact prompt and answer, core/models/transcript);
+    # None when transcripts are off (CONTEXTFORGE_RECORD_TRANSCRIPTS) or it could not be stored.
+    transcript_ref: str | None = None
+    # Millisecond precision, so the latency of a call is measured, not rounded to seconds.
     started_at: str
     ended_at: str | None = None

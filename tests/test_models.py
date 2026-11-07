@@ -1,8 +1,10 @@
 # tests/test_models.py
+import json
 import threading
 import time
 
 import pytest
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from contextforge.core.context.prompts import load_prompt, prompt_version
 from contextforge.core.entities.model_call import Stage
@@ -11,8 +13,10 @@ from contextforge.core.models.config import load_models_config
 from contextforge.core.models.errors import ModelError, ModelTimeout
 from contextforge.core.models.recording import RecordingModelClient
 from contextforge.core.models.scripted import ScriptedModel, ScriptExhausted
+from contextforge.core.models.transcript import TranscriptWriter
 from contextforge.core.repositories.memory import Repositories
 from contextforge.core.settings import Settings
+from contextforge.core.storage import MemoryBlobStore
 from contextforge.core.values import Usage
 from contextforge.worker.deps import WorkerDeps
 from tests.helpers import make_deps
@@ -94,6 +98,73 @@ def test_recording_client_records_price_stop_reason_and_order_free_tool_set_hash
     assert all(c.task_id == "t1" and c.usage == reply.usage for c in calls)
     assert calls[0].tool_set_hash is not None
     assert calls[0].tool_set_hash == calls[1].tool_set_hash
+
+
+def test_a_transcript_is_stored_per_call_redacted_and_never_fails_the_call() -> None:
+    """F6: the exact request and the answer (or error) beside each ModelCall, known secrets
+    redacted; a store that fails leaves the call recorded without a transcript."""
+    repos, blobs = Repositories.in_memory(), MemoryBlobStore()
+    asked = AIMessage("", tool_calls=[{"id": "x1", "name": "web_search", "args": {"q": "k"}}])
+    result = ToolMessage(
+        "page text with KEY-123",
+        tool_call_id="x1",
+        additional_kwargs={"status": "ok", "row_count": 0, "artifact_id": "a9"},
+        response_metadata={"headers": {"x-api-key": "KEY-123"}},
+    )
+    request = ModelRequest(
+        stage="execute",
+        model="scripted",
+        system=["memory"],
+        messages=[HumanMessage("brief"), asked, result],
+        tools=[ToolSpec(name="web_search", description="Search", input_schema={"type": "object"})],
+        task_id="t1",
+    )
+
+    class FailingBlobs(MemoryBlobStore):
+        def put(self, key: str, data: bytes) -> str:
+            raise OSError("bucket unreachable")
+
+    def recorder(model: ModelClient, store: MemoryBlobStore) -> RecordingModelClient:
+        writer = TranscriptWriter(store, secrets=["KEY-123", ""])
+        return RecordingModelClient(
+            model,
+            repos.model_calls,
+            request_message_id="m1",
+            memory_version="1",
+            price_version="p",
+            transcripts=writer,
+        )
+
+    answer = ModelResponse(text="done", usage=Usage(input_tokens=5, output_tokens=1))
+    recorder(ScriptedModel({"execute": [answer]}), blobs).invoke(request)
+    with pytest.raises(ScriptExhausted):
+        recorder(ScriptedModel({}), blobs).invoke(request)
+    assert recorder(ScriptedModel({"execute": [answer]}), FailingBlobs()).invoke(request) == answer
+    answered, failed, unstored = repos.model_calls.list_by_request("m1")
+    stored = json.loads(blobs.get(answered.transcript_ref))
+    assert answered.transcript_ref == f"mem://transcripts/m1/{answered.model_call_id}.json"
+    assert stored["request"]["messages"] == [
+        {"role": "user", "content": "brief"},
+        {
+            "role": "assistant",
+            "content": "",
+            "toolCalls": [{"id": "x1", "name": "web_search", "arguments": {"q": "k"}}],
+        },
+        {
+            "role": "tool",
+            "content": "page text with [redacted]",
+            "toolCallId": "x1",
+            "status": "ok",
+            "rowCount": 0,
+            "artifactId": "a9",
+        },
+    ]
+    assert stored["request"]["system"] == ["memory"] and stored["request"]["taskId"] == "t1"
+    assert stored["response"]["text"] == "done" and stored["error"] is None
+    assert "KEY-123" not in blobs.get(answered.transcript_ref).decode()
+    errored = json.loads(blobs.get(failed.transcript_ref))
+    assert errored["response"] is None and "no scripted response" in errored["error"]
+    assert unstored.outcome == "COMPLETED" and unstored.transcript_ref is None
 
 
 def test_models_config_loads_price_version_and_stages() -> None:

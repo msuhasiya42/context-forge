@@ -175,6 +175,11 @@ class InMemoryModelCalls:
         with self._lock:
             self._calls[call.model_call_id] = call
 
+    def get(self, request_message_id: str, model_call_id: str) -> ModelCall | None:
+        with self._lock:
+            call = self._calls.get(model_call_id)
+        return call if call is not None and call.request_message_id == request_message_id else None
+
     def list_by_request(self, request_message_id: str) -> list[ModelCall]:
         with self._lock:
             return sorted(

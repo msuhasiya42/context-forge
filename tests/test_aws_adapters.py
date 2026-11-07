@@ -302,6 +302,39 @@ def test_floats_round_trip_through_dynamodb_numbers(db, store) -> None:
     assert amount == 25000.0 and not isinstance(amount, Decimal)
 
 
+def test_a_model_call_keeps_its_transcript_ref_and_is_read_back_by_id(db, store) -> None:
+    call = ModelCall.model_validate(
+        {
+            "modelCallId": "k1",
+            "requestMessageId": "m1",
+            "stage": "execute",
+            "model": "bedrock/amazon.nova-lite-v1:0",
+            "contextVersion": "mem:1|prompt:execute.5",
+            "usage": None,
+            "priceVersion": "2026-11-07",
+            "transcriptRef": "s3://test-bucket/transcripts/m1/k1.json",
+            "outcome": "COMPLETED",
+            "startedAt": "2026-11-07T10:00:00.120Z",
+        }
+    )
+    call_item = item(store, "REQ#m1", "CALL#k1", call)
+    assert call_item["transcriptRef"] == {"S": "s3://test-bucket/transcripts/m1/k1.json"}
+    # A record written before transcripts existed has no attribute, and reads as None.
+    older = {k: v for k, v in call_item.items() if k != "transcriptRef"}
+    get = {"TableName": TABLE, "Key": key("REQ#m1", "CALL#k1"), "ConsistentRead": True}
+    with Stubber(db) as stub:
+        stub.add_response("put_item", {}, {"TableName": TABLE, "Item": call_item})
+        stub.add_response("get_item", {"Item": call_item}, get)
+        stub.add_response("get_item", {"Item": older}, get)
+        stub.add_response("get_item", {}, {**get, "Key": key("REQ#m1", "CALL#none")})
+        calls = DynamoCalls(store)
+        calls.save(call)
+        assert calls.get("m1", "k1") == call
+        assert calls.get("m1", "k1").transcript_ref is None
+        assert calls.get("m1", "none") is None
+        stub.assert_no_pending_responses()
+
+
 def test_pending_for_request_reads_every_page_of_the_chat(db, store) -> None:
     answered, still_open = clarification("m2"), clarification("m3")
     reply = ClarificationResponseMessage.model_validate(

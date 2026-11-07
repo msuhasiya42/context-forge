@@ -24,3 +24,11 @@ def derived_id(key: str) -> str:
 def now_iso() -> str:
     """Return the current UTC time as ISO 8601 with second precision and a ``Z`` suffix."""
     return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def now_iso_ms() -> str:
+    """Return the current UTC time as ISO 8601 with millisecond precision and a ``Z`` suffix.
+
+    For a ModelCall's start and end, so its latency is measured, not rounded to whole seconds.
+    """
+    return datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")

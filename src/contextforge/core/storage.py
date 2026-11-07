@@ -21,6 +21,12 @@ def raw_result_key(chat_id: str, artifact_id: str) -> str:
     return f"raw_result/{chat_id}/{artifact_id}.jsonl"
 
 
+def transcript_key(request_message_id: str, model_call_id: str) -> str:
+    """Blob key of one ModelCall's transcript (the prompt it sent and the answer it got), under
+    its request as the ModelCall itself is (``REQ#<id>`` / ``CALL#<id>``)."""
+    return f"transcripts/{request_message_id}/{model_call_id}.json"
+
+
 class BlobStore(Protocol):
     def put(self, key: str, data: bytes) -> str:
         """Store ``data`` under ``key`` (overwriting) and return its ``storage_ref``."""
