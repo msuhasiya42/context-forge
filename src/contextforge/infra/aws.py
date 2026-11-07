@@ -11,6 +11,7 @@ import json
 import time
 from dataclasses import asdict
 from decimal import Decimal
+from pathlib import PurePosixPath
 from typing import Any
 
 from boto3.dynamodb.types import TypeDeserializer, TypeSerializer  # type: ignore[import-untyped]
@@ -434,19 +435,31 @@ def dynamo_repositories(client: Any, table: str) -> Repositories:
     )
 
 
+# Content types of the blob keys core/storage.py builds.
+_CONTENT_TYPES = {".csv": "text/csv", ".json": "application/json", ".jsonl": "application/x-ndjson"}
+
+
 class S3Blobs:
     def __init__(self, client: Any, bucket: str) -> None:
         self.client, self.bucket = client, bucket
 
     def put(self, key: str, data: bytes) -> str:
-        self.client.put_object(Bucket=self.bucket, Key=key, Body=data)
+        content_type = _CONTENT_TYPES.get(PurePosixPath(key).suffix, "application/octet-stream")
+        self.client.put_object(Bucket=self.bucket, Key=key, Body=data, ContentType=content_type)
         return f"s3://{self.bucket}/{key}"
 
     def get(self, ref: str) -> bytes:
         prefix = f"s3://{self.bucket}/"
         if not ref.startswith(prefix):
             raise ValueError("Artifact does not belong to the configured bucket.")
-        body = self.client.get_object(Bucket=self.bucket, Key=ref[len(prefix) :])["Body"]
+        try:
+            response = self.client.get_object(Bucket=self.bucket, Key=ref[len(prefix) :])
+        except ClientError as exc:
+            # A raw_result blob expires under the bucket's 30-day lifecycle rule.
+            if _error_code(exc) == "NoSuchKey":
+                raise LookupError(f"no blob stored at {ref!r}") from exc
+            raise
+        body = response["Body"]
         try:
             return bytes(body.read())
         finally:

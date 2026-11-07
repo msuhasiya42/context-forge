@@ -408,20 +408,47 @@ def test_plan_is_saved_in_one_dynamodb_transaction(db, store) -> None:
         stub.assert_no_pending_responses()
 
 
-def test_s3_bytes_and_sqs_receipt_round_trip():
+# S3
+
+
+def test_s3_put_names_the_content_type_and_get_returns_the_bytes() -> None:
     s3 = client("s3")
-    blobs = S3Blobs(s3, "test-bucket")
+    blobs = S3Blobs(s3, BUCKET)
+    key_name = "raw_result/c1/a1.jsonl"
     with Stubber(s3) as stub:
         stub.add_response(
-            "put_object", {}, {"Bucket": "test-bucket", "Key": "raw_result/c1/a1", "Body": b"hello"}
+            "put_object",
+            {},
+            {
+                "Bucket": BUCKET,
+                "Key": key_name,
+                "Body": b"hello",
+                "ContentType": "application/x-ndjson",
+            },
         )
         stub.add_response(
-            "get_object",
-            {"Body": BytesIO(b"hello")},
-            {"Bucket": "test-bucket", "Key": "raw_result/c1/a1"},
+            "get_object", {"Body": BytesIO(b"hello")}, {"Bucket": BUCKET, "Key": key_name}
         )
-        assert blobs.put("raw_result/c1/a1", b"hello") == "s3://test-bucket/raw_result/c1/a1"
-        assert blobs.get("s3://test-bucket/raw_result/c1/a1") == b"hello"
+        ref = blobs.put(key_name, b"hello")
+        assert ref == f"s3://{BUCKET}/{key_name}"
+        assert blobs.get(ref) == b"hello"
+
+
+def test_s3_missing_key_is_lookup_error_like_the_memory_store() -> None:
+    s3 = client("s3")
+    with Stubber(s3) as stub:
+        # A raw_result blob past the bucket's 30-day lifecycle rule.
+        stub.add_client_error(
+            "get_object",
+            service_error_code="NoSuchKey",
+            http_status_code=404,
+            expected_params={"Bucket": BUCKET, "Key": "raw_result/c1/gone.jsonl"},
+        )
+        with pytest.raises(LookupError):
+            S3Blobs(s3, BUCKET).get(f"s3://{BUCKET}/raw_result/c1/gone.jsonl")
+
+
+def test_sqs_receipt_round_trip():
     sqs = client("sqs")
     queue = SqsQueue(sqs, "https://sqs.ap-southeast-2.amazonaws.com/123/work")
     with Stubber(sqs) as stub:
