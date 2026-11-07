@@ -1,5 +1,6 @@
 """The dependency bundle every worker stage receives: storage, the model, limits and tools."""
 
+import math
 import threading
 import time
 from dataclasses import dataclass, field
@@ -9,7 +10,7 @@ from contextforge.core.activity import ActivityBus
 from contextforge.core.context.budgets import Budgets
 from contextforge.core.context.prompts import MEMORY_VERSION
 from contextforge.core.models.base import ModelClient
-from contextforge.core.models.recording import RecordingModelClient
+from contextforge.core.models.recording import PriceTable, RecordingModelClient
 from contextforge.core.queue import Queue
 from contextforge.core.repositories.memory import Repositories
 from contextforge.core.settings import Settings
@@ -33,6 +34,10 @@ class WorkerDeps:
     price_version: str
     planner_model: str = "scripted"
     executor_model: str = "scripted"
+    # config/models.yaml prices; each ModelCall's cost is computed from its usage with them.
+    prices: PriceTable = field(default_factory=dict)
+    # Prefix of ModelCall.model (spec 3.5): every real model of this project is on Bedrock.
+    model_provider: str = "bedrock"
     # Caps the tasks executing at once across the worker at ``budgets.tasks_in_flight``.
     semaphore: threading.BoundedSemaphore = field(init=False)
     settings: Settings | None = None
@@ -50,33 +55,40 @@ class WorkerDeps:
         memory_version: str | None = None,
         created_at: str | None = None,
     ) -> ModelClient:
-        """The model client for one request: each call it makes is saved as a ModelCall."""
+        """The model client for one request. Every attempt is admitted against the request's call
+        budget (with settings, also its spend cap and deadline), retried when transient, and
+        saved as a ModelCall priced from its usage.
+        """
+        settings = self.settings
         recorded = RecordingModelClient(
             self.model,
             self.repos.model_calls,
             request_message_id=request_message_id,
             memory_version=memory_version or MEMORY_VERSION,
             price_version=self.price_version,
+            prices=self.prices,
+            unknown_cost_usd=settings.call_reserve_usd if settings else None,
+            provider=self.model_provider,
         )
-
-        if self.settings is None:
-            return recorded
-        recorded.reserve_usd = self.settings.call_reserve_usd
-        remaining = float(self.settings.request_deadline_seconds)
-        if created_at is not None:
-            age = (datetime.now(UTC) - datetime.fromisoformat(created_at)).total_seconds()
-            remaining = max(0, remaining - age)
+        deadline = None
+        if settings is not None:
+            remaining = float(settings.request_deadline_seconds)
+            if created_at is not None:
+                age = (datetime.now(UTC) - datetime.fromisoformat(created_at)).total_seconds()
+                remaining = max(0, remaining - age)
+            deadline = time.monotonic() + remaining
+        # Without settings (tests, offline tools) the call budget is the only limit.
         return BudgetedModel(
             recorded,
             self.repos.model_calls,
             request_message_id,
             call_budget=self.budgets.call_budget,
-            max_usd=self.settings.request_max_usd,
-            reserve_usd=recorded.reserve_usd,
-            retries=self.settings.model_retries,
+            max_usd=settings.request_max_usd if settings else math.inf,
+            reserve_usd=settings.call_reserve_usd if settings else 0.0,
+            retries=settings.model_retries if settings else 0,
             lock=self.budget_lock,
             pending=self.pending_calls,
-            deadline=time.monotonic() + remaining,
+            deadline=deadline,
         )
 
     def touch_chat(self, chat_id: str, user_id: str) -> None:

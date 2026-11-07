@@ -69,8 +69,11 @@ def build_worker(settings: Settings) -> WorkerDeps:
             "web_search": WebSearchTool(web, repos.artifacts, blobs),
             "fetch_url": FetchURLTool(web, repos.artifacts, blobs),
         },
-        price_version=models.price_version + ":reserve-v1",
-        planner_model=settings.planner_model,
-        executor_model=settings.executor_model,
+        price_version=models.price_version,
+        prices=models.prices,
+        model_provider=settings.model_backend,
+        # config/models.yaml names each stage's model; a setting may override it.
+        planner_model=settings.planner_model or models.stages["plan"].model,
+        executor_model=settings.executor_model or models.stages["execute"].model,
         settings=settings,
     )

@@ -24,8 +24,9 @@ class Settings(BaseSettings):
     cors_origins: list[str] = ["http://localhost:5173"]
     search_provider: Literal["duckduckgo", "serper"] = "duckduckgo"
     serper_api_key: SecretStr | None = Field(default=None, validation_alias="SERPER_API_KEY")
-    planner_model: str = "apac.amazon.nova-pro-v1:0"
-    executor_model: str = "apac.amazon.nova-lite-v1:0"
+    # Overrides of the config/models.yaml stage models (plan and cite; execute and compress).
+    planner_model: str | None = None
+    executor_model: str | None = None
     model_timeout_seconds: int = Field(default=60, ge=1, le=120)
     model_retries: int = Field(default=1, ge=0, le=2)
     request_max_usd: float = Field(default=1.0, gt=0)
