@@ -157,6 +157,39 @@ def test_restart_after_crash_does_not_replay_finished_tasks(tmp_path) -> None:
     assert len([m for m in deps.repos.messages.list_by_chat("c1") if m.kind == "report"]) == 1
 
 
+def test_restart_after_crash_mid_task_completes(tmp_path) -> None:
+    db = tmp_path / "ckpt.sqlite"
+    script = {
+        "plan": [ModelResponse(structured=six_task_plan())],
+        "execute": [ModelResponse(structured=t1_result())] * 3,
+    }
+    deps = make_deps(ScriptedModel(script), tasks_in_flight=1)
+    req = seed_chat_with_dataset(deps, chat_id="c1", user_id="u1", dataset_id="a2")
+    executes = []
+
+    def crash_in_second_execute_call(request):
+        if request.stage == "execute":
+            executes.append(request.task_id)
+            if len(executes) == 2:  # the process dies while t2 is RUNNING
+                raise RuntimeError("crash")
+
+    deps.model.on_request = crash_in_second_execute_call  # type: ignore[attr-defined]
+    try:
+        RequestRunner(deps, _saver(db)).start("c1", req.message_id)
+    except RuntimeError:
+        pass
+    deps.model.on_request = None  # type: ignore[attr-defined]
+    interrupted = deps.repos.tasks.get(req.message_id, executes[1])
+    assert interrupted.status == "RUNNING" and interrupted.attempt == 1
+    # operator requeue
+    deps.repos.messages.update_request_status("c1", req.message_id, "RUNNING", "ACCEPTED")
+    out = RequestRunner(deps, _saver(db)).start("c1", req.message_id)
+    assert out.started and deps.repos.messages.get("c1", req.message_id).status == "COMPLETED"
+    retried = deps.repos.tasks.get(req.message_id, executes[1])
+    assert retried.status == "COMPLETED" and retried.attempt == 2
+    assert deps.repos.tasks.get(req.message_id, executes[0]).attempt == 1
+
+
 def test_pending_interrupt_carries_next_action(tmp_path) -> None:
     db = tmp_path / "ckpt.sqlite"
     deps = make_deps(ScriptedModel({"plan": [ModelResponse(structured=clarification("Which?"))]}))

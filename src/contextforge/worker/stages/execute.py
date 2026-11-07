@@ -47,6 +47,7 @@ from contextforge.core.entities.task import (
     TaskStatus,
     validate_structured_data,
 )
+from contextforge.core.ids import now_iso
 from contextforge.core.logging import request_context
 from contextforge.core.models.base import (
     ModelClient,
@@ -118,7 +119,9 @@ def execute_stage(brief: RequestState, task_id: str, deps: WorkerDeps) -> TaskOu
     """Run one PLANNED Task to COMPLETED, SKIPPED or FAILED, holding a ``deps.semaphore`` slot.
 
     A re-run that finds the Task already finished (a crash between its write and the checkpoint)
-    returns the stored outcome. ``Cancelled`` propagates and leaves the Task RUNNING.
+    returns the stored outcome. One that finds it RUNNING runs it again as its next attempt: the
+    runner's conditional claim lets one run hold a request, so that attempt died in a crash.
+    ``Cancelled`` propagates and leaves the Task RUNNING.
     """
     request_message_id = brief["request_message_id"]
     with request_context(request_message_id, task_id), deps.semaphore:
@@ -127,11 +130,13 @@ def execute_stage(brief: RequestState, task_id: str, deps: WorkerDeps) -> TaskOu
                 request_message_id, task_id, TaskStatus.PLANNED, TaskStatus.RUNNING
             )
         except StaleStatusError as exc:
-            if exc.actual not in _FINISHED:
+            if exc.actual in _FINISHED:
+                logger.info("task already %s; returning its stored outcome", exc.actual)
+                return _outcome(_get_task(deps, request_message_id, task_id))
+            if exc.actual != TaskStatus.RUNNING:
                 raise
-            logger.info("task already %s; returning its stored outcome", exc.actual)
-            return _outcome(_get_task(deps, request_message_id, task_id))
-        logger.info("%s task started", task.kind)
+            task = _next_attempt(_get_task(deps, request_message_id, task_id), deps)
+        logger.info("%s task started, attempt %d", task.kind, task.attempt)
         return _outcome(_run_to_end(task, brief, deps))
 
 
@@ -255,6 +260,14 @@ def _settle(
         result=result,
         failure_reason=failure_reason,
     )
+
+
+def _next_attempt(task: Task, deps: WorkerDeps) -> Task:
+    """The RUNNING ``task`` saved with ``attempt`` counted up, so the retry is on record."""
+    logger.warning("task found RUNNING after attempt %d died; running it again", task.attempt)
+    retried = task.model_copy(update={"attempt": task.attempt + 1, "updated_at": now_iso()})
+    deps.repos.tasks.save(retried)
+    return retried
 
 
 def _get_task(deps: WorkerDeps, request_message_id: str, task_id: str) -> Task:
