@@ -172,7 +172,7 @@ def test_call_budget_stops_the_planner() -> None:
     assert "budget" in e.value.reason
 
 
-def test_planner_runs_on_the_briefs_memory_snapshot_which_is_required() -> None:
+def test_planner_runs_on_the_briefs_memory_snapshot() -> None:
     deps = make_deps(ScriptedModel({"plan": [ModelResponse(structured=_plan(["a2"]))]}))
     seen = []
     deps.model.on_request = seen.append  # type: ignore[attr-defined]
@@ -196,7 +196,3 @@ def test_planner_runs_on_the_briefs_memory_snapshot_which_is_required() -> None:
     )
     [call] = deps.repos.model_calls.list_by_request(req.message_id)
     assert call.context_version.startswith(f"mem:{memory['version']}|")
-    # No default stands in for a missing snapshot: a brief without one is a bug, not a user.
-    del brief["memory"]
-    with pytest.raises(KeyError):
-        plan_stage(brief, 0, deps)

@@ -22,11 +22,10 @@ from contextforge.core.storage import raw_result_key
 from contextforge.core.tools.base import ToolContext, ToolResult
 from contextforge.infra.web import FetchURLTool, PublicWebClient, WebSearchTool, web_tools
 from contextforge.infra.web_guard import SeenUrls, WebRefusal
-from contextforge.worker.brief import initial_brief
 from contextforge.worker.deps import WorkerDeps
 from contextforge.worker.stages.cite import check_citations
 from contextforge.worker.workflow import build_workflow
-from tests.helpers import make_deps
+from tests.helpers import initial_brief, make_deps
 
 PUBLIC_IP = "93.184.216.34"
 DOCS_URL = "https://docs.python.org/3/whatsnew/3.13.html"

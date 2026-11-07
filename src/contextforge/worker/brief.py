@@ -2,6 +2,7 @@
 
 from contextforge.core.entities.message import RequestMessage
 from contextforge.core.repositories.base import MessageRepository
+from contextforge.core.services.memory import MemorySnapshot
 from contextforge.core.state import RequestState
 
 
@@ -13,10 +14,12 @@ def load_request(messages: MessageRepository, chat_id: str, message_id: str) -> 
     return message
 
 
-def initial_brief(request: RequestMessage) -> RequestState:
-    """Identity from ``request``; every brief field empty until the plan stage fills it."""
+def initial_brief(request: RequestMessage, memory: MemorySnapshot) -> RequestState:
+    """Identity from ``request`` and the user's ``memory`` snapshot; every other brief field
+    empty until the plan stage fills it."""
     return RequestState(
         request_message_id=request.message_id,
+        memory=memory,
         chat_id=request.chat_id,
         user_id=request.user_id,
         goal="",

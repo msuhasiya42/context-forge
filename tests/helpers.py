@@ -68,7 +68,7 @@ def make_deps(
 def initial_brief(request: RequestMessage) -> RequestState:
     """The brief a run starts from, with the memory snapshot of a user who has set no
     instructions or preferences: the snapshot every stage requires."""
-    return {**brief.initial_brief(request), "memory": memory_snapshot(None)}
+    return brief.initial_brief(request, memory_snapshot(None))
 
 
 def _budgets(**overrides: int | None) -> Budgets:

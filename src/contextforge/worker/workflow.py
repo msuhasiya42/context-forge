@@ -79,10 +79,10 @@ def build_workflow(
 
 
 def initial_brief_from_repo(deps: WorkerDeps, chat_id: str, message_id: str) -> RequestState:
-    """The empty brief of request ``message_id``, read from the repository."""
-    brief = initial_brief(load_request(deps.repos.messages, chat_id, message_id))
-    brief["memory"] = memory_snapshot(deps.repos.users.get(brief["user_id"]))
-    return brief
+    """The empty brief of request ``message_id`` with its user's memory as of now, read from
+    the repositories."""
+    request = load_request(deps.repos.messages, chat_id, message_id)
+    return initial_brief(request, memory_snapshot(deps.repos.users.get(request.user_id)))
 
 
 def _as_task[T](name: str, stage: Callable[..., T]) -> Callable[..., Future[T]]:

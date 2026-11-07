@@ -50,7 +50,8 @@ class RequestState(TypedDict):
     """The working brief passed between workflow tasks and checkpointed with their results.
 
     It carries no transcript. ``chat_id`` and ``user_id`` are identity, carried so stages can
-    write Messages and Artifacts without a lookup.
+    write Messages and Artifacts without a lookup. ``memory`` is the user's memory snapshot
+    taken when the run starts; every stage reads it, so a run never sees a later edit.
     """
 
     request_message_id: str
@@ -63,7 +64,7 @@ class RequestState(TypedDict):
     open_questions: list[OpenQuestion]
     next_action: str
     period: NotRequired[dict[str, str] | None]
-    memory: NotRequired[MemorySnapshot]
+    memory: MemorySnapshot
 
 
 class TaskState(TypedDict):
