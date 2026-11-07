@@ -10,7 +10,7 @@ task briefs and implementer reports in `.superpowers/sdd/2026-11-04-phase-1-engi
 
 | Repo | Branch | HEAD at handoff | Tests |
 |---|---|---|---|
-| backend `/Users/mayursuhasiya/Desktop/Projects/context-forge` | `phase-1-engine` | `bcbd0a9` (F9 routing committed; see §4) | 182+ pytest, ruff, format, mypy strict all green at `5ae1e2c`/`1d3a02a`; re-run after F9 |
+| backend `/Users/mayursuhasiya/Desktop/Projects/context-forge` | `phase-1-engine` | `3ec6e97` + docs commits (F9 complete) | 192 pytest, ruff, format, mypy strict green |
 | backend worktree `.claude/worktrees/fix-F10` | `fix-F10` | work in progress, see §4 | |
 | frontend `/Users/mayursuhasiya/Desktop/Projects/context-forge-frontend` | `web-first` | `96f415f` | 19 vitest, lint, typecheck, build green |
 
@@ -56,9 +56,8 @@ complete, so use `uv run --no-sync`. Outside the sandbox `uv sync` is fine.)
   `contextforge-441186132531-apse2`, SQS URL set, `CONTEXTFORGE_SEARCH_PROVIDER=serper` with
   `SERPER_API_KEY` set, `LANGSMITH_API_KEY` set + `CONTEXTFORGE_MODEL_TRACING=true`,
   `CONTEXTFORGE_RECORD_TRANSCRIPTS=true`, `CONTEXTFORGE_REQUEST_MAX_USD=0.25`,
-  `CONTEXTFORGE_CALL_RESERVE_USD=0.05`, `CONTEXTFORGE_PLANNER_MODEL` / `EXECUTOR_MODEL` currently
-  Nova Pro (F9 makes `config/models.yaml` the source of truth; remove these two overrides after
-  verifying F9, see §5 step 2). Never print `.env` values; keys go only in `.env`, never in
+  `CONTEXTFORGE_CALL_RESERVE_USD=0.05`, no planner/executor overrides (removed after F9; `config/models.yaml` is the
+  source of truth; `.env.example` shows the override keys if the user wants Kimi). Never print `.env` values; keys go only in `.env`, never in
   `.env.example` (the user once pasted a key there; it was moved and never committed).
 - LangSmith project `contextforge` (org 8357ea2f-…); traces are metadata-only unless
   `CONTEXTFORGE_TRACE_CONTENT=true`.
@@ -66,12 +65,13 @@ complete, so use `uv run --no-sync`. Outside the sandbox `uv sync` is fine.)
 
 ## 4. Work in flight at handoff (two Opus implementers were running)
 
-**F9 — per-stage model routing with fallbacks** (brief `fix-wave-2/F9-brief.md`). Five commits
+**F9 — per-stage model routing with fallbacks** (brief `fix-wave-2/F9-brief.md`). F9 is COMPLETE: six commits
 are on `phase-1-engine` (`5f6f603` routing + 60 s cooldown, `40b43ac` reasoning blocks and
 output path on ModelCall, `b7af9bb` lenient plan read + dependency sanity, `2fd6902` engine
-instruction leak filter, `bcbd0a9` shipped routes + Sydney Nova prices). `F9-report.md` is written (read it
-first for the implementer's concerns). **Do first:** run the full checks on HEAD; if green, read
-`config/models.yaml` and confirm the shipped routes: plan `openai.gpt-oss-120b-1:0` →
+instruction leak filter, `bcbd0a9` shipped routes + Sydney Nova prices, `3ec6e97` fallback test); 192 tests green;
+`F9-report.md` lists eight concerns (read it). The `.env` planner/executor overrides were removed
+and the API restarted on this code, so the shipped routes are live but NOT yet exercised with a
+real request. **Do first:** one live request (cap $0.25) and confirm the routes: plan `openai.gpt-oss-120b-1:0` →
 `qwen.qwen3-235b-a22b-2507-v1:0` → `global.amazon.nova-2-lite-v1:0`; execute Qwen3-235B →
 gpt-oss-120b → Nova Pro; compress Nova 2 Lite → Nova Lite. Then run ONE live request (cap $0.25)
 and check in the Deep Dive / LangSmith that the planner call used gpt-oss-120b and that a
@@ -94,8 +94,7 @@ status`, finish or discard per the brief, merge into `phase-1-engine`, delete th
 1. **Verify and merge.** F9 checks → F10 finish → merge both → merge `phase-1-engine` into `main`
    (backend) and `web-first` into `main` (frontend). Delete worktrees. Then the SDD workspace can
    be deleted after copying the rulings you still need.
-2. **Config hygiene.** Remove `CONTEXTFORGE_PLANNER_MODEL`/`EXECUTOR_MODEL` from `.env` so
-   `models.yaml` routes apply; add an S3 lifecycle rule for `transcripts/` (they never expire
+2. **Config hygiene.** (`.env` overrides already removed.) Add an S3 lifecycle rule for `transcripts/` (they never expire
    today); add `aws-marketplace:ViewSubscriptions` only if the user upgrades for Claude.
 3. **Deferred from the reviews** (`.superpowers/.../deferred.md` and the re-review report
    `fix-wave-2/rereview-report.md`): fetch allowlist rejects some legitimate URLs (parentheses,
