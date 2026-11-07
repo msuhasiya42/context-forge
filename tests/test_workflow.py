@@ -5,6 +5,7 @@ import threading
 from langchain_core.messages import AIMessage, SystemMessage, ToolMessage
 
 from contextforge.core.entities.message import ReportMessage
+from contextforge.core.entities.model_call import Stage
 from contextforge.core.models.base import ModelRequest, ModelResponse, ToolCall
 from contextforge.core.models.errors import ModelError
 from contextforge.core.models.scripted import ScriptedModel
@@ -685,7 +686,7 @@ def test_the_summary_covers_every_subject_and_the_assessment_from_one_cheap_call
     assert (summary, counts, first) == (SUMMARY, "2 findings, 2 limitations.", f"1. {AJMER_FACT}")
     (call,) = [r for r in agent.requests if r.stage == "summary"]
     sent = str(call.messages[0].content)
-    assert call.model == deps.executor_model and call.task_id is None
+    assert call.model == deps.model_id(Stage.SUMMARY) and call.task_id is None
     assert AJMER_FACT in sent and VISIT_CONCLUSION in sent and f"Not answered: {RAIL}" in sent
     recorded = deps.repos.model_calls.list_by_request(report.request_message_id)
     assert [(c.stage, c.outcome) for c in recorded][-1] == ("summary", "COMPLETED")

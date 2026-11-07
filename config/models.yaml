@@ -56,3 +56,9 @@ stages:
     fallbacks: ["apac.amazon.nova-lite-v1:0"]
     effort: low
     maxTokens: 1000
+  # The report summary: one short call per completed request, routed like compress.
+  summary:
+    model: "global.amazon.nova-2-lite-v1:0"
+    fallbacks: ["apac.amazon.nova-lite-v1:0"]
+    effort: low
+    maxTokens: 400

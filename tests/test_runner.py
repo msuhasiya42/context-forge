@@ -262,6 +262,9 @@ def test_a_request_completes_on_the_fallbacks_while_every_stage_model_is_down() 
             "planner-2": [ModelResponse(structured=six_task_plan())],
             "executor": [down],
             "executor-2": [ModelResponse(structured=t1_result())] * 3,
+            # The report's summary call has no route here; it fails and the deterministic
+            # summary takes over (summary.py), so the request still completes.
+            "scripted": [down],
         }
     )
     deps = make_deps(model, tasks_in_flight=1)
@@ -271,7 +274,7 @@ def test_a_request_completes_on_the_fallbacks_while_every_stage_model_is_down() 
     }
     req = seed_chat_with_dataset(deps, chat_id="c1", user_id="u1", dataset_id="a2")
     assert RequestRunner(deps, _saver(":memory:")).start("c1", req.message_id).status == "COMPLETED"
-    assert model.sent == ["planner", "planner-2", "executor", *["executor-2"] * 3]
+    assert model.sent == ["planner", "planner-2", "executor", *["executor-2"] * 3, "scripted"]
     calls = deps.repos.model_calls.list_by_request(req.message_id)
     answered = [c for c in calls if c.outcome == "COMPLETED"]
     assert {(c.model, c.metadata["requested_model"]) for c in answered} == {

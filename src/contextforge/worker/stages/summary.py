@@ -113,8 +113,8 @@ def _written_summary(
     model = deps.model_for(brief["request_message_id"], memory_version=brief["memory"]["version"])
     request = ModelRequest(
         stage=Stage.SUMMARY,
-        # The compress model: the cheap stage (implementation plan, model split).
-        model=deps.executor_model,
+        # Routed like compress: the cheap stage (config/models.yaml).
+        model=deps.model_id(Stage.SUMMARY),
         system=[brief["memory"]["text"], load_prompt(prompt_version(Stage.SUMMARY))],
         messages=[HumanMessage(_summary_input(brief["goal"], body, not_answered))],
         max_tokens=SUMMARY_MAX_TOKENS,
