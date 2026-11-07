@@ -1,9 +1,12 @@
 """Composition root for the real model, web tools and selectable application persistence."""
 
+from typing import Any
+
 import boto3  # type: ignore[import-untyped]
 from botocore.config import Config  # type: ignore[import-untyped]
 
 from contextforge.core.context.budgets import load_budgets
+from contextforge.core.entities.model_call import Stage
 from contextforge.core.models.base import ModelClient
 from contextforge.core.models.config import load_models_config
 from contextforge.core.models.scripted import ScriptedModel
@@ -24,11 +27,8 @@ def build_worker(settings: Settings) -> WorkerDeps:
         if settings.aws_profile
         else boto3.Session(region_name=settings.aws_region)
     )
-    config = Config(
-        connect_timeout=5,
-        read_timeout=settings.model_timeout_seconds,
-        retries={"total_max_attempts": 1},
-    )
+    # Persistence keeps the SDK's default retries: one throttle or reset must not fail a request.
+    config = Config(connect_timeout=5)
     repos = Repositories.in_memory()
     blobs: BlobStore = MemoryBlobStore()
     queue: Queue = InProcessQueue()
@@ -42,7 +42,7 @@ def build_worker(settings: Settings) -> WorkerDeps:
         queue = SqsQueue(session.client("sqs", config=config), settings.sqs_queue_url)
     model: ModelClient = ScriptedModel({})
     if settings.model_backend == "bedrock":
-        model = BedrockModel(session.client("bedrock-runtime", config=config))
+        model = _bedrock_model(session, settings)
     if settings.langsmith_tracing and settings.langsmith_api_key:
         from contextforge.infra.tracing import TracedModel
 
@@ -76,4 +76,21 @@ def build_worker(settings: Settings) -> WorkerDeps:
         planner_model=settings.planner_model or models.stages["plan"].model,
         executor_model=settings.executor_model or models.stages["execute"].model,
         settings=settings,
+    )
+
+
+def _bedrock_model(session: Any, settings: Settings) -> BedrockModel:
+    """Bedrock with one client per read timeout. botocore's retries are off: BudgetedModel's
+    bounded retry is the only one, so each attempt is admitted and recorded once."""
+
+    def client(read_timeout: int) -> Any:
+        config = Config(
+            connect_timeout=5, read_timeout=read_timeout, retries={"total_max_attempts": 1}
+        )
+        return session.client("bedrock-runtime", config=config)
+
+    planner = client(settings.planner_timeout_seconds)
+    return BedrockModel(
+        client(settings.executor_timeout_seconds),
+        by_stage={Stage.PLAN: planner, Stage.CITE: planner},
     )

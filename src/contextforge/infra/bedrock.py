@@ -157,12 +157,15 @@ class BedrockModel:
             raise ModelError(
                 f"Could not build the Bedrock request for {request.stage}: {exc}"
             ) from exc
-        runtime = self._by_stage.get(request.stage, self._runtime)
         try:
-            raw = runtime.converse(**payload)
+            raw = self.runtime_for(request.stage).converse(**payload)
         except (ClientError, BotoCoreError) as exc:
             raise map_boto_error(exc) from exc
         return parse_response(raw, expects_result=request.output_schema is not None)
+
+    def runtime_for(self, stage: Stage) -> Any:
+        """The bedrock-runtime client that serves ``stage``."""
+        return self._by_stage.get(stage, self._runtime)
 
 
 def parse_response(raw: dict[str, Any], *, expects_result: bool) -> ModelResponse:

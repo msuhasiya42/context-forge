@@ -27,7 +27,10 @@ class Settings(BaseSettings):
     # Overrides of the config/models.yaml stage models (plan and cite; execute and compress).
     planner_model: str | None = None
     executor_model: str | None = None
-    model_timeout_seconds: int = Field(default=60, ge=1, le=120)
+    # Read timeouts per call: the planner model (plan, cite) may think longer than the executor
+    # model (execute, compress); each gets its own bedrock-runtime client.
+    planner_timeout_seconds: int = Field(default=120, ge=1, le=300)
+    executor_timeout_seconds: int = Field(default=60, ge=1, le=300)
     model_retries: int = Field(default=1, ge=0, le=2)
     request_max_usd: float = Field(default=1.0, gt=0)
     call_reserve_usd: float = Field(default=0.10, gt=0)
