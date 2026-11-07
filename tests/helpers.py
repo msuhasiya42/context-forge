@@ -126,6 +126,19 @@ def six_task_plan() -> dict[str, Any]:
     }
 
 
+def clarification(question: str) -> dict[str, Any]:
+    """A planner output asking the user ``question`` instead of planning; camel-case, as the
+    planner returns it."""
+    return {
+        "kind": "clarification",
+        "goal": "g",
+        "constraints": [],
+        "openQuestions": [],
+        "question": question,
+        "nextAction": "wait for the answer",
+    }
+
+
 def _planned(
     ref: str, kind: str, goal: str, inputs: list[str], depends_on: list[str] | None = None
 ) -> dict[str, Any]:
