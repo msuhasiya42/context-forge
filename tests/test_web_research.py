@@ -324,7 +324,7 @@ def test_duckduckgo_searches_are_spaced_out_across_tasks():
 def test_cite_keeps_only_facts_quoting_their_snapshot_by_url():
     page = (
         "<p>Python 3.13 ships a <b>new</b>\n   interactive interpreter.</p>"
-        "<p>It also adds an experimental JIT.</p>"
+        "<p>It also adds an 🔹 experimental JIT.</p>"
         "<p>The S&amp;P 500 index rose 2% this week.</p>"
     )
     snippet = "What is new in Python 3.13, the release of October 2024 ..."
@@ -355,11 +355,14 @@ def test_cite_keeps_only_facts_quoting_their_snapshot_by_url():
     # Live run 3: a hit's snippet ends "... October 2024 ..." and the model quoted it with the
     # dots attached. A leading or trailing ellipsis marks omitted text, not quoted text.
     trimmed = fact(rows_id, "...is new in Python 3.13, the release of October 2024…")
+    # Live run 4: a snippet "Higher! 🔹 Sensex: +3.11%" was quoted without its emoji.
+    emoji = fact(page_id, "Interpreter. It also adds an experimental JIT")
     brief = initial_brief(_request("research"))
     brief["facts"] = [
         quoted,
         ampersand,
         trimmed,
+        emoji,
         fact(page_id, "Python 3.13 removes the GIL for good", kind="section", value="intro"),
         fact(page_id, "ships"),
         fact(page_id, "Python 3.13 removes the GIL for good"),
@@ -367,7 +370,7 @@ def test_cite_keeps_only_facts_quoting_their_snapshot_by_url():
         from_snippet,
     ]
     citations = check_citations(brief, deps)
-    assert citations["facts"] == [quoted, ampersand, trimmed, from_snippet]
+    assert citations["facts"] == [quoted, ampersand, trimmed, emoji, from_snippet]
     assert citations["uncertainties"] == [
         f"unsupported excerpt for artifact {page_id}: no page or search hit it saved holds it",
         f"unsupported excerpt for {DOCS_URL}",

@@ -3,7 +3,8 @@
 A web snapshot (a raw_result Artifact) is cited with a url locator naming a URL the snapshot
 holds and a verbatim excerpt of that URL's text: a fetched page's text or a search hit's
 snippet. The excerpt must have ``MIN_EXCERPT_CHARS`` characters and is matched with whitespace
-collapsed and case folded on both sides. A web fact cited with another locator (a model wrote
+collapsed, case folded and pictographs left out on both sides, ignoring a leading or trailing
+ellipsis. A web fact cited with another locator (a model wrote
 ``{"kind": "row", "value": "0"}`` for a search hit) is pointed at the URL whose saved text holds
 its excerpt. A fact failing all that is dropped, and the reason is kept as an uncertainty,
 never dropped silently.
@@ -11,6 +12,7 @@ never dropped silently.
 
 import json
 import re
+import unicodedata
 from typing import Any, TypedDict
 
 from contextforge.core.entities.artifact import Artifact, ArtifactKind, ArtifactStatus
@@ -144,6 +146,19 @@ def _quotes(excerpt: str | None, evidence: str) -> bool:
 _ELLIPSIS_ENDS = re.compile(r"^(?:\.\.\.\s*)+|(?:\s*\.\.\.)+$")
 
 
+# Pictographs and invisible format characters ("🔹", a variation selector, a zero-width
+# joiner) carry no claim; a model quoting "Higher! 🔹 Sensex: +3.11%" leaves them out (live
+# run 4). Letters, digits, currency signs and punctuation still have to match.
+_IGNORED_CATEGORIES = frozenset({"So", "Cf"})
+_VARIATION_SELECTORS = frozenset({"\ufe0e", "\ufe0f"})
+
+
 def _normalised(text: str) -> str:
-    """Whitespace collapsed, case folded, and "…" written as "..."."""
-    return " ".join(text.replace("…", "...").split()).casefold()
+    """Whitespace collapsed, case folded, "…" written as "...", pictographs left out."""
+    kept = "".join(
+        char
+        for char in text.replace("…", "...")
+        if unicodedata.category(char) not in _IGNORED_CATEGORIES
+        and char not in _VARIATION_SELECTORS
+    )
+    return " ".join(kept.split()).casefold()
