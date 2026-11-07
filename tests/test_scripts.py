@@ -14,6 +14,11 @@ from scripts.plan_bakeoff import SAMPLE_PLAN, Bakeoff, listed_model_ids, probe, 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 QUERY = "Compare Pune and Hyderabad office rent per seat over the last 12 months."
+LEGACY = "Access denied. This Model is marked by provider as Legacy. Upgrade."
+KIMI_MINIMUM = (
+    "The model returned the following errors: Invalid 'max_output_tokens': integer below "
+    "minimum value"
+)
 
 
 def _refusal(code: str, message: str) -> ClientError:
@@ -152,6 +157,9 @@ def test_probe_lists_every_text_model_id_and_classifies_each_answer() -> None:
                     "Invocation with on-demand throughput isn’t supported. Retry.",
                 )
             ],
+            # Live: a legacy model's refusal, and Kimi K3 refusing three output tokens.
+            "au.anthropic.claude-sonnet-4-5": [_refusal("ResourceNotFoundException", LEGACY)],
+            "global.moonshotai.kimi-k3": [_refusal("ValidationException", KIMI_MINIMUM)],
         }
     )
     probes = [probe(runtime, model) for model in runtime.script]
@@ -167,6 +175,8 @@ def test_probe_lists_every_text_model_id_and_classifies_each_answer() -> None:
             "profile only",
             "ValidationException: Invocation with on-demand throughput isn’t supported",
         ),
+        ("denied", f"ResourceNotFoundException: {LEGACY.removesuffix('. Upgrade.')}"),
+        ("available", f"ValidationException: {KIMI_MINIMUM}"),
     ]
     config = load_models_config(REPO_ROOT / "config" / "models.yaml")
     report = render(Bakeoff("", "", True, 0.5, probes, [], None), config)

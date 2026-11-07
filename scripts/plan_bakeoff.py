@@ -335,9 +335,15 @@ def probe(runtime: Any, model: str) -> Probe:
 
 
 def _probe_result(exc: ClientError) -> str:
-    code, message = error_code(exc), _aws_message(exc).lower()
-    if code == "AccessDeniedException":
+    """The probe's verdict on a refusal, read from the whole message: live, a legacy model's
+    ResourceNotFoundException said "Access denied", and Kimi K3 answered "The model returned the
+    following errors" because three output tokens is below its minimum."""
+    code = error_code(exc)
+    message = str(exc.response.get("Error", {}).get("Message", "")).lower()
+    if code == "AccessDeniedException" or re.search(r"access (?:is )?denied", message):
         return "denied"
+    if "the model returned" in message:
+        return "available"
     if code == "ResourceNotFoundException" or "identifier is invalid" in message:
         return "not found"
     if "on-demand throughput" in message:
@@ -380,9 +386,14 @@ def _failure(exc: ClientError | BotoCoreError) -> str:
 
 
 def _aws_message(exc: ClientError) -> str:
-    """The first sentence of the AWS error message, with any IAM principal left out."""
-    message = str(exc.response.get("Error", {}).get("Message", ""))
-    return _PRINCIPAL.sub("<principal>", message.split(". ")[0]).rstrip(".")
+    """The AWS error message cut to its first sentences (at least 40 characters, so "Access
+    denied." keeps its reason), with any IAM principal left out."""
+    first, *rest = str(exc.response.get("Error", {}).get("Message", "")).split(". ")
+    for sentence in rest:
+        if len(first) >= 40:
+            break
+        first += ". " + sentence
+    return _PRINCIPAL.sub("<principal>", first).rstrip(".")
 
 
 @dataclass(frozen=True)
