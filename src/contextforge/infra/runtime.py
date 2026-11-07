@@ -32,19 +32,7 @@ def build_worker(settings: Settings) -> WorkerDeps:
         if settings.aws_profile
         else boto3.Session(region_name=settings.aws_region)
     )
-    # Persistence keeps the SDK's default retries: one throttle or reset must not fail a request.
-    config = Config(connect_timeout=5)
-    repos = Repositories.in_memory()
-    blobs: BlobStore = MemoryBlobStore()
-    queue: Queue = InProcessQueue()
-    if settings.backend == "aws":
-        repos = dynamo_repositories(
-            session.client("dynamodb", config=config), settings.dynamodb_table
-        )
-        blobs = S3Blobs(session.client("s3", config=config), settings.s3_bucket)
-        if not settings.sqs_queue_url:
-            raise ValueError("AWS mode requires CONTEXTFORGE_SQS_QUEUE_URL.")
-        queue = SqsQueue(session.client("sqs", config=config), settings.sqs_queue_url)
+    repos, blobs, queue = _persistence(session, settings)
     model: ModelClient = ScriptedModel({})
     if settings.model_backend == "bedrock":
         model = _bedrock_model(session, settings)
@@ -79,6 +67,21 @@ def build_worker(settings: Settings) -> WorkerDeps:
         planner_model=settings.planner_model or models.stages["plan"].model,
         executor_model=settings.executor_model or models.stages["execute"].model,
         settings=settings,
+    )
+
+
+def _persistence(session: Any, settings: Settings) -> tuple[Repositories, BlobStore, Queue]:
+    """In-memory records, files and queue, or DynamoDB, S3 and SQS in AWS mode. The AWS clients
+    keep the SDK's default retries: one throttle or reset must not fail a request."""
+    if settings.backend != "aws":
+        return Repositories.in_memory(), MemoryBlobStore(), InProcessQueue()
+    if not settings.sqs_queue_url:
+        raise ValueError("AWS mode requires CONTEXTFORGE_SQS_QUEUE_URL.")
+    config = Config(connect_timeout=5)
+    return (
+        dynamo_repositories(session.client("dynamodb", config=config), settings.dynamodb_table),
+        S3Blobs(session.client("s3", config=config), settings.s3_bucket),
+        SqsQueue(session.client("sqs", config=config), settings.sqs_queue_url),
     )
 
 
