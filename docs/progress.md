@@ -1,10 +1,10 @@
 # ContextForge: progress and next steps
 
-Updated: 6 November 2026. This is the living status document. Each working session appends to the log at the bottom and updates the checklist. The design is in [system-design.md](system-design.md); the build plan is in [implementation-plan.md](implementation-plan.md).
+Updated: 7 November 2026. This is the living status document. Each working session appends to the log at the bottom and updates the checklist. The design is in [system-design.md](system-design.md); the build plan is in [implementation-plan.md](implementation-plan.md).
 
 ## Where things stand
 
-Phase 0, design contracts, is complete and all open decisions are confirmed. The phase 1 plan is final (Functional API) and phase 1 task 1 can start. Nothing has been built: no application code beyond an old prototype. AWS resources exist in Sydney (table below) but phases 1 to 9 do not use them.
+Phase 0, design contracts, and phase 1, the local engine, are complete (7 Nov 2026, branch `phase-1-engine`, 75 tests). The engine runs a request end to end on a scripted fake model and the fixture `sql_query` tool, with SQLite checkpoints, clarification resume, crash restart, duplicate protection and compaction. A frontend was built early in the sibling repository `context-forge-frontend` against a mock API client. Milestone 2 (phases 2, 3, 4, 7, 10) is being planned; see the 7 Nov phase-close log entry. AWS resources exist in Sydney (table below) but phases 1 to 9 do not use them.
 
 Decided and documented:
 
@@ -43,7 +43,7 @@ Phases are defined in system-design section 14 (revised 4 Nov 2026 for learning 
 | Phase | Status |
 |---|---|
 | 0. Design contracts | Done 4 Nov 2026 |
-| 1. Engine, local | Not started. Twelve tasks in `docs/superpowers/plans/2026-11-04-phase-1-engine.md` |
+| 1. Engine, local | Done 7 Nov 2026 |
 | 2. Real model, tracing, first eval | Not started |
 | 3. Spreadsheet slice | Not started |
 | 4. Thin API and UI | Not started |
@@ -94,3 +94,43 @@ Not created on purpose: the stream-to-SQS Lambda and service roles (phase 11, CD
 - **6 Nov 2026, planning closed.** Recorded the eleven-phase split (public credential-free MCP as phase 6 with `web_search`, `auth.kind: none`, `url` locator) and the golden request `golden-001` as the headline case and per-phase yardstick. Rewrote phase 1 plan tasks 8 to 10 around the LangGraph Functional API: stages as plain functions wrapped as tasks, interrupt in the entrypoint only, dependency waves with five in flight, crash restart with `None`, grill limits in `config/budgets.yaml`; added the facts field to TaskResult and seven review-focus items. Bedrock smoke test still pending account verification. Next: phase 1 task 1 (project skeleton) once Mayur says go.
 - **6 Nov 2026, conventions.** Recorded the naming conventions (implementation-plan 12.1), the Context Builder stage-by-section table (8.2) and the tool inventory (12.2): one tool, `sql_query`, is coded in phase 1. Next: phase 1 task 1 on go.
 - **7 Nov 2026.** Reviewed Cimba system-design docs 24, 25 and 26 (deep-research agent design, DR loop internals and context engineering, AI cost engineering) through three delegated full reads. Recorded 24 adopted changes across system-design sections 5 to 8, 10, 11, 15 and the decisions log, implementation-plan sections 2, 3, 8, 9 and 12, the golden case, and the phase 1 plan; listed what was not copied and why. Published two reference pages: the LLM design walk of golden-001 and the backend design-patterns map. Next: phase 1 task 1 on go.
+- **7 Nov 2026, phase 1 complete.** All twelve tasks of `docs/superpowers/plans/2026-11-04-phase-1-engine.md` are built and reviewed on branch `phase-1-engine` (Task 11 ran as 11a and 11b). Final run: 75 tests pass; `ruff check`, `ruff format --check` and `mypy src` (strict) are clean.
+
+  *Verified against the phase 1 done criteria (implementation-plan section 13):*
+  1. End to end on the fake model and fake tool: the fixture request produces six Task records and one report Message with claims; independent tasks run concurrently; the planted transfer pairs are found by the fixture `sql_query` (`tests/test_workflow.py`).
+  2. Restart: a run killed mid-way is requeued and completes without re-paying finished tasks (`test_restart_after_crash_does_not_replay_finished_tasks`).
+  3. Resume: a clarification interrupt is answered by messageId and the run completes; the pending interrupt carries `nextAction`; a reply aimed at the wrong target is refused (`tests/test_runner.py`).
+  4. Duplicate delivery: two deliveries of one request start one run (conditional ACCEPTED to RUNNING); two submits with one client key create one Message (`test_duplicate_start_runs_once`, `test_submit_is_idempotent_on_client_key`).
+  5. Compaction: levels 1 and 3 keep constraints, facts and `nextAction` across repeated compactions, never split a tool call from its result, and a whole request completes under a small context cap (`tests/test_compaction.py`, `test_request_completes_under_a_small_context_cap`).
+
+  *Deviations decided during execution* (beyond those listed at the end of the plan):
+  - `config/models.yaml` is `{priceVersion, prices, stages}` so stage entries and the price version never mix.
+  - `ModelCall.price_version` stays required, as spec 3.5 says; tests pass it.
+  - `Claim` gains `status` (CONFIRMED, REJECTED, UNKNOWN; default UNKNOWN) and `value`; the report body gains `constraints` (text, source, date), matching the 7 Nov spec rows.
+  - The `PlannerOutput` validator rejects dependency cycles, so a cyclic plan hits the planner retry with errors rather than the gate.
+  - `AnyMessage` is imported from `langchain_core.messages` (the LangGraph re-export fails strict mypy).
+  - `ContextInputs` carries `chat_id`, which the sources tag needs when there is no request.
+  - A shaped tool result always keeps a raw_result artifact, also when only columns or cells were cut, so unshaped data is recoverable.
+  - Shaping caps are never defaulted in code; callers pass the `budgets.yaml` values.
+  - One token-counting rule: compaction and the Context Builder share `messages_tokens` from the builder.
+  - A clarification moves the request status before saving the question Message, so a mid-call cancel cannot leave a question on a cancelled request.
+  - Each wave starts at most `tasks_in_flight` ready tasks, in task_id order, so starts are ordered for replay.
+  - Failed tool calls are never deduplicated; only `ok` results count as already done, so a retryable error can be retried.
+  - DuckDB external access is disabled after the fixture load, so `sql_query` cannot read host files.
+  - Restart detects an existing checkpoint with `checkpointer.get_tuple(config)`, since `get_state()` cannot tell a crashed run from a missing thread.
+  - Compress calls use the executor model (the plan maps execute and compress to the same model); no separate compress model.
+  - Task 11 was split: 11a (compaction module) ran in a worktree in parallel with Task 8; 11b wired it into the execute loop after Task 9.
+  - The frontend was built early as a separate repository, `context-forge-frontend` (Vite, React 18, strict TypeScript, CSS Modules, mock API client until phase 4's API exists): chat list, chat view, composer, rename and archive. Part of phase 4's UI is therefore done.
+
+  *Known gaps carried forward* (reviewer minors, deferred):
+  - Stuck RUNNING tasks: a crash or cancel while a task is RUNNING leaves it (and the request) stuck; a reaper is phase 2.
+  - Resume race: two racing resume deliveries can both save the reply before claiming; a lost claim race reports the wrong reason. Safe with one worker in phase 1.
+  - Phase 4 boundary checks: resume does not check the reply's chat_id and request_message_id against its arguments; the resume payload is not validated.
+  - Phase 2 adapter work: replace the `ScriptExhausted` catch with a provider-neutral `ModelError`; the Bedrock adapter must fold the mid-list level-3 summary SystemMessage into the preceding turn; compress ModelCalls carry no task_id and can exceed call_budget by one.
+  - Phase 10: plan-gate Task writes are not batched, so a crash can leave a partial plan.
+  - Test-coverage gaps: some validator shapes (diamond, 3-cycles, self-dependency), repository paths (update_status, on_save, ordering, concurrency), ScriptedModel locking, crash during a resumed run, the WAITING_USER tolerance branch, zero-ref fact grounding.
+  - Docstring and tidy-up nits: stale docstrings in builder and shaping, CWD-relative config and prompt paths (run pytest from the repo root), unanchored ruff excludes for the prototype files, a shared dedup helper.
+
+  *AWS, 7 Nov:* the account is on the Free Plan with $120 credits. Anthropic models are not available on the Free Plan (an upgrade is needed), so phase 2 defaults to Amazon Nova (Pro and Lite) through `config/models.yaml`, with Claude as the default once available; the Anthropic use-case form was submitted in the Bedrock console. Titan Text Embeddings V2 is confirmed in ap-southeast-2. Two of five credit activities are done (Budgets, Bedrock playground); Lambda, EC2 and RDS are pending.
+
+  *Milestone 2:* phases 2, 3, 4, 7 and 10 next, with plans at `docs/superpowers/plans/2026-11-07-phase-*.md` (being drafted); phases 5, 6, 8, 9 and 11 later. Next: merge `phase-1-engine`, then phase 2 once its plan is reviewed.
