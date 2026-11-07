@@ -20,6 +20,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from contextforge.core.entities.message import RequestMessage, RequestStatus
+from contextforge.core.logging import configure as configure_logging
 from contextforge.core.services.application import (
     TERMINAL,
     Application,
@@ -315,4 +316,7 @@ def _frame(kind: str, record: dict[str, Any]) -> str:
 def main() -> None:
     import uvicorn
 
+    # The worker runs in this process; without this its INFO records (plan, task, report
+    # progress, each with its request and task id) were dropped.
+    configure_logging()
     uvicorn.run(create_app(), host="127.0.0.1", port=8000)
