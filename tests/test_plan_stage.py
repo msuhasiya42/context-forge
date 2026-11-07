@@ -3,13 +3,21 @@ from datetime import date
 
 import pytest
 
+from contextforge.core.entities.model_call import Stage
 from contextforge.core.entities.user import User
 from contextforge.core.models.base import ModelResponse
+from contextforge.core.models.config import ModelRoute
 from contextforge.core.models.scripted import ScriptedModel
 from contextforge.core.services.memory import memory_snapshot
 from contextforge.worker.stages.guards import Cancelled
 from contextforge.worker.stages.plan import PlanFailed, clarification_id, plan_gate, plan_stage
-from tests.helpers import clarification, initial_brief, make_deps, seed_chat_with_dataset
+from tests.helpers import (
+    ByModel,
+    clarification,
+    initial_brief,
+    make_deps,
+    seed_chat_with_dataset,
+)
 
 
 def _plan(ids: list[str]) -> dict:
@@ -143,6 +151,18 @@ def test_planner_is_retried_once_with_its_errors() -> None:
         planned["kind"] == "plan"
         and len(deps.repos.model_calls.list_by_request(req.message_id)) == 2
     )
+
+
+def test_a_rejected_plan_is_retried_on_the_same_model_not_routed() -> None:
+    """F9: a schema failure is the planner's own retry; only availability routes a call."""
+    model = ByModel(
+        {"p": [ModelResponse(structured={"kind": "plan"}), ModelResponse(structured=_plan(["a2"]))]}
+    )
+    deps = make_deps(model)
+    deps.routes = {Stage.PLAN: ModelRoute("p", ("f",))}
+    req = seed_chat_with_dataset(deps, chat_id="c1", user_id="u1", dataset_id="a2")
+    assert plan_stage(initial_brief(req), 0, deps)["kind"] == "plan"
+    assert model.sent == ["p", "p"]
 
 
 @pytest.mark.parametrize(

@@ -19,6 +19,12 @@ class Stage(StrEnum):
     TOOL_SELECT = "tool_select"
 
 
+# Facts about one call that have no field of their own (keys snake_case, values plain JSON):
+# ``requested_model`` when a fallback answered for the stage's model, ``output_path`` (tool or
+# text) and ``reasoning_blocks`` from the provider adapter, ``lenient_fixes`` from the planner.
+CallMetadata = dict[str, str | int | list[str]]
+
+
 class Outcome(StrEnum):
     COMPLETED = "COMPLETED"
     ERROR = "ERROR"
@@ -50,6 +56,7 @@ class ModelCall(Entity):
     # Storage ref of the call's transcript (the exact prompt and answer, core/models/transcript);
     # None when transcripts are off (CONTEXTFORGE_RECORD_TRANSCRIPTS) or it could not be stored.
     transcript_ref: str | None = None
+    metadata: CallMetadata = {}
     # Millisecond precision, so the latency of a call is measured, not rounded to seconds.
     started_at: str
     ended_at: str | None = None

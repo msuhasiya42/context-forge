@@ -5,9 +5,10 @@ from collections import defaultdict
 import pytest
 from langgraph.checkpoint.sqlite import SqliteSaver
 
+from contextforge.core.entities.model_call import Stage
 from contextforge.core.models.base import ModelRequest, ModelResponse, ToolCall
-from contextforge.core.models.config import load_models_config
-from contextforge.core.models.errors import ModelTimeout
+from contextforge.core.models.config import ModelRoute, load_models_config
+from contextforge.core.models.errors import ModelTimeout, ModelUnavailable
 from contextforge.core.models.scripted import ScriptedModel
 from contextforge.core.settings import Settings
 from contextforge.core.values import Usage
@@ -16,7 +17,7 @@ from contextforge.infra.runtime import build_worker
 from contextforge.infra.tracing import RequestTracer
 from contextforge.worker.deps import WorkerDeps
 from contextforge.worker.runner import RequestRunner
-from tests.helpers import make_deps, seed_chat_with_dataset, t1_result
+from tests.helpers import ByModel, make_deps, seed_chat_with_dataset, t1_result
 
 SQL = "SELECT count(*) AS n FROM t"
 
@@ -108,7 +109,7 @@ def test_trace_tree_of_a_two_task_run_is_metadata_only_unless_content_is_on(cont
     assert root["status"] == "COMPLETED" and root["attempt"] == 1
     call = client.ended("model:execute")["extra"]["metadata"]
     assert call["usage_metadata"]["total_cost"] == pytest.approx((1_000 * 0.06 + 100 * 0.24) / 1e6)
-    assert call["model"] == deps.executor_model and call["stopReason"] == "tool_use"
+    assert call["model"] == deps.model_id(Stage.EXECUTE) and call["stopReason"] == "tool_use"
     tool = client.ended("tool:sql_query")["extra"]["metadata"]
     assert tool["status"] == "ok" and tool["rowCount"] == 1
     recorded = deps.repos.model_calls.list_by_request(req.message_id)
@@ -168,3 +169,15 @@ def test_failed_call_keeps_its_run_id_and_a_broken_tracer_never_blocks_a_call() 
     with broken.segment("c1", "r2"):
         assert broken.model_for("r2").invoke(request).text == "answer"
     assert len(calls) == 1
+
+
+def test_a_fallback_call_is_traced_with_the_stage_model_and_the_model_that_answered() -> None:
+    client = FakeLangSmith()
+    down = ModelUnavailable("ServiceUnavailableException")
+    deps = _traced(make_deps(ByModel({"p": [down], "f": [ModelResponse(text="ok")]})), client)
+    deps.routes = {Stage.PLAN: ModelRoute("p", ("f",))}
+    request = ModelRequest(stage="plan", model="p", system=[], messages=[])
+    with deps.segment("c1", "r1"):
+        deps.model_for("r1").invoke(request)
+    runs = [r["extra"]["metadata"] for r in client.created if r["name"] == "model:plan"]
+    assert [(r["model"], r["requestedModel"]) for r in runs] == [("p", "p"), ("f", "p")]

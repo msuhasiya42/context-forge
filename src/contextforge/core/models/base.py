@@ -6,7 +6,7 @@ from langchain_core.messages import AnyMessage
 from pydantic import BaseModel, ConfigDict
 
 from contextforge.core.entities import Entity
-from contextforge.core.entities.model_call import Stage
+from contextforge.core.entities.model_call import CallMetadata, Stage
 from contextforge.core.values import Usage
 
 
@@ -43,6 +43,8 @@ class ModelRequest(Entity):
     max_tokens: int = 4000
     task_id: str | None = None
     request_message_id: str | None = None
+    # The stage's model when a fallback serves this call in its place (``worker.routing``).
+    requested_model: str | None = None
 
 
 class ModelResponse(Entity):
@@ -57,6 +59,10 @@ class ModelResponse(Entity):
     # not recorded as a new ModelCall.
     replayed: bool = False
     langsmith_run_id: str | None = None
+    # Recorded on the call's ModelCall (``CallMetadata``), such as how the answer was read.
+    metadata: CallMetadata = {}
+    # The ModelCall that recorded this response, so a stage can add what it learns on reading it.
+    model_call_id: str | None = None
 
 
 class ModelClient(Protocol):

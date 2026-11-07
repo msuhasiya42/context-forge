@@ -9,7 +9,12 @@ from pydantic import BaseModel
 
 from contextforge.core.entities.model_call import Stage
 from contextforge.core.models.base import ModelRequest, ToolCall, ToolSpec
-from contextforge.core.models.errors import ModelError, ModelRejected, ModelThrottled
+from contextforge.core.models.errors import (
+    ModelAccessDenied,
+    ModelError,
+    ModelRejected,
+    ModelThrottled,
+)
 from contextforge.core.models.scripted import ScriptedModel
 from contextforge.core.planner import PlannerOutput
 from contextforge.core.settings import Settings
@@ -147,6 +152,13 @@ def test_converse_tool_round_trip_pairs_ids_and_the_result_tool_wins() -> None:
             lambda s: s.add_response("converse", _reply([{"text": "no"}], "content_filtered")),
             ModelRejected,
             "content_filtered",
+        ),
+        (  # F9: routed to the stage's next model
+            lambda s: s.add_client_error(
+                "converse", "AccessDeniedException", "x is not available for this account", 403
+            ),
+            ModelAccessDenied,
+            "not available for this account",
         ),
     ],
 )

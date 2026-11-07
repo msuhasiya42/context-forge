@@ -24,9 +24,13 @@ class Settings(BaseSettings):
     cors_origins: list[str] = ["http://localhost:5173"]
     search_provider: Literal["duckduckgo", "serper"] = "duckduckgo"
     serper_api_key: SecretStr | None = Field(default=None, validation_alias="SERPER_API_KEY")
-    # Overrides of the config/models.yaml stage models (plan and cite; execute and compress).
+    # Overrides of the config/models.yaml stage models: the planner's for plan and cite, the
+    # executor's for execute (compress keeps its own). Fallbacks are comma-separated model ids
+    # that replace the stage's fallbacks; empty or unset keeps config/models.yaml's.
     planner_model: str | None = None
     executor_model: str | None = None
+    planner_fallbacks: str | None = None
+    executor_fallbacks: str | None = None
     # Read timeouts per call: the planner model (plan, cite) may think longer than the executor
     # model (execute, compress); each gets its own bedrock-runtime client.
     planner_timeout_seconds: int = Field(default=120, ge=1, le=300)

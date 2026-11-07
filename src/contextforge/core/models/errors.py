@@ -35,6 +35,11 @@ class ModelThrottled(ModelError):
     retryable = True
 
 
+class ModelAccessDenied(ModelError):
+    """The account may not invoke the model ("not available for this account", a missing
+    Marketplace subscription). Retrying will not help; another model may answer."""
+
+
 class ModelRejected(ModelError):
     """The provider refused the content: a content filter or guardrail stopped the response."""
 

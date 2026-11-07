@@ -9,8 +9,15 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from contextforge.core.context.prompts import load_prompt, prompt_version
 from contextforge.core.entities.model_call import Stage
 from contextforge.core.models.base import ModelClient, ModelRequest, ModelResponse, ToolSpec
-from contextforge.core.models.config import load_models_config
-from contextforge.core.models.errors import ModelError, ModelTimeout
+from contextforge.core.models.config import ModelRoute, load_models_config
+from contextforge.core.models.errors import (
+    ModelAccessDenied,
+    ModelError,
+    ModelRejected,
+    ModelThrottled,
+    ModelTimeout,
+    ModelUnavailable,
+)
 from contextforge.core.models.recording import RecordingModelClient
 from contextforge.core.models.scripted import ScriptedModel, ScriptExhausted
 from contextforge.core.models.transcript import TranscriptWriter
@@ -18,8 +25,11 @@ from contextforge.core.repositories.memory import Repositories
 from contextforge.core.settings import Settings
 from contextforge.core.storage import MemoryBlobStore
 from contextforge.core.values import Usage
+from contextforge.infra.runtime import stage_routes
+from contextforge.worker import calls
 from contextforge.worker.deps import WorkerDeps
-from tests.helpers import make_deps
+from contextforge.worker.routing import ModelCooldown
+from tests.helpers import ByModel, make_deps
 
 
 def _req(stage: str = "plan") -> ModelRequest:
@@ -139,7 +149,8 @@ def test_a_transcript_is_stored_per_call_redacted_and_never_fails_the_call() -> 
     recorder(ScriptedModel({"execute": [answer]}), blobs).invoke(request)
     with pytest.raises(ScriptExhausted):
         recorder(ScriptedModel({}), blobs).invoke(request)
-    assert recorder(ScriptedModel({"execute": [answer]}), FailingBlobs()).invoke(request) == answer
+    unstored_answer = recorder(ScriptedModel({"execute": [answer]}), FailingBlobs()).invoke(request)
+    assert unstored_answer.text == answer.text
     answered, failed, unstored = repos.model_calls.list_by_request("m1")
     stored = json.loads(blobs.get(answered.transcript_ref))
     assert answered.transcript_ref == f"mem://transcripts/m1/{answered.model_call_id}.json"
@@ -211,7 +222,9 @@ def test_spend_cap_admits_more_than_ten_cheap_calls() -> None:
     deps = make_deps(ScriptedModel({"execute": [reply] * 12}))
     deps.settings = Settings(_env_file=None, request_max_usd=1.0, call_reserve_usd=0.10)
     deps.prices = load_models_config().prices
-    request = ModelRequest(stage="execute", model=deps.executor_model, system=[], messages=[])
+    request = ModelRequest(
+        stage="execute", model=deps.model_id(Stage.EXECUTE), system=[], messages=[]
+    )
     model = deps.model_for("m1")
     for _ in range(12):
         model.invoke(request)
@@ -240,7 +253,9 @@ def test_three_concurrent_calls_are_all_admitted_under_the_smoke_cap() -> None:
             return reply
 
     deps = _capped_deps(WaitsForTheOthers(), 0.25, call_reserve_usd=0.10)
-    request = ModelRequest(stage="execute", model=deps.executor_model, system=[], messages=[])
+    request = ModelRequest(
+        stage="execute", model=deps.model_id(Stage.EXECUTE), system=[], messages=[]
+    )
     errors: list[Exception] = []
 
     def call() -> None:
@@ -264,7 +279,7 @@ def test_spend_cap_refuses_a_call_whose_worst_case_would_pass_it() -> None:
     spent = ModelResponse(text="ok", usage=Usage(input_tokens=10_000, output_tokens=625))
     model = ScriptedModel({"plan": [spent, spent]})
     deps = _capped_deps(model, 0.05)
-    request = ModelRequest(stage="plan", model=deps.planner_model, system=[], messages=[])
+    request = ModelRequest(stage="plan", model=deps.model_id(Stage.PLAN), system=[], messages=[])
     budgeted = deps.model_for("m1")
     budgeted.invoke(request)
     with pytest.raises(ModelError, match="^Request spend budget exhausted\\.$"):
@@ -277,7 +292,9 @@ def test_deadline_refuses_a_call_once_the_segment_has_run_past_it() -> None:
     model = ScriptedModel({"execute": [ModelResponse(text="never")]})
     deps = _capped_deps(model, 1.0, request_deadline_seconds=1)
     deps.segment_started["m1"] = time.monotonic() - 2
-    request = ModelRequest(stage="execute", model=deps.executor_model, system=[], messages=[])
+    request = ModelRequest(
+        stage="execute", model=deps.model_id(Stage.EXECUTE), system=[], messages=[]
+    )
     with pytest.raises(ModelError, match="^Request deadline exceeded\\.$"):
         deps.model_for("m1").invoke(request)
     assert deps.repos.model_calls.list_by_request("m1") == []
@@ -290,3 +307,81 @@ def test_prompt_version_mapping() -> None:
 
 def test_load_prompt_reads_file() -> None:
     assert load_prompt("plan.1")
+
+
+def test_a_call_goes_to_the_fallback_while_its_model_is_down_then_back_after_the_cooldown(
+    monkeypatch,
+) -> None:
+    """F9: the primary fails after the bounded retry, the fallback answers and is recorded as
+    the model that answered; for 60 s the primary is tried last, then first again. A model the
+    account may not invoke routes at once, with no retry."""
+    answer = ModelResponse(text="ok", usage=Usage(input_tokens=10, output_tokens=2))
+    down = ModelUnavailable("ServiceUnavailableException")
+    model = ByModel({"primary": [down, down, answer], "fallback": [answer, answer]})
+    deps = _capped_deps(model, 1.0)
+    deps.routes = {Stage.PLAN: ModelRoute("primary", ("fallback",))}
+    clock = [1000.0]
+    deps.cooldown = ModelCooldown(clock=lambda: clock[0])
+    monkeypatch.setattr(calls.time, "sleep", lambda seconds: None)
+    request = ModelRequest(stage="plan", model=deps.model_id(Stage.PLAN), system=[], messages=[])
+
+    assert deps.model_for("m1").invoke(request).text == "ok"
+    deps.model_for("m1").invoke(request)  # in the cooldown: the fallback first
+    clock[0] += 61
+    deps.model_for("m1").invoke(request)
+    assert model.sent == ["primary", "primary", "fallback", "fallback", "primary"]
+    records = deps.repos.model_calls.list_by_request("m1")
+    assert [(c.model, c.outcome) for c in records] == [
+        ("bedrock/primary", "ERROR"),
+        ("bedrock/primary", "ERROR"),
+        ("bedrock/fallback", "COMPLETED"),
+        ("bedrock/fallback", "COMPLETED"),
+        ("bedrock/primary", "COMPLETED"),
+    ]
+    assert records[2].metadata == {"requested_model": "primary"} and records[4].metadata == {}
+
+    denied = ByModel(
+        {"kimi": [ModelAccessDenied("not available for this account")], "deepseek": [answer]}
+    )
+    deps = _capped_deps(denied, 1.0)
+    deps.routes = {Stage.PLAN: ModelRoute("kimi", ("deepseek",))}
+    request = request.model_copy(update={"model": "kimi"})
+    assert deps.model_for("m2").invoke(request).text == "ok"
+    assert denied.sent == ["kimi", "deepseek"]
+
+
+def test_a_failure_another_model_cannot_fix_is_not_routed() -> None:
+    """A refused answer, an exhausted budget or the last fallback down is raised as it is."""
+    model = ByModel({"primary": [ModelRejected("guardrail_intervened")], "fallback": []})
+    deps = make_deps(model)
+    deps.routes = {Stage.EXECUTE: ModelRoute("primary", ("fallback",))}
+    request = ModelRequest(stage="execute", model="primary", system=[], messages=[])
+    with pytest.raises(ModelRejected):
+        deps.model_for("m1").invoke(request)
+    assert model.sent == ["primary"]
+
+    down = ModelThrottled("ThrottlingException")
+    model = ByModel({"primary": [down], "fallback": [down]})
+    deps = make_deps(model)
+    deps.routes = {Stage.EXECUTE: ModelRoute("primary", ("fallback",))}
+    with pytest.raises(ModelThrottled):
+        deps.model_for("m1").invoke(request)
+    assert model.sent == ["primary", "fallback"]
+    assert deps.cooldown.order(["primary", "fallback", "other"]) == ["other", "primary", "fallback"]
+
+
+def test_settings_override_the_primary_and_the_fallbacks_of_their_stages() -> None:
+    config = load_models_config()
+    settings = Settings(
+        _env_file=None,
+        planner_model="global.moonshotai.kimi-k3.1",
+        planner_fallbacks=" deepseek.v3.2, apac.amazon.nova-pro-v1:0 ,",
+        executor_fallbacks="",
+    )
+    routes = stage_routes(config, settings)
+    expected_plan = ModelRoute(
+        "global.moonshotai.kimi-k3.1", ("deepseek.v3.2", "apac.amazon.nova-pro-v1:0")
+    )
+    assert routes[Stage.PLAN] == routes[Stage.CITE] == expected_plan
+    assert routes[Stage.EXECUTE] == config.stages["execute"].route  # empty keeps the config
+    assert routes[Stage.COMPRESS] == config.stages["compress"].route

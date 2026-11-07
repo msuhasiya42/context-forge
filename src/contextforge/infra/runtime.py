@@ -9,7 +9,7 @@ from botocore.config import Config  # type: ignore[import-untyped]
 from contextforge.core.context.budgets import load_budgets
 from contextforge.core.entities.model_call import Stage
 from contextforge.core.models.base import ModelClient
-from contextforge.core.models.config import load_models_config
+from contextforge.core.models.config import ModelRoute, ModelsConfig, load_models_config
 from contextforge.core.models.recording import PriceTable
 from contextforge.core.models.scripted import ScriptedModel
 from contextforge.core.queue import InProcessQueue, Queue
@@ -62,11 +62,31 @@ def build_worker(settings: Settings) -> WorkerDeps:
         price_version=models.price_version,
         prices=models.prices,
         model_provider=settings.model_backend,
-        # config/models.yaml names each stage's model; a setting may override it.
-        planner_model=settings.planner_model or models.stages["plan"].model,
-        executor_model=settings.executor_model or models.stages["execute"].model,
+        routes=stage_routes(models, settings),
         settings=settings,
     )
+
+
+def stage_routes(models: ModelsConfig, settings: Settings) -> dict[Stage, ModelRoute]:
+    """config/models.yaml's model and fallbacks per stage, with the settings' overrides: the
+    planner's apply to plan and cite, the executor's to execute."""
+    routes = {Stage(name): stage.route for name, stage in models.stages.items()}
+    overrides = (
+        ((Stage.PLAN, Stage.CITE), settings.planner_model, settings.planner_fallbacks),
+        ((Stage.EXECUTE,), settings.executor_model, settings.executor_fallbacks),
+    )
+    for stages, model, fallbacks in overrides:
+        for stage in stages:
+            route = routes[stage]
+            routes[stage] = ModelRoute(
+                model or route.primary, _model_ids(fallbacks) or route.fallbacks
+            )
+    return routes
+
+
+def _model_ids(text: str | None) -> tuple[str, ...]:
+    """Comma-separated model ids, blanks dropped."""
+    return tuple(part.strip() for part in (text or "").split(",") if part.strip())
 
 
 def _persistence(session: Any, settings: Settings) -> tuple[Repositories, BlobStore, Queue]:

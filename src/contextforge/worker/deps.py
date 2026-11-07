@@ -16,7 +16,9 @@ from contextforge.core.entities.message import (
     ClarificationResponseMessage,
     RequestMessage,
 )
+from contextforge.core.entities.model_call import Stage
 from contextforge.core.models.base import ModelClient
+from contextforge.core.models.config import ModelRoute
 from contextforge.core.models.recording import PriceTable, RecordingModelClient
 from contextforge.core.models.transcript import TranscriptWriter
 from contextforge.core.queue import Queue
@@ -26,6 +28,7 @@ from contextforge.core.storage import BlobStore
 from contextforge.core.tools.base import Tool
 from contextforge.core.tracing import NullTracer, Tracer
 from contextforge.worker.calls import BudgetedModel
+from contextforge.worker.routing import ModelCooldown, RoutedModel
 
 
 @dataclass
@@ -41,8 +44,9 @@ class WorkerDeps:
     queue: Queue
     # Written on every ModelCall so a later price change never rewrites past costs.
     price_version: str
-    planner_model: str = "scripted"
-    executor_model: str = "scripted"
+    # The model each stage calls and its fallbacks (config/models.yaml with the settings'
+    # overrides); a stage without a route calls "scripted".
+    routes: dict[Stage, ModelRoute] = field(default_factory=dict)
     # config/models.yaml prices; each ModelCall's cost is computed from its usage with them.
     prices: PriceTable = field(default_factory=dict)
     # Prefix of ModelCall.model (spec 3.5): every real model of this project is on Bedrock.
@@ -59,17 +63,24 @@ class WorkerDeps:
     # Opens the trace runs; the default traces nothing. The runtime's LangSmith tracer also
     # wraps ``model`` and ``tools`` before they get here (infra.tracing.RequestTracer).
     tracer: Tracer = field(default_factory=NullTracer)
+    # Shared by every request of the process: a model that was just down is tried last.
+    cooldown: ModelCooldown = field(default_factory=ModelCooldown)
 
     def __post_init__(self) -> None:
         self.semaphore = threading.BoundedSemaphore(self.budgets.tasks_in_flight)
 
+    def model_id(self, stage: Stage) -> str:
+        """The model ``stage`` asks for first."""
+        route = self.routes.get(stage)
+        return route.primary if route is not None else "scripted"
+
     def model_for(
         self, request_message_id: str, *, memory_version: str | None = None
     ) -> ModelClient:
-        """The model client for one request. Every attempt is admitted against the request's call
-        budget (with settings, also its spend cap and deadline), retried when transient, and
-        saved as a ModelCall priced from its usage, with its transcript unless settings turn
-        transcripts off.
+        """The model client for one request. A call goes to its stage's fallbacks while its model
+        is down (``worker.routing``). Every attempt is admitted against the request's call budget
+        (with settings, also its spend cap and deadline), retried when transient, and saved as a
+        ModelCall priced from its usage, with its transcript unless settings turn transcripts off.
 
         The deadline counts from the start of the request's current segment, never from the
         request's creation (A-C1), so time spent waiting on the user is not counted.
@@ -92,7 +103,7 @@ class WorkerDeps:
             started = self.segment_started.get(request_message_id, time.monotonic())
             deadline = started + settings.request_deadline_seconds
         # Without settings (tests, offline tools) the call budget is the only limit.
-        return BudgetedModel(
+        budgeted = BudgetedModel(
             recorded,
             self.repos.model_calls,
             request_message_id,
@@ -106,6 +117,7 @@ class WorkerDeps:
             pending=self.pending_calls,
             deadline=deadline,
         )
+        return RoutedModel(budgeted, self.routes, self.cooldown)
 
     def _transcript_writer(self) -> TranscriptWriter | None:
         """Writes transcripts to the blob store, redacting the configured secrets; None when

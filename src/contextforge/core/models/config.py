@@ -1,5 +1,6 @@
-"""Model configuration (config/models.yaml): the model, effort and token cap per stage."""
+"""Model configuration (config/models.yaml): the models, effort and token cap per stage."""
 
+from dataclasses import dataclass
 from pathlib import Path
 
 import yaml
@@ -7,10 +8,25 @@ import yaml
 from contextforge.core.entities import Entity
 
 
+@dataclass(frozen=True)
+class ModelRoute:
+    """The model a stage calls, then the models tried in order, for one call, while the ones
+    before them are down (``worker.routing``)."""
+
+    primary: str
+    fallbacks: tuple[str, ...] = ()
+
+
 class StageConfig(Entity):
     model: str
+    # Any Bedrock model id with a price row; tried in order when the model before is down.
+    fallbacks: list[str] = []
     effort: str
     max_tokens: int
+
+    @property
+    def route(self) -> ModelRoute:
+        return ModelRoute(self.model, tuple(self.fallbacks))
 
 
 class ModelsConfig(Entity):

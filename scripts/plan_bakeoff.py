@@ -37,7 +37,7 @@ from contextforge.core.context.tokens import estimate_tokens
 from contextforge.core.entities.message import MessageKind, RequestMessage, RequestStatus, Sender
 from contextforge.core.entities.model_call import ModelCall, Stage
 from contextforge.core.ids import new_ulid, now_iso
-from contextforge.core.models.config import ModelsConfig, load_models_config
+from contextforge.core.models.config import ModelRoute, ModelsConfig, load_models_config
 from contextforge.core.models.errors import ModelError
 from contextforge.core.models.recording import cost_usd
 from contextforge.core.planner import PlannerOutput
@@ -203,7 +203,7 @@ def run_plan(
         queue=InProcessQueue(),
         price_version=config.price_version,
         prices=config.prices,
-        planner_model=model,
+        routes={Stage.PLAN: ModelRoute(model)},  # one model per run: no fallbacks
         settings=settings.model_copy(update={"request_max_usd": max_usd}),
     )
     request = _request(query)

@@ -15,6 +15,7 @@ from botocore.exceptions import (  # type: ignore[import-untyped]
 )
 
 from contextforge.core.models.errors import (
+    ModelAccessDenied,
     ModelError,
     ModelThrottled,
     ModelTimeout,
@@ -68,6 +69,8 @@ def _client_error(exc: ClientError) -> ModelError:
         return ModelTimeout(detail)
     if code in _UNAVAILABLE or status >= 500:
         return ModelUnavailable(detail)
+    if code == "AccessDeniedException":
+        return ModelAccessDenied(f"{detail} ({_FIX_FIRST[code]})")
     if hint := _FIX_FIRST.get(code):
         return ModelError(f"{detail} ({hint})")
     return ModelError(detail)

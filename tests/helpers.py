@@ -18,8 +18,9 @@ from contextforge.core.entities.message import (
     RequestStatus,
     Sender,
 )
+from contextforge.core.entities.model_call import Stage
 from contextforge.core.ids import new_ulid, now_iso
-from contextforge.core.models.base import ModelClient
+from contextforge.core.models.base import ModelClient, ModelRequest, ModelResponse
 from contextforge.core.models.config import load_models_config
 from contextforge.core.queue import InProcessQueue
 from contextforge.core.repositories.memory import Repositories
@@ -59,10 +60,25 @@ def make_deps(
         tools={"sql_query": SqlQueryTool(repos.artifacts, blobs)},
         queue=InProcessQueue(),
         price_version=models.price_version,
-        planner_model=models.stages["plan"].model,
-        executor_model=models.stages["execute"].model,
+        routes={Stage(name): stage.route for name, stage in models.stages.items()},
         settings=settings,
     )
+
+
+class ByModel:
+    """A ModelClient that answers each call from the script of the model it was sent to, in
+    order; a scripted exception is raised. ``sent`` lists the model of every call."""
+
+    def __init__(self, script: dict[str, list[ModelResponse | Exception]]) -> None:
+        self._script = {model: list(answers) for model, answers in script.items()}
+        self.sent: list[str] = []
+
+    def invoke(self, request: ModelRequest) -> ModelResponse:
+        self.sent.append(request.model)
+        answer = self._script[request.model].pop(0)
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
 
 
 def initial_brief(request: RequestMessage) -> RequestState:

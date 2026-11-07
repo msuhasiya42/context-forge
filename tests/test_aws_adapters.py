@@ -279,6 +279,8 @@ def test_floats_round_trip_through_dynamodb_numbers(db, store) -> None:
             "estimatedCostUsd": 0.0183,
             "priceVersion": "2026-11-07",
             "outcome": "COMPLETED",
+            # F9: an int stays an int, a list of strings a list
+            "metadata": {"output_path": "tool", "reasoning_blocks": 1, "lenient_fixes": ["x"]},
             "startedAt": "t",
         }
     )

@@ -5,7 +5,7 @@ import json
 from collections.abc import Mapping
 
 from contextforge.core.context.prompts import prompt_version
-from contextforge.core.entities.model_call import ModelCall, Outcome
+from contextforge.core.entities.model_call import CallMetadata, ModelCall, Outcome
 from contextforge.core.ids import new_ulid, now_iso_ms
 from contextforge.core.models.base import ModelClient, ModelRequest, ModelResponse, ToolSpec
 from contextforge.core.models.errors import ModelError, ModelTimeout, ModelUnreachable
@@ -116,19 +116,20 @@ class RecordingModelClient:
                 )
             )
             raise
-        if not response.replayed:
-            self._model_calls.save(
-                self._record(
-                    request,
-                    model_call_id,
-                    started_at,
-                    outcome=Outcome.COMPLETED,
-                    usage=response.usage,
-                    response=response,
-                    langsmith_run_id=response.langsmith_run_id,
-                )
+        if response.replayed:
+            return response
+        self._model_calls.save(
+            self._record(
+                request,
+                model_call_id,
+                started_at,
+                outcome=Outcome.COMPLETED,
+                usage=response.usage,
+                response=response,
+                langsmith_run_id=response.langsmith_run_id,
             )
-        return response
+        )
+        return response.model_copy(update={"model_call_id": model_call_id})
 
     def _record(
         self,
@@ -166,6 +167,7 @@ class RecordingModelClient:
             ),
             outcome=outcome,
             failure_reason=failure_reason,
+            metadata=_metadata(request, response),
             started_at=started_at,
             ended_at=ended_at,
         )
@@ -184,3 +186,12 @@ class RecordingModelClient:
             return None
         record = transcript(request, model, response=response, error=error)
         return self._transcripts.write(self._request_message_id, model_call_id, record)
+
+
+def _metadata(request: ModelRequest, response: ModelResponse | None) -> CallMetadata:
+    """What the adapter reported about the answer, and the stage's model when a fallback
+    served the call in its place."""
+    metadata = dict(response.metadata) if response is not None else {}
+    if request.requested_model is not None:
+        metadata["requested_model"] = request.requested_model
+    return metadata

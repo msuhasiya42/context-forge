@@ -428,8 +428,7 @@ def _compacted_messages(
         keep_last=budgets.keep_last_messages,
         model=model,
         memory=built.system[0],  # the builder's first system block is the memory file
-        # Execute and compress run on the same cheap model (implementation plan, model split).
-        model_id=deps.executor_model,
+        model_id=deps.model_id(Stage.COMPRESS),
         task_id=state["task_id"],
     )
 
@@ -459,7 +458,7 @@ def _model_request(
     """The execute call: the task brief as the first user turn, then the (compacted) loop."""
     return ModelRequest(
         stage=Stage.EXECUTE,
-        model=deps.executor_model,
+        model=deps.model_id(Stage.EXECUTE),
         system=built.system,
         messages=[HumanMessage(built.user_text), *messages],
         tools=specs,

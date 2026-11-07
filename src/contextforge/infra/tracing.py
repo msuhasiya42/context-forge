@@ -2,7 +2,7 @@
 
     request                      requestId, chatId, status, attempt; thread_id groups segments
     ├─ plan
-    │  └─ model:plan             usage, estimatedCostUsd, model, stopReason
+    │  └─ model:plan             usage, estimatedCostUsd, model, requestedModel, stopReason
     ├─ task:<kind>:<taskId>
     │  ├─ model:execute / model:compress
     │  └─ tool:<name>            status, rowCount, artifactIds
@@ -261,7 +261,13 @@ class _TracedModel:
             tracer.parent_of(request.request_message_id, request.task_id),
             f"model:{request.stage.value}",
             "llm",
-            {"stage": request.stage.value, "model": request.model, "taskId": request.task_id},
+            {
+                "stage": request.stage.value,
+                "model": request.model,
+                # The stage's model; differs from ``model`` when a fallback answers for it.
+                "requestedModel": request.requested_model or request.model,
+                "taskId": request.task_id,
+            },
             _model_inputs(request) if tracer.include_content else None,
         )
         try:

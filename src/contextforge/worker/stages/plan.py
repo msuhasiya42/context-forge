@@ -292,7 +292,7 @@ def _call_planner(brief: RequestState, inputs: ContextInputs, deps: WorkerDeps) 
     built = build_context(inputs, deps.budgets)
     request = ModelRequest(
         stage=Stage.PLAN,
-        model=deps.planner_model,
+        model=deps.model_id(Stage.PLAN),
         system=built.system,
         messages=[HumanMessage(built.user_text), *built.messages],
         output_schema=PlannerOutput,
