@@ -3,8 +3,9 @@
 import math
 import threading
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
 
 from contextforge.core.activity import ActivityBus
 from contextforge.core.context.budgets import Budgets
@@ -44,6 +45,8 @@ class WorkerDeps:
     budget_lock: threading.RLock = field(default_factory=threading.RLock)
     pending_calls: dict[str, int] = field(default_factory=dict)
     activity: ActivityBus = field(default_factory=ActivityBus)
+    # time.monotonic() at the start of each request's current segment (see ``segment``).
+    segment_started: dict[str, float] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         self.semaphore = threading.BoundedSemaphore(self.budgets.tasks_in_flight)
@@ -58,6 +61,10 @@ class WorkerDeps:
         """The model client for one request. Every attempt is admitted against the request's call
         budget (with settings, also its spend cap and deadline), retried when transient, and
         saved as a ModelCall priced from its usage.
+
+        The deadline counts from the start of the request's current segment, never from its
+        ``created_at`` (A-C1), so time spent waiting on the user is not counted. ``created_at``
+        is therefore unused; it stays until the stages stop passing it.
         """
         settings = self.settings
         recorded = RecordingModelClient(
@@ -72,11 +79,9 @@ class WorkerDeps:
         )
         deadline = None
         if settings is not None:
-            remaining = float(settings.request_deadline_seconds)
-            if created_at is not None:
-                age = (datetime.now(UTC) - datetime.fromisoformat(created_at)).total_seconds()
-                remaining = max(0, remaining - age)
-            deadline = time.monotonic() + remaining
+            # A stage run outside a segment (a direct call in a test) gets the whole deadline.
+            started = self.segment_started.get(request_message_id, time.monotonic())
+            deadline = started + settings.request_deadline_seconds
         # Without settings (tests, offline tools) the call budget is the only limit.
         return BudgetedModel(
             recorded,
@@ -90,6 +95,19 @@ class WorkerDeps:
             pending=self.pending_calls,
             deadline=deadline,
         )
+
+    @contextmanager
+    def segment(self, chat_id: str, request_message_id: str) -> Iterator[None]:
+        """One run of a request: its start or a resume, from claim until it ends or pauses.
+
+        The request deadline counts from the segment's start, so the time a request waits on
+        the user, between segments, never counts against it.
+        """
+        self.segment_started[request_message_id] = time.monotonic()
+        try:
+            yield
+        finally:
+            self.segment_started.pop(request_message_id, None)
 
     def touch_chat(self, chat_id: str, user_id: str) -> None:
         from contextforge.core.entities.message import RequestMessage

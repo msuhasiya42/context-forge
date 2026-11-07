@@ -64,7 +64,7 @@ class RequestRunner:
                 return RunOutcome(started=False, reason=ALREADY_STARTED)
             request = load_request(self._deps.repos.messages, chat_id, message_id)
             self._deps.touch_chat(chat_id, request.user_id)
-            return self._run(self._start_input(chat_id, message_id), message_id)
+            return self._run(self._start_input(chat_id, message_id), chat_id, message_id)
 
     def resume(self, chat_id: str, message_id: str, reply: Reply) -> RunOutcome:
         """Answer the pending interrupt with ``reply`` and run on until the next end or question.
@@ -77,7 +77,7 @@ class RequestRunner:
             if not self._accept(chat_id, message_id, reply):
                 return RunOutcome(started=False, reason=NOT_THE_PENDING_INTERRUPT)
             answer = {"message_id": reply.message_id, "content": reply.content}
-            return self._run(Command(resume=answer), message_id)
+            return self._run(Command(resume=answer), chat_id, message_id)
 
     def resume_claimed(self, chat_id: str, message_id: str, reply: Reply) -> RunOutcome:
         """Continue a reply whose WAITING_USER -> RUNNING claim was made by the API."""
@@ -93,7 +93,9 @@ class RequestRunner:
         ):
             return RunOutcome(started=False, reason=NOT_THE_PENDING_INTERRUPT)
         return self._run(
-            Command(resume={"message_id": reply.message_id, "content": reply.content}), message_id
+            Command(resume={"message_id": reply.message_id, "content": reply.content}),
+            chat_id,
+            message_id,
         )
 
     def pending_interrupt(self, message_id: str) -> PendingInterrupt | None:
@@ -156,9 +158,12 @@ class RequestRunner:
         logger.info("checkpoint found; continuing the thread with finished tasks restored")
         return None
 
-    def _run(self, payload: dict[str, str] | Command[Any] | None, message_id: str) -> RunOutcome:
-        """Invoke the thread; a run paused on an interrupt returns no status."""
-        result = self._workflow.invoke(payload, _thread(message_id))
+    def _run(
+        self, payload: dict[str, str] | Command[Any] | None, chat_id: str, message_id: str
+    ) -> RunOutcome:
+        """Invoke the thread as one segment; a run paused on an interrupt returns no status."""
+        with self._deps.segment(chat_id, message_id):
+            result = self._workflow.invoke(payload, _thread(message_id))
         status = result.get("status")
         logger.info("run returned %s", status or "on an interrupt")
         return RunOutcome(started=True, status=None if status is None else RequestStatus(status))
