@@ -58,4 +58,13 @@ export interface Message {
   status?: MessageStatus;
   /** User-facing reason when a request failed. */
   failureReason?: string;
+  requestMessageId?: string;
+  inReplyToMessageId?: string;
+}
+
+export type StreamEvent =
+  { kind: 'message'; message: Message } | { kind: 'activity'; text: string };
+export interface UserMemory {
+  instructions: string | null;
+  preferences: Record<string, string> | null;
 }

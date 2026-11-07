@@ -21,9 +21,22 @@ export function MessageItem({ message }: MessageItemProps) {
         {tag && <span className={styles.tag}>{tag}</span>}
         <time dateTime={message.createdAt}>{formatMessageTime(message.createdAt)}</time>
       </p>
-      {message.content && <p className={styles.content}>{message.content}</p>}
+      {message.content && <p className={styles.content}>{linkedSources(message.content)}</p>}
       {message.status && <p className={styles.status}>Status: {statusLabel(message.status)}</p>}
       {message.failureReason && <p className={styles.status}>Reason: {message.failureReason}</p>}
     </li>
   );
+}
+
+function linkedSources(text: string) {
+  return text.split(/(\[source\]\(https?:\/\/[^)\s]+\))/g).map((part, index) => {
+    const match = /^\[source\]\((https?:\/\/[^)\s]+)\)$/.exec(part);
+    return match ? (
+      <a key={index} href={match[1]} target="_blank" rel="noopener noreferrer">
+        source
+      </a>
+    ) : (
+      part
+    );
+  });
 }

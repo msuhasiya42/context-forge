@@ -1,3 +1,5 @@
+import { streamRequest } from './stream';
+import { parseMemory } from './parse';
 import type { ApiClient } from './client';
 import { ApiError, invalidResponse } from './errors';
 import {
@@ -25,7 +27,23 @@ const chatPath = (chatId: string) => `/chats/${encodeURIComponent(chatId)}`;
 /** Talks to the FastAPI backend (endpoints E1, E2, E3, E4, E15). */
 export function createHttpClient(baseUrl: string): ApiClient {
   const call = createJsonCaller(baseUrl);
+  const root = baseUrl.replace(/\/+$/, '');
   return {
+    streamRequest: (chatId, requestId, onEvent) => streamRequest(root, chatId, requestId, onEvent),
+    replyToRequest: async (chatId, requestId, targetId, content) =>
+      parseMessage(
+        await call(
+          'POST',
+          `${chatPath(chatId)}/requests/${encodeURIComponent(requestId)}/replies`,
+          { inReplyToMessageId: targetId, content },
+        ),
+      ),
+    cancelRequest: async (chatId, requestId) =>
+      parseMessage(
+        await call('POST', `${chatPath(chatId)}/requests/${encodeURIComponent(requestId)}/cancel`),
+      ),
+    getMemory: async () => parseMemory(await call('GET', '/me')),
+    saveMemory: async (instructions) => parseMemory(await call('PATCH', '/me', { instructions })),
     listChats: async () =>
       parsePageItems(await call('GET', `/chats?limit=${CHAT_PAGE_SIZE}`), parseChat),
     createChat: async () => parseChat(await call('POST', '/chats', {})),

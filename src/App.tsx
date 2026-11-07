@@ -1,3 +1,5 @@
+import { MemoryPanel } from './components/MemoryPanel/MemoryPanel';
+import { RequestControls } from './components/RequestControls/RequestControls';
 import type { ApiClient } from './api/client';
 import { ChatPane } from './components/ChatPane/ChatPane';
 import { PaneContent } from './components/ChatPane/PaneContent';
@@ -60,6 +62,17 @@ export function App({ client, pollIntervalMs = DEFAULT_POLL_INTERVAL_MS }: AppPr
           />
         }
       >
+        <MemoryPanel client={client} />
+        <RequestControls
+          client={client}
+          request={
+            messages.state.status === 'success'
+              ? messages.state.data.filter((m) => m.kind === 'request').at(-1)
+              : undefined
+          }
+          onUpdate={messages.upsert}
+        />
+        {messages.activity && <p role="status">{messages.activity}</p>}
         <PaneContent
           activeChat={activeChat}
           chatsLoaded={app.chats.state.status === 'success'}

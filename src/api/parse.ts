@@ -71,6 +71,8 @@ export function parseMessage(value: unknown): Message {
       kind === 'action_response'
         ? (readOptionalString(record, 'content') ?? '')
         : readString(record, 'content'),
+    requestMessageId: readOptionalString(record, 'requestMessageId'),
+    inReplyToMessageId: readOptionalString(record, 'inReplyToMessageId'),
     createdAt: readString(record, 'createdAt'),
     status: readStatus(record, kind),
     failureReason: readOptionalString(record, 'failureReason'),
@@ -119,4 +121,15 @@ export function parseApiError(status: number, payload: unknown): ApiError {
   } catch {
     return new ApiError('unknown', `Request failed with status ${status}.`, status);
   }
+}
+
+export function parseMemory(value: unknown): import('./types').UserMemory {
+  const data = asRecord(value);
+  const preferences = isAbsent(data.preferences) ? null : asRecord(data.preferences);
+  if (preferences && Object.values(preferences).some((value) => typeof value !== 'string'))
+    throw invalidResponse();
+  return {
+    instructions: readOptionalString(data, 'instructions') ?? null,
+    preferences: preferences as Record<string, string> | null,
+  };
 }

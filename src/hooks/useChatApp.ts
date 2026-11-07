@@ -1,4 +1,5 @@
 import { useCallback, useState } from 'react';
+import { describeError } from '../api/errors';
 import type { ApiClient } from '../api/client';
 import { pickActiveChat } from '../utils/chats';
 import { useChatActions } from './useChatActions';
@@ -24,16 +25,49 @@ export function useChatApp(client: ApiClient, pollIntervalMs: number) {
     onMessageCount: newChat.noteMessageCount,
   });
   const { recordRequest } = actions;
-  const { send } = messages;
+  const { send, upsert, state } = messages;
+  const [replyError, setReplyError] = useState<string | null>(null);
+  const [replying, setReplying] = useState(false);
 
   const sendMessage = useCallback(
     async (content: string): Promise<boolean> => {
       if (!activeChat) return false;
+      const items = state.status === 'success' ? state.data : [];
+      const pending = items.find(
+        (m) =>
+          m.kind === 'clarification' &&
+          !items.some((reply) => reply.inReplyToMessageId === m.messageId) &&
+          items.some(
+            (request) =>
+              request.messageId === m.requestMessageId && request.status === 'WAITING_USER',
+          ),
+      );
+      if (pending && pending.requestMessageId && client.replyToRequest) {
+        setReplying(true);
+        setReplyError(null);
+        try {
+          const reply = await client.replyToRequest(
+            activeChat.chatId,
+            pending.requestMessageId,
+            pending.messageId,
+            content,
+          );
+          upsert(reply);
+          const root = items.find((m) => m.messageId === pending.requestMessageId);
+          if (root) upsert({ ...root, status: 'RUNNING' });
+          return true;
+        } catch (error) {
+          setReplyError(describeError(error));
+          return false;
+        } finally {
+          setReplying(false);
+        }
+      }
       const request = await send(content);
       if (request) void recordRequest(activeChat, request);
       return request !== null;
     },
-    [activeChat, send, recordRequest],
+    [activeChat, send, recordRequest, state, client, upsert],
   );
 
   return {
@@ -43,7 +77,11 @@ export function useChatApp(client: ApiClient, pollIntervalMs: number) {
     selectChat: setSelectedId,
     startNewChat: newChat.startNewChat,
     isInNewChat: newChat.isInNewChat,
-    messages,
+    messages: {
+      ...messages,
+      isSending: messages.isSending || replying,
+      sendError: replyError ?? messages.sendError,
+    },
     sendMessage,
   };
 }

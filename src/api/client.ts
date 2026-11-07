@@ -1,9 +1,23 @@
 // The single boundary between the UI and the ContextForge API.
 import { createHttpClient } from './httpClient';
 import { createMockClient } from './mockClient';
-import type { Chat, Message } from './types';
+import type { Chat, Message, StreamEvent, UserMemory } from './types';
 
 export interface ApiClient {
+  streamRequest?(
+    chatId: string,
+    requestId: string,
+    onEvent: (event: StreamEvent) => void,
+  ): () => void;
+  replyToRequest?(
+    chatId: string,
+    requestId: string,
+    targetId: string,
+    content: string,
+  ): Promise<Message>;
+  cancelRequest?(chatId: string, requestId: string): Promise<Message>;
+  getMemory?(): Promise<UserMemory>;
+  saveMemory?(instructions: string): Promise<UserMemory>;
   /** E2: my chats, most recently updated first (first page). */
   listChats(): Promise<Chat[]>;
   /** E1: create an untitled chat. */

@@ -6,7 +6,7 @@ import { hasActiveRequest, mergeMessages, sortMessages } from '../utils/messages
 import { useLatestRequest } from './useLatestRequest';
 import { useSendRequest } from './useSendRequest';
 
-/** Polling stands in for the SSE stream (section 11.5) until streaming is built. */
+/** Polling recovers persisted state if an SSE connection is unavailable or interrupted. */
 export const DEFAULT_POLL_INTERVAL_MS = 1000;
 const MAX_POLL_INTERVAL_MS = 10_000;
 
@@ -42,6 +42,7 @@ export function useMessages(
 ) {
   const [owned, setOwned] = useState<OwnedMessages>(fresh(null, LOADING));
   const runLatest = useLatestRequest();
+  const [activity, setActivity] = useState<{ chatId: string; text: string } | null>(null);
   const current = owned.chatId === chatId ? owned : fresh(chatId, LOADING);
 
   const load = useCallback(
@@ -76,9 +77,33 @@ export function useMessages(
     [onMessageCount],
   );
 
+  const activeRequest =
+    current.state.status === 'success'
+      ? current.state.data
+          .filter(
+            (m) => m.kind === 'request' && (m.status === 'ACCEPTED' || m.status === 'RUNNING'),
+          )
+          .at(-1)?.messageId
+      : undefined;
+  useEffect(() => {
+    if (!chatId || !activeRequest || !client.streamRequest) return;
+    return client.streamRequest(chatId, activeRequest, (event) => {
+      if (event.kind === 'message') {
+        appendMessage(event.message);
+        refresh();
+      } else setActivity({ chatId, text: event.text });
+    });
+  }, [client, chatId, activeRequest, appendMessage, refresh]);
   const sender = useSendRequest(client, chatId, appendMessage);
   const reload = useCallback(() => load('replace'), [load]);
-  return { state: current.state, refreshError: current.refreshError, reload, ...sender };
+  return {
+    state: current.state,
+    refreshError: current.refreshError,
+    reload,
+    upsert: appendMessage,
+    activity: activeRequest && activity?.chatId === chatId ? activity.text : null,
+    ...sender,
+  };
 }
 
 /** Re-fetches while a request is active, doubling the delay after each failure (capped). */
