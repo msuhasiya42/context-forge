@@ -8,6 +8,9 @@ ellipsis. A web fact cited with another locator (a model wrote
 ``{"kind": "row", "value": "0"}`` for a search hit) is pointed at the URL whose saved text holds
 its excerpt. A fact failing all that is dropped, and the reason is kept as an uncertainty,
 never dropped silently. Facts that state the same claim are then merged (``merge_repeats``).
+
+A conclusion quotes no source, so cite checks only that the facts it rests on passed
+(``supported_conclusions``).
 """
 
 import json
@@ -17,7 +20,7 @@ from collections.abc import Iterable
 from typing import Any, TypedDict
 
 from contextforge.core.entities.artifact import Artifact, ArtifactKind, ArtifactStatus
-from contextforge.core.state import Fact, RequestState
+from contextforge.core.state import Conclusion, Fact, RequestState
 from contextforge.core.values import EvidenceRef, Locator, LocatorKind
 from contextforge.worker.deps import WorkerDeps
 
@@ -60,6 +63,31 @@ def merge_repeats(facts: list[Fact]) -> list[Fact]:
         Fact(text=group[0]["text"], evidence_refs=_union(f["evidence_refs"] for f in group))
         for group in groups.values()
     ]
+
+
+def supported_conclusions(
+    conclusions: list[Conclusion], facts: list[Fact]
+) -> tuple[list[Conclusion], list[str]]:
+    """The ``conclusions`` resting on at least one of ``facts`` (the facts that passed, merged),
+    each naming only those, by the merged fact's text; and one uncertainty per conclusion
+    dropped because none of its facts passed (F10 ruling 1)."""
+    passed = {claim_key(fact["text"]): fact["text"] for fact in facts}
+    kept: list[Conclusion] = []
+    dropped: list[str] = []
+    for conclusion in conclusions:
+        keys = dict.fromkeys(claim_key(text) for text in conclusion["based_on"])
+        based_on = [passed[key] for key in keys if key in passed]
+        if not based_on:
+            dropped.append(
+                f"unsupported conclusion, no finding it rests on held: {conclusion['text'][:80]}"
+            )
+            continue
+        kept.append(
+            Conclusion(
+                text=conclusion["text"], based_on=based_on, confidence=conclusion["confidence"]
+            )
+        )
+    return kept, dropped
 
 
 def claim_key(text: str) -> str:

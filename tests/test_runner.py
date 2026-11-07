@@ -176,9 +176,10 @@ def test_restart_after_crash_does_not_replay_finished_tasks(tmp_path) -> None:
     executes_after = [
         c for c in deps.repos.model_calls.list_by_request(req.message_id) if c.stage == "execute"
     ]
+    # The one task left to run, then the report's summary call.
     assert (
         len(executes_after) == 3
-        and len(deps.repos.model_calls.list_by_request(req.message_id)) == calls_before + 1
+        and len(deps.repos.model_calls.list_by_request(req.message_id)) == calls_before + 2
     )
     assert len([m for m in deps.repos.messages.list_by_chat("c1") if m.kind == "report"]) == 1
 
@@ -234,6 +235,7 @@ def test_deadline_counts_per_segment_so_a_late_request_still_gets_model_calls(tm
             ModelResponse(structured=six_task_plan()),
         ],
         "execute": [ModelResponse(structured=t1_result())] * 3,
+        "summary": [ModelResponse(text="Rows 12/13 are transfers.")],
     }
     deps = make_deps(ScriptedModel(script))
     deps.settings = Settings(_env_file=None, request_deadline_seconds=900)

@@ -10,6 +10,7 @@ from contextforge.core.entities.message import (
     ClarificationResponseMessage,
     MessageKind,
     ReportBody,
+    ReportConclusion,
     ReportConstraint,
     ReportMessage,
     RequestStatus,
@@ -19,18 +20,20 @@ from contextforge.core.entities.task import TaskStatus
 from contextforge.core.ids import derived_id, now_iso
 from contextforge.core.logging import request_context
 from contextforge.core.services.memory import user_timezone
-from contextforge.core.state import Fact, RequestState
-from contextforge.core.values import ArtifactRef, EvidenceRef
+from contextforge.core.state import Conclusion, Fact, RequestState
+from contextforge.core.values import ArtifactRef, EvidenceRef, LocatorKind
 from contextforge.worker.deps import WorkerDeps
-from contextforge.worker.stages.cite import merge_repeats
+from contextforge.worker.stages.cite import merge_repeats, supported_conclusions
 from contextforge.worker.stages.execute import TaskOutcome
 from contextforge.worker.stages.guards import check_not_cancelled, leave_running
-from contextforge.worker.stages.long_report import attach_if_long
+from contextforge.worker.stages.long_report import with_summary
 from contextforge.worker.stages.plan import answer_constraint, is_plan_mechanics, local_today
+from contextforge.worker.stages.summary import summarize
 
 logger = logging.getLogger(__name__)
 
 EVERY_TASK_FAILED = "every task failed"
+# The summary of a report without claims: there is nothing to summarise.
 NO_CLAIMS = "No finding could be supported with evidence."
 NOT_ANSWERED = "Not answered: {goal}"
 WITHHELD_ANSWER = (
@@ -56,8 +59,8 @@ def write_report(
 ) -> str:
     """Save the report, then end the request: COMPLETED when any task completed, else FAILED.
 
-    A report too long for the chat is saved whole as a deliverable Artifact and summarised
-    (``long_report``).
+    Its text opens with a summary covering every part of the request it answers (``summary``);
+    a report too long for the chat is saved whole as a deliverable Artifact (``long_report``).
 
     ``cite_uncertainties`` are the cite stage's reasons for the facts it dropped. The report id
     derives from the request, so a re-run overwrites it. Returns the final status; raises
@@ -66,8 +69,13 @@ def write_report(
     with request_context(brief["request_message_id"]):
         check_not_cancelled(deps, brief["chat_id"], brief["request_message_id"])
         report = _report_message(brief, outcomes, cite_uncertainties, _answers(brief, deps))
+        summary = (
+            summarize(brief, outcomes, report.report, _not_answered(outcomes), deps)
+            if report.report.claims
+            else NO_CLAIMS
+        )
         # The deliverable is saved before the Message, so its ref never points at nothing.
-        report = attach_if_long(report, brief["goal"], deps)
+        report = with_summary(report, brief["goal"], summary, deps)
         deps.repos.messages.save(report)
         completed = any(o["status"] == TaskStatus.COMPLETED for o in outcomes)
         status = RequestStatus.COMPLETED if completed else RequestStatus.FAILED
@@ -94,10 +102,15 @@ def _report_message(
 ) -> ReportMessage:
     request_message_id = brief["request_message_id"]
     report_id = derived_id(f"{request_message_id}:report")
-    claims = _claims(report_id, brief["facts"])
+    # One fact per claim: a comparison task restates its dependencies' facts (F7 ruling 3).
+    facts = merge_repeats(brief["facts"])
+    claims = _claims(report_id, facts)
+    conclusions, unsupported = supported_conclusions(_conclusions(outcomes), facts)
+    assessment = _assessment(conclusions, claims)
     withheld = [WITHHELD_ANSWER.format(question=a.question) for a in answers if not a.constraint]
     assumed = brief.get("assumptions", [])
-    uncertainties = [*withheld, *assumed, *_uncertainties(outcomes, cite_uncertainties)]
+    checked = [*cite_uncertainties, *unsupported]
+    uncertainties = [*withheld, *assumed, *_uncertainties(outcomes, checked)]
     now = now_iso()
     return ReportMessage(
         message_id=report_id,
@@ -106,11 +119,12 @@ def _report_message(
         sender=Sender.ASSISTANT,
         kind=MessageKind.REPORT,
         request_message_id=request_message_id,
-        content=_answer_text(claims, _not_answered(outcomes), uncertainties),
+        content=_answer_text(claims, assessment, _not_answered(outcomes), uncertainties),
         created_at=now,
         updated_at=now,
         report=ReportBody(
             claims=claims,
+            conclusions=assessment,
             inputs_consulted=_inputs_consulted(claims),
             uncertainties=uncertainties,
             constraints=_constraints(brief, answers),
@@ -147,9 +161,9 @@ def _answers(brief: RequestState, deps: WorkerDeps) -> list[_Answer]:
 
 
 def _claims(report_id: str, facts: list[Fact]) -> list[Claim]:
-    """One UNKNOWN claim per distinct claim, first occurrence first, citing the evidence of all
-    its repeats: a comparison task restates its dependencies' facts (live run 3, F7 ruling 3).
-    Checking claims against their evidence is phase 3."""
+    """One UNKNOWN claim per fact, in order; ``facts`` have their repeats merged, so each
+    claim cites the evidence of all of them. Checking claims against their evidence is
+    phase 3."""
     return [
         Claim(
             claim_id=derived_id(f"{report_id}:{index}"),
@@ -157,7 +171,25 @@ def _claims(report_id: str, facts: list[Fact]) -> list[Claim]:
             evidence_refs=[EvidenceRef.model_validate(ref) for ref in fact["evidence_refs"]],
             status="UNKNOWN",
         )
-        for index, fact in enumerate(merge_repeats(facts))
+        for index, fact in enumerate(facts)
+    ]
+
+
+def _conclusions(outcomes: list[TaskOutcome]) -> list[Conclusion]:
+    return [c for outcome in outcomes for c in outcome.get("conclusions", [])]
+
+
+def _assessment(conclusions: list[Conclusion], claims: list[Claim]) -> list[ReportConclusion]:
+    """Each conclusion linked to the claims it rests on. Cite named them by the texts of the
+    facts those claims were made from (``supported_conclusions``)."""
+    claim_ids = {claim.text: claim.claim_id for claim in claims}
+    return [
+        ReportConclusion(
+            text=conclusion["text"],
+            based_on=[claim_ids[text] for text in conclusion["based_on"]],
+            confidence=conclusion["confidence"],
+        )
+        for conclusion in conclusions
     ]
 
 
@@ -219,20 +251,42 @@ def _not_answered(outcomes: list[TaskOutcome]) -> list[str]:
     ]
 
 
-def _answer_text(claims: list[Claim], not_answered: list[str], uncertainties: list[str]) -> str:
-    """The answers first: each claim with its source links, then what was not answered, then
-    the limitations. With no claims the rest still follows, so the reader sees what is missing
-    and why nothing could be supported."""
-    lines = [] if claims else [NO_CLAIMS]
-    for claim in claims:
-        urls = list(
-            dict.fromkeys(
-                ref.locator.value for ref in claim.evidence_refs if ref.locator.kind.value == "url"
-            )
-        )
-        links = " ".join(f"[source]({url})" for url in urls)
-        lines.append(f"{claim.text} {links}".strip())
+def _answer_text(
+    claims: list[Claim],
+    assessment: list[ReportConclusion],
+    not_answered: list[str],
+    uncertainties: list[str],
+) -> str:
+    """The full text, after the summary: each claim, numbered, with its source links, and the
+    assessment drawn from them; then what was not answered, then the limitations (F7 ruling 4,
+    F10 rulings 1 and 3). With no claims the rest still follows, so the reader sees what is
+    missing and why nothing could be supported."""
+    numbers = {claim.claim_id: number for number, claim in enumerate(claims, 1)}
+    lines = [f"{numbers[claim.claim_id]}. {_with_sources(claim)}" for claim in claims]
+    if assessment:
+        conclusions = [_assessment_line(conclusion, numbers) for conclusion in assessment]
+        lines.append("Assessment:\n" + "\n".join(conclusions))
     lines.extend(not_answered)
     if uncertainties:
         lines.append("Limitations:\n" + "\n".join(f"- {text}" for text in uncertainties))
     return "\n\n".join(lines)
+
+
+def _with_sources(claim: Claim) -> str:
+    """The claim followed by a link to each URL its evidence cites."""
+    urls = dict.fromkeys(
+        ref.locator.value for ref in claim.evidence_refs if ref.locator.kind == LocatorKind.URL
+    )
+    return " ".join([claim.text, *(f"[source]({url})" for url in urls)])
+
+
+def _assessment_line(conclusion: ReportConclusion, numbers: dict[str, int]) -> str:
+    """A conclusion with the numbers of the findings it rests on; never a source link, since
+    no source states it."""
+    based_on = [str(numbers[claim_id]) for claim_id in conclusion.based_on]
+    findings = (
+        f"finding {based_on[0]}"
+        if len(based_on) == 1
+        else f"findings {', '.join(based_on[:-1])} and {based_on[-1]}"
+    )
+    return f"- {conclusion.text} (based on {findings}; {conclusion.confidence} confidence)"

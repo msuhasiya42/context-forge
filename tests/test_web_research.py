@@ -17,6 +17,7 @@ from contextforge.core.entities.artifact import Artifact, ArtifactKind, Artifact
 from contextforge.core.entities.chat import Chat
 from contextforge.core.entities.message import Claim, ReportBody, ReportMessage, RequestMessage
 from contextforge.core.models.base import ModelRequest, ModelResponse, ToolCall
+from contextforge.core.models.errors import ModelError
 from contextforge.core.models.scripted import ScriptedModel
 from contextforge.core.storage import raw_result_key
 from contextforge.core.tools.base import ToolContext, ToolResult
@@ -509,6 +510,8 @@ class _WebAgent:
             stubs = " ".join(str(m.content) for m in request.messages)
             handles = ", ".join(re.findall(r"artifact=(\w+)\]", stubs))
             return ModelResponse(text=f"Searched once and read two pages; artifacts {handles}.")
+        if request.stage == "summary":
+            raise ModelError("no summary scripted; the report builds its own")
         return self.turns[len(self.calls("execute")) - 1](request)
 
     def calls(self, stage: str) -> list[ModelRequest]:
