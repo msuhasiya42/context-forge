@@ -5,3 +5,5 @@ __pycache__/
 .env
 .superpowers/
 .idea/
+.claude/worktrees/
+.playwright-mcp/
