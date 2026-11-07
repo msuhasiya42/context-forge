@@ -145,3 +145,57 @@ it('opens a long report in a side panel, renders its markdown safely and downloa
   expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
   expect(open).toHaveFocus();
 });
+
+it('shows a report summary as its body and its assessment in the full report', async () => {
+  // F10: every report opens with a summary of each answered part and the assessment; the
+  // backend's "Full report attached." becomes the View full report control.
+  const summary =
+    'Ajmer highs range from 63°F to 90°F, and Palanpur highs from 86°F to 93°F. ' +
+    'Both cities suit a visit now, Ajmer being the milder.';
+  const report = parseMessage({
+    messageId: 'rep1',
+    chatId: 'c1',
+    userId: 'u1',
+    sender: 'assistant',
+    kind: 'report',
+    content: `${summary}\n\n2 findings, 1 limitation. Full report attached.`,
+    requestMessageId: 'r1',
+    createdAt: '2026-11-07T10:02:00Z',
+    updatedAt: '2026-11-07T10:02:00Z',
+    report: {
+      claims: [],
+      conclusions: [{ text: 'Both cities suit a visit now.', basedOn: [], confidence: 'medium' }],
+      inputsConsulted: [],
+      deliverables: [{ artifactId: 'art1', role: 'output' }],
+      uncertainties: [],
+      coverage: {},
+    },
+  });
+  const client = createMockClient({
+    seed: {
+      chats: [chat('c1', 'Ajmer trip', '2026-11-07T10:02:00Z')],
+      messages: [
+        userRequest('r1', 'c1', 'Weather in Ajmer and Palanpur', '2026-11-07T10:00:00Z'),
+        report,
+      ],
+    },
+  });
+  client.getArtifactContent = vi.fn(
+    async () =>
+      `# Ajmer and Palanpur\n\n${summary}\n\n` +
+      '1. Ajmer highs range from 63°F to 90°F. [source](https://example.com/a)\n\n' +
+      '2. Palanpur highs range from 86°F to 93°F. [source](https://example.com/p)\n\n' +
+      'Assessment:\n- Both cities suit a visit now. (based on findings 1 and 2; medium confidence)',
+  );
+  const { user } = renderApp(client);
+
+  const body = await screen.findByText(/Both cities suit a visit now, Ajmer being the milder\./);
+  expect(body).toHaveTextContent(`${summary} 2 findings, 1 limitation.`);
+  expect(screen.queryByText(/Full report attached/)).not.toBeInTheDocument();
+  await user.click(screen.getByRole('button', { name: 'View full report' }));
+  const panel = await screen.findByRole('dialog', { name: 'Full report' });
+  expect(await within(panel).findByText('Assessment:')).toBeVisible();
+  const conclusion = within(panel).getByText(/based on findings 1 and 2; medium confidence/);
+  expect(conclusion.closest('li')).not.toBeNull();
+  expect(within(conclusion.closest('li') as HTMLElement).queryByRole('link')).toBeNull();
+});

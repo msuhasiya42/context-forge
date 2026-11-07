@@ -34,6 +34,16 @@ const STATUS_LABELS: Record<MessageStatus, string> = {
   UNCERTAIN: 'Outcome uncertain',
 };
 
+// The backend's pointer to a long report's deliverable: "Full report attached." after the
+// counts, or "Full report attached: " before them in reports written before 7 Nov 2026.
+const ATTACHED_NOTE = /\s*Full report attached[.:] ?/;
+
+/** A report's text as the chat shows it beside its "View full report" control, which takes
+ * the place of the backend's "Full report attached" note. */
+export function withoutAttachedNote(content: string): string {
+  return content.replace(ATTACHED_NOTE, (note) => (note.startsWith('\n') ? '\n\n' : '')).trim();
+}
+
 export const senderLabel = (sender: Sender) => SENDER_LABELS[sender];
 export const kindLabel = (kind: MessageKind) => KIND_LABELS[kind] ?? null;
 export const statusLabel = (status: MessageStatus) => STATUS_LABELS[status];

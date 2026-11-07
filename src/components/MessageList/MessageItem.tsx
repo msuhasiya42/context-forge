@@ -1,7 +1,13 @@
 import type { Message } from '../../api/types';
 import controls from '../../styles/controls.module.css';
 import { classNames } from '../../utils/classNames';
-import { formatMessageTime, kindLabel, senderLabel, statusLabel } from '../../utils/messages';
+import {
+  formatMessageTime,
+  kindLabel,
+  senderLabel,
+  statusLabel,
+  withoutAttachedNote,
+} from '../../utils/messages';
 import styles from './MessageList.module.css';
 
 interface MessageItemProps {
@@ -16,6 +22,8 @@ export function MessageItem({ message, onOpenReport, onOpenDeepDive }: MessageIt
   const tag = kindLabel(message.kind);
   const reportId = onOpenReport && message.deliverableArtifactIds?.[0];
   const deepDiveId = onOpenDeepDive && deepDiveRequestId(message);
+  // The report's summary is its body; its control replaces the "Full report attached" note.
+  const content = reportId ? withoutAttachedNote(message.content) : message.content;
   return (
     <li
       className={classNames(
@@ -28,7 +36,7 @@ export function MessageItem({ message, onOpenReport, onOpenDeepDive }: MessageIt
         {tag && <span className={styles.tag}>{tag}</span>}
         <time dateTime={message.createdAt}>{formatMessageTime(message.createdAt)}</time>
       </p>
-      {message.content && <p className={styles.content}>{linkedSources(message.content)}</p>}
+      {content && <p className={styles.content}>{linkedSources(content)}</p>}
       {(reportId || deepDiveId) && (
         <div className={styles.actions}>
           {reportId && (
