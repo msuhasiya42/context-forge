@@ -252,6 +252,7 @@ def test_cite_keeps_only_facts_quoting_their_snapshot_by_url():
     page = (
         "<p>Python 3.13 ships a <b>new</b>\n   interactive interpreter.</p>"
         "<p>It also adds an experimental JIT.</p>"
+        "<p>The S&amp;P 500 index rose 2% this week.</p>"
     )
     snippet = "What is new in Python 3.13, the release of October 2024."
 
@@ -276,9 +277,12 @@ def test_cite_keeps_only_facts_quoting_their_snapshot_by_url():
 
     quoted = fact(page_id, "python 3.13 ships a NEW interactive   interpreter")
     from_snippet = fact(rows_id, "the release of October 2024")
+    # Re-review I-3: an ampersand is quoted as the page reads, never as "&amp;".
+    ampersand = fact(page_id, "The S&P 500 index rose 2% this week")
     brief = initial_brief(_request("research"))
     brief["facts"] = [
         quoted,
+        ampersand,
         fact(page_id, "Python 3.13 removes the GIL for good", kind="section", value="intro"),
         fact(page_id, "ships"),
         fact(page_id, "Python 3.13 removes the GIL for good"),
@@ -286,7 +290,7 @@ def test_cite_keeps_only_facts_quoting_their_snapshot_by_url():
         from_snippet,
     ]
     citations = check_citations(brief, deps)
-    assert citations["facts"] == [quoted, from_snippet]
+    assert citations["facts"] == [quoted, ampersand, from_snippet]
     assert citations["uncertainties"] == [
         f"unsupported excerpt for artifact {page_id}: web evidence needs a url locator",
         f"unsupported excerpt for {DOCS_URL}",

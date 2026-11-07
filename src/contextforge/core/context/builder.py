@@ -5,7 +5,6 @@ clock and invents no ids, so the same inputs give byte-identical output and the 
 (the two system blocks) stays cacheable across calls.
 """
 
-import html
 import json
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -140,12 +139,14 @@ _TEXT_CAP = 2000
 
 def _untrusted(text: str, cap: int = _TEXT_CAP) -> str:
     """``text`` that may hold page or upload text, directly or quoted by a model, made safe for
-    a brief block: on one line, cut to ``cap`` characters ("…" included) and escaped, so it
-    cannot close the block it sits in or forge a tag."""
+    a brief block: on one line, cut to ``cap`` characters ("…" included), with ``<`` and ``>``
+    escaped, so it cannot close the block it sits in or forge a tag. ``&`` is left alone: the
+    model copies this text into facts and excerpts, and "S&amp;P 500" would reach the report
+    and fail cite (nothing downstream decodes entities)."""
     flat = " ".join(text.split())
     if len(flat) > cap:
         flat = flat[: cap - 1] + "…"
-    return html.escape(flat, quote=False)
+    return flat.replace("<", "&lt;").replace(">", "&gt;")
 
 
 def _source_text(source: SourceLine) -> str:
