@@ -9,6 +9,19 @@ prices:
   anthropic.claude-opus-5-5:  { inputPerMTok: 4.00, outputPerMTok: 20.00, cacheReadPerMTok: 0.20 }
   anthropic.claude-haiku-5-5: { inputPerMTok: 0.10, outputPerMTok: 0.50,  cacheReadPerMTok: 0.01 }
   scripted:                   { inputPerMTok: 0.0,  outputPerMTok: 0.0,   cacheReadPerMTok: 0.0 }
+  # Planner bake-off candidates: the AWS Price List for Bedrock in ap-southeast-2 (published
+  # 6 Nov 2026), on-demand standard tier, recorded 7 Nov 2026. Nova 2 Lite runs only through its
+  # global profile and these are that profile's prices. cacheReadPerMTok is 0.0 where the list
+  # has no cache price; no call sends a cache point. Kimi K3.1 is not in the price list: the
+  # Bedrock pricing page's Global CRIS price for "Kimi K3.1 Pro - Highspeed", unverified.
+  "amazon.nova-2-lite-v1:0":               { inputPerMTok: 0.32,   outputPerMTok: 2.63,   cacheReadPerMTok: 0.08 }
+  "mistral.mistral-large-3-675b-instruct": { inputPerMTok: 0.515,  outputPerMTok: 1.545,  cacheReadPerMTok: 0.0 }
+  "deepseek.v3.2":                         { inputPerMTok: 0.64,   outputPerMTok: 1.91,   cacheReadPerMTok: 0.0 }
+  "qwen.qwen3-235b-a22b-2507-v1:0":        { inputPerMTok: 0.2266, outputPerMTok: 0.9064, cacheReadPerMTok: 0.0 }
+  "openai.gpt-oss-120b-1:0":               { inputPerMTok: 0.1545, outputPerMTok: 0.618,  cacheReadPerMTok: 0.0 }
+  "moonshotai.kimi-k3.1":                  { inputPerMTok: 4.00,   outputPerMTok: 20.00,  cacheReadPerMTok: 0.0 }
+  "minimax.minimax-m2.5":                  { inputPerMTok: 0.31,   outputPerMTok: 1.24,   cacheReadPerMTok: 0.0 }
+  "nvidia.nemotron-super-3-120b":          { inputPerMTok: 0.15,   outputPerMTok: 0.67,   cacheReadPerMTok: 0.0 }
 # The model per stage on the Bedrock backend. CONTEXTFORGE_PLANNER_MODEL (plan, cite) and
 # CONTEXTFORGE_EXECUTOR_MODEL (execute, compress) may override it; prices always come from above.
 stages:

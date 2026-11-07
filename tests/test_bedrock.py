@@ -1,3 +1,5 @@
+import json
+
 import botocore.session
 import pytest
 from botocore.exceptions import ConnectTimeoutError, ReadTimeoutError
@@ -280,3 +282,51 @@ def test_runtime_builds_one_bedrock_client_per_stage_timeout_without_sdk_retries
     assert timeouts[Stage.PLAN] == timeouts[Stage.CITE] == 120
     assert timeouts[Stage.EXECUTE] == timeouts[Stage.COMPRESS] == 60
     assert model.runtime_for(Stage.PLAN).meta.config.retries["total_max_attempts"] == 1
+
+
+def test_a_refused_field_is_dropped_for_the_model_and_reasoning_blocks_are_skipped() -> None:
+    """Live (F8): Kimi K3.1 refuses temperature, and a model may refuse the forced result tool
+    or tools; each refusal is free, so the call is sent again without the field, and later calls
+    to that model leave it out. gpt-oss and MiniMax answer with a reasoning block first."""
+    client, stubber = _stubbed_runtime()
+    for refusal in (
+        "This model doesn't support the temperature field. Remove temperature and try again.",
+        "This model doesn't support the toolConfig.toolChoice.tool field. Remove it and try again.",
+        "This model doesn't support tool use.",
+    ):
+        stubber.add_client_error("converse", "ValidationException", refusal, 400)
+    stubber.add_response("converse", _reply([{"text": json.dumps(six_task_plan())}]))
+    stubber.add_response("converse", _reply([{"text": json.dumps(six_task_plan())}]))
+    sent: list[dict] = []
+
+    class Recorded:
+        def converse(self, **payload):
+            sent.append(payload)
+            return client.converse(**payload)
+
+    model = BedrockModel(Recorded())
+    request = ModelRequest(
+        stage="plan",
+        model="kimi",
+        system=["plan"],
+        messages=[HumanMessage("Compare")],
+        output_schema=PlannerOutput,
+    )
+    with stubber:
+        assert model.invoke(request).structured == six_task_plan()
+        assert model.invoke(request).structured == six_task_plan()
+    assert sent[0]["inferenceConfig"]["temperature"] == 0 and "toolChoice" in sent[0]["toolConfig"]
+    assert "temperature" not in sent[1]["inferenceConfig"]
+    assert "toolChoice" not in sent[2]["toolConfig"] and "toolConfig" not in sent[3]
+    assert "return_result tool is not available" in sent[3]["system"][-1]["text"]
+    assert len(sent) == 5 and sent[4] == sent[3]  # the second call starts without all three
+    reasoning_first = _reply(
+        [
+            {"SDK_UNKNOWN_MEMBER": {"name": "reasoningContent"}},
+            {"reasoningContent": {"reasoningText": {"text": "First compare rents."}}},
+            {"toolUse": {"toolUseId": "r", "name": "return_result", "input": six_task_plan()}},
+        ],
+        "tool_use",
+    )
+    parsed = parse_response(reasoning_first, expects_result=True)
+    assert parsed.structured == six_task_plan() and parsed.text is None
