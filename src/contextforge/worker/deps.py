@@ -18,6 +18,7 @@ from contextforge.core.entities.message import (
 )
 from contextforge.core.models.base import ModelClient
 from contextforge.core.models.recording import PriceTable, RecordingModelClient
+from contextforge.core.models.transcript import TranscriptWriter
 from contextforge.core.queue import Queue
 from contextforge.core.repositories.memory import Repositories
 from contextforge.core.settings import Settings
@@ -67,7 +68,8 @@ class WorkerDeps:
     ) -> ModelClient:
         """The model client for one request. Every attempt is admitted against the request's call
         budget (with settings, also its spend cap and deadline), retried when transient, and
-        saved as a ModelCall priced from its usage.
+        saved as a ModelCall priced from its usage, with its transcript unless settings turn
+        transcripts off.
 
         The deadline counts from the start of the request's current segment, never from the
         request's creation (A-C1), so time spent waiting on the user is not counted.
@@ -82,6 +84,7 @@ class WorkerDeps:
             prices=self.prices,
             unknown_cost_usd=settings.call_reserve_usd if settings else None,
             provider=self.model_provider,
+            transcripts=self._transcript_writer(),
         )
         deadline = None
         if settings is not None:
@@ -103,6 +106,17 @@ class WorkerDeps:
             pending=self.pending_calls,
             deadline=deadline,
         )
+
+    def _transcript_writer(self) -> TranscriptWriter | None:
+        """Writes transcripts to the blob store, redacting the configured secrets; None when
+        settings turn transcripts off. Without settings (tests) they are recorded."""
+        settings = self.settings
+        if settings is None:
+            return TranscriptWriter(self.blobs)
+        if not settings.record_transcripts:
+            return None
+        keys = (settings.serper_api_key, settings.langsmith_api_key, settings.dev_token)
+        return TranscriptWriter(self.blobs, [k.get_secret_value() for k in keys if k is not None])
 
     @contextmanager
     def segment(self, chat_id: str, request_message_id: str) -> Iterator[None]:

@@ -92,6 +92,24 @@ def test_sum_usage_is_none_when_unknown() -> None:
     assert repos.model_calls.sum_usage("m1") == Usage(input_tokens=10, output_tokens=5)
 
 
+def test_a_model_call_is_got_only_under_its_own_request() -> None:
+    repos = Repositories.in_memory()
+    call = ModelCall(
+        model_call_id="k1",
+        request_message_id="m1",
+        stage="plan",
+        model="fake",
+        context_version="mem:1|prompt:plan.1",
+        usage=None,
+        price_version="2026-11-04",
+        outcome="COMPLETED",
+        started_at="t",
+    )
+    repos.model_calls.save(call)
+    assert repos.model_calls.get("m1", "k1") == call
+    assert repos.model_calls.get("m2", "k1") is None and repos.model_calls.get("m1", "k2") is None
+
+
 def _clarification(request_message_id: str, content: str) -> ClarificationMessage:
     return ClarificationMessage(
         kind=MessageKind.CLARIFICATION,

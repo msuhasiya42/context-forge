@@ -13,7 +13,7 @@ from contextforge.api import main
 from contextforge.api.main import create_app, event_stream
 from contextforge.core.entities.message import ClarificationMessage, ClarificationResponseMessage
 from contextforge.core.ids import now_iso
-from contextforge.core.models.base import ModelResponse
+from contextforge.core.models.base import ModelResponse, ToolCall
 from contextforge.core.models.scripted import ScriptedModel
 from contextforge.core.queue import InProcessQueue, WorkMessage
 from contextforge.core.services.application import Application, title_from
@@ -424,3 +424,144 @@ def test_consumer_redelivers_a_start_that_failed_before_its_claim(monkeypatch, c
     consumer.start()  # a stopped consumer starts again on a new thread
     assert consumer.running
     consumer.stop()
+
+
+def _two_task_plan() -> dict:
+    """A plan of two sql_analysis tasks on a2, the second after the first."""
+    task = {"kind": "sql_analysis", "inputArtifactIds": ["a2"]}
+    return {
+        "kind": "plan",
+        "goal": "Compare September and October spending.",
+        "constraints": [],
+        "openQuestions": [],
+        "tasks": [
+            {**task, "ref": "t1", "goal": "Look at the first rows.", "dependsOn": []},
+            {**task, "ref": "t2", "goal": "Total spend per month.", "dependsOn": ["t1"]},
+        ],
+        "nextAction": "Run t1, then t2.",
+    }
+
+
+def _traced_run(tmp_path, *, clarify: bool, **settings) -> tuple:
+    """Run one request through the API on a scripted model: optionally one question, then two
+    tasks, the first making one sql_query call. The client, the request path and the deps."""
+    query = ToolCall(
+        id="x1", name="sql_query", arguments={"dataset_id": "a2", "sql": "SELECT * FROM t LIMIT 5"}
+    )
+    asks = [ModelResponse(structured=clarification("Which months?"))] if clarify else []
+    deps = make_deps(
+        ScriptedModel(
+            {
+                "plan": [*asks, ModelResponse(structured=_two_task_plan())],
+                "execute": [
+                    ModelResponse(tool_calls=[query], stop_reason="tool_use"),
+                    ModelResponse(structured=t1_result()),
+                    ModelResponse(structured=t1_result()),
+                ],
+            }
+        ),
+        tasks_in_flight=1,
+        settings=_settings(tmp_path, **settings),
+    )
+    seed_chat_with_dataset(deps, chat_id="c1", user_id="u1", dataset_id="a2")
+    client = TestClient(create_app(deps.settings, deps=deps))
+    return client, deps
+
+
+def test_the_trace_shows_the_planner_its_question_the_tasks_their_calls_and_tool_calls(tmp_path):
+    """F6 Deep Dive: one request with a clarification, two tasks and one tool call; the trace
+    tree, its events in order, and each call's transcript with the tool use and its result."""
+    client, deps = _traced_run(tmp_path, clarify=True)
+    with client:
+        request_id = client.post(
+            "/chats/c1/requests", json={"content": "Compare"}, headers={"Idempotency-Key": "t"}
+        ).json()["messageId"]
+        path = f"/chats/c1/requests/{request_id}"
+        assert _until(client, path, "WAITING_USER") == "WAITING_USER"
+        waiting = client.get(path + "/trace").json()
+        [question] = waiting["plan"]["clarifications"]
+        client.post(
+            path + "/replies",
+            json={"inReplyToMessageId": question["messageId"], "content": "Sep and Oct"},
+        )
+        assert _until(client, path, "COMPLETED", "FAILED") == "COMPLETED"
+        trace = client.get(path + "/trace").json()
+        first_task_calls = trace["tasks"][0]["calls"]
+        transcripts = [
+            client.get(f"{path}/model-calls/{call['modelCallId']}/transcript").json()
+            for call in first_task_calls
+        ]
+        foreign = client.get(
+            f"/chats/c1/requests/other/model-calls/{first_task_calls[0]['modelCallId']}/transcript"
+        )
+        missing = client.get(f"{path}/model-calls/nope/transcript")
+    assert waiting["request"]["status"] == "WAITING_USER" and waiting["tasks"] == []
+    assert [e["kind"] for e in waiting["events"]] == ["planner_call", "clarification"]
+
+    plan = trace["plan"]
+    assert [c["stage"] for c in plan["calls"]] == ["plan", "plan"]
+    assert all(c["hasTranscript"] and c["durationMs"] >= 0 for c in plan["calls"])
+    assert [m["content"] for m in plan["clarifications"]] == ["Which months?", "Sep and Oct"]
+    first, second = trace["tasks"]
+    assert plan["tasksCreated"] == [first["taskId"], second["taskId"]]
+    assert second["dependsOnTaskIds"] == [first["taskId"]] and first["inputArtifactIds"] == ["a2"]
+    assert [len(t["calls"]) for t in trace["tasks"]] == [2, 1]
+    [tool_call] = first["calls"][0]["toolCalls"]
+    assert (
+        tool_call["name"] == "sql_query"
+        and tool_call["arguments"]["sql"] == "SELECT * FROM t LIMIT 5"
+    )
+    assert tool_call["status"] == "ok" and tool_call["rowCount"] == 5
+    assert tool_call["resultInModelCallId"] == first["calls"][1]["modelCallId"]
+    assert first["calls"][1]["toolCalls"] == [] and "transcriptRef" not in first["calls"][0]
+    assert trace["report"]["claims"] > 0
+    assert [e["kind"] for e in trace["events"]] == [
+        "planner_call",
+        "clarification",
+        "clarification_answer",
+        "planner_call",
+        "task_created",
+        "task_created",
+        "task_started",
+        "model_call",
+        "tool_call",
+        "model_call",
+        "task_completed",
+        "task_started",
+        "model_call",
+        "task_completed",
+        "report",
+    ]
+
+    asked, answered = transcripts
+    assert (
+        asked["request"]["stage"] == "execute"
+        and asked["request"]["tools"][0]["name"] == "sql_query"
+    )
+    assert asked["response"]["toolCalls"] == [
+        {"id": "x1", "name": "sql_query", "arguments": tool_call["arguments"]}
+    ]
+    *_, used, result = answered["request"]["messages"]
+    assert used["role"] == "assistant" and used["toolCalls"][0]["id"] == "x1"
+    assert result["role"] == "tool" and result["toolCallId"] == "x1" and result["rowCount"] == 5
+    assert answered["response"]["structured"]["summary"] == t1_result()["summary"]
+    assert (foreign.status_code, missing.status_code) == (404, 404)
+    assert missing.json()["error"]["code"] == "not_found"
+
+
+def test_with_transcripts_off_no_call_has_one_and_the_route_is_404(tmp_path):
+    client, deps = _traced_run(tmp_path, clarify=False, record_transcripts=False)
+    with client:
+        request_id = client.post(
+            "/chats/c1/requests", json={"content": "Compare"}, headers={"Idempotency-Key": "off"}
+        ).json()["messageId"]
+        path = f"/chats/c1/requests/{request_id}"
+        assert _until(client, path, "COMPLETED", "FAILED") == "COMPLETED"
+        trace = client.get(path + "/trace").json()
+        calls = [*trace["plan"]["calls"], *(c for t in trace["tasks"] for c in t["calls"])]
+        routes = {
+            client.get(f"{path}/model-calls/{c['modelCallId']}/transcript").status_code
+            for c in calls
+        }
+    assert len(calls) == 4 and not any(c["hasTranscript"] or c["toolCalls"] for c in calls)
+    assert routes == {404}

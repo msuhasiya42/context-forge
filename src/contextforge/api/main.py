@@ -20,6 +20,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
+from contextforge.core.entities import wire
 from contextforge.core.entities.message import RequestMessage, RequestStatus
 from contextforge.core.logging import configure as configure_logging
 from contextforge.core.services.application import (
@@ -28,7 +29,6 @@ from contextforge.core.services.application import (
     RequestView,
     ServiceError,
     page,
-    wire,
 )
 from contextforge.core.settings import Settings
 from contextforge.infra.runtime import build_worker
@@ -173,6 +173,21 @@ def create_app(settings: Settings | None = None, *, deps: WorkerDeps | None = No
     )
     def reply(chat_id: str, message_id: str, body: ReplyBody) -> dict[str, Any]:
         return wire(service.reply(chat_id, message_id, body.inReplyToMessageId, body.content))
+
+    @app.get("/chats/{chat_id}/requests/{message_id}/trace", dependencies=[Depends(authorized)])
+    def trace(chat_id: str, message_id: str) -> dict[str, Any]:
+        return service.trace(chat_id, message_id)
+
+    @app.get(
+        "/chats/{chat_id}/requests/{message_id}/model-calls/{model_call_id}/transcript",
+        dependencies=[Depends(authorized)],
+    )
+    def transcript(chat_id: str, message_id: str, model_call_id: str) -> Response:
+        return Response(
+            service.transcript(chat_id, message_id, model_call_id),
+            media_type="application/json",
+            headers={"X-Content-Type-Options": "nosniff"},
+        )
 
     @app.get("/chats/{chat_id}/requests/{message_id}/events", dependencies=[Depends(authorized)])
     def events(chat_id: str, message_id: str) -> StreamingResponse:

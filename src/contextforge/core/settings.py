@@ -46,5 +46,9 @@ class Settings(BaseSettings):
     trace_content: bool = False
     langsmith_api_key: SecretStr | None = Field(default=None, validation_alias="LANGSMITH_API_KEY")
     langsmith_project: str = Field(default="contextforge", validation_alias="LANGSMITH_PROJECT")
+    # Store each ModelCall's exact prompt and answer as JSON in the blob store, for the Deep Dive
+    # (GET .../model-calls/{id}/transcript). They hold user data and fetched page text: turn this
+    # off for a shared deployment. Known secret values are redacted from them either way.
+    record_transcripts: bool = True
     run_worker: bool = True
     sse_poll_seconds: float = Field(default=1, gt=0)

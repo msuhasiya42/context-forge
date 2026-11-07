@@ -342,6 +342,10 @@ class DynamoCalls:
     def save(self, call: ModelCall) -> None:
         self.store.put(f"REQ#{call.request_message_id}", f"CALL#{call.model_call_id}", call)
 
+    def get(self, request_message_id: str, model_call_id: str) -> ModelCall | None:
+        raw = self.store.get(f"REQ#{request_message_id}", f"CALL#{model_call_id}")
+        return ModelCall.model_validate(raw) if raw else None
+
     def list_by_request(self, request_message_id: str) -> list[ModelCall]:
         return [
             ModelCall.model_validate(x)

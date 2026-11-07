@@ -163,8 +163,9 @@ m9  user       request                  messageId=m9   (new work)
 | outcome | yes | COMPLETED, ERROR, TIMEOUT, CANCELLED |
 | failureReason | when not COMPLETED | Diagnosis |
 | langsmithRunId | no | Bridge into the trace |
-| startedAt | yes | Latency |
-| endedAt | no | Latency; absent on timeout |
+| transcriptRef | no | Storage ref of the call's transcript: the exact request (system blocks, messages, tools, output schema) and the response or error as JSON at `transcripts/<requestMessageId>/<modelCallId>.json`; known secrets redacted; absent when `CONTEXTFORGE_RECORD_TRANSCRIPTS` is off (7 Nov 2026, Deep Dive) |
+| startedAt | yes | Latency; millisecond precision |
+| endedAt | no | Latency; absent on timeout; millisecond precision |
 
 A replayed saved output never creates a ModelCall. Each retry attempt is its own ModelCall, so attempts per task are countable by `taskId` and `outcome`. Removed: attempt, promptVersion (in contextVersion), offeredToolIds, contextSnapshotArtifactId, redacted, errorMessage.
 
@@ -923,6 +924,8 @@ Numbered as agreed in review. "Model change" marks items that add a field or eve
 | E14 | `GET`, `PATCH /me` | Preferences and standing instructions; singular because there is exactly one | 200, 400 |
 | E15 | `PATCH /chats/{chatId}` | Rename | 200, 404 |
 | E16 | `DELETE /chats/{chatId}` | Archive: Chat status ARCHIVED, hidden from E2; objects kept | 204, 404 |
+| E17 | `GET /chats/{chatId}/requests/{messageId}/trace` | Deep Dive: planner calls and clarifications, Tasks with their ModelCalls and derived tool calls, report summary, and every step as ordered `events` | 200, 404 |
+| E18 | `GET /chats/{chatId}/requests/{messageId}/model-calls/{modelCallId}/transcript` | One ModelCall's stored transcript JSON | 200, 404 |
 
 Not included on purpose: separate approve and reject routes (E7 covers both), a resume endpoint (replies resume), a single-message read (E3 covers it), integration and connection endpoints (MCP phase). Who writes what is unchanged from section 3.3: the API writes request, clarification_response and action_response; the worker writes everything else and owns every status except CANCELLED.
 
@@ -994,7 +997,26 @@ GET /chats/c1/requests/m1
   "usage": { "inputTokens": 4200, "outputTokens": 610, "estimatedCostUsd": 0.0183, "modelCalls": 1 } }
 ```
 
-`usage` sums ModelCall records (access pattern 9). Individual ModelCalls are not returned; LangSmith is where they are inspected.
+`usage` sums ModelCall records (access pattern 9). Individual ModelCalls are returned by E17, the Deep Dive trace (7 Nov 2026):
+
+```http
+GET /chats/c1/requests/m1/trace
+
+200
+{ "request": { "messageId": "m1", "content": "...", "status": "COMPLETED", "failureReason": null,
+               "createdAt": "...", "usage": { ...as E5 } },
+  "plan": { "calls": [ { ...ModelCall k1, "durationMs": 4210, "hasTranscript": true, "toolCalls": [] } ],
+            "tasksCreated": ["t1", "t2"],
+            "clarifications": [ { ...Message m2 }, { ...Message m3 } ] },
+  "tasks": [ { ...Task t1, "calls": [ { ...ModelCall k2, "durationMs": 1830, "hasTranscript": true,
+               "toolCalls": [ { "id": "x1", "name": "sql_query", "arguments": {...}, "status": "ok",
+                                "resultSummary": "showing 5 of 5 rows ...", "rowCount": 5,
+                                "artifactId": null, "resultInModelCallId": "k3" } ] } ] } ],
+  "report": { "messageId": "m8", "createdAt": "...", "claims": 6, "uncertainties": 1 },
+  "events": [ { "at": "...", "kind": "planner_call", "refs": { "modelCallId": "k1" } }, ... ] }
+```
+
+No entity is added. A tool call is derived, not stored: the tool-use block in one call's response, joined by id to the ToolMessage in the first later request of its task, which carries the result's status, row count and Artifact. Only task calls' transcripts are read for this; the client fetches a transcript from E18 when it opens one. ModelCall summaries omit `transcriptRef`. Event kinds: `planner_call`, `clarification`, `clarification_answer`, `task_created`, `task_started`, `model_call`, `tool_call`, `task_completed`, `task_failed` (any other end), `report`. Events are built in causal order and sorted by the second they happened, so steps within one second keep that order; a question and its answer sit before the first planner call whose ULID is newer than the answer's.
 
 ```http
 POST /chats/c1/requests/m1/cancel
