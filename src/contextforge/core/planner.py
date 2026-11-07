@@ -1,14 +1,24 @@
-"""Planner output schema: the structured result the plan stage asks the model for."""
+"""Planner output schema: the structured result the plan stage asks the model for, and the
+lenient reading of the slips capable models made with it (planner bake-off, 7 Nov 2026)."""
 
-from typing import Literal, Self
+import json
+import re
+from collections.abc import Collection
+from typing import Any, Literal, Self
 
-from pydantic import model_validator
+from pydantic import ValidationError, model_validator
 
 from contextforge.core.entities import Entity
 from contextforge.core.entities.task import TaskKind
 
 MIN_PLANNED_TASKS = 2
 MAX_PLANNED_TASKS = 6
+# A task goal that says it works on earlier tasks' results.
+_USES_EARLIER = re.compile(
+    r"using data from|cross-check|combine|reconcile|compare the two", re.IGNORECASE
+)
+# "t1-t3", "t1–t3", "t1 to t3": every ref in the range.
+_REF_RANGE = re.compile(r"\bt(\d+)\s*(?:-|–|—|to|through)\s*t(\d+)\b", re.IGNORECASE)
 
 
 class PlannedTask(Entity):
@@ -92,3 +102,88 @@ def _find_dependency_cycle(tasks: list[PlannedTask]) -> list[str] | None:
         if cycle:
             return cycle
     return None
+
+
+def read_plan_leniently(
+    answer: dict[str, Any] | None, dataset_ids: Collection[str]
+) -> tuple[dict[str, Any] | None, list[str]]:
+    """The planner's answer with the slips seen live fixed before validation, and a note per
+    fix: ``tasks`` sent as a JSON string is decoded (DeepSeek v3.2); a missing ``kind`` is
+    ``plan`` when tasks and no question are given (Mistral Large 3, Nemotron); a task without a
+    ``kind`` is a web_search when it reads no artifact and a sql_analysis when it reads datasets
+    only. Anything else is left for validation to reject."""
+    if not isinstance(answer, dict):
+        return answer, []
+    fixed, fixes = dict(answer), []
+    tasks = fixed.get("tasks")
+    if isinstance(tasks, str) and isinstance(decoded := _json_value(tasks), list):
+        fixed["tasks"] = tasks = decoded
+        fixes.append("tasks sent as a JSON string")
+    if not isinstance(tasks, list):
+        return fixed, fixes
+    if "kind" not in fixed and tasks and not fixed.get("question"):
+        fixed["kind"] = "plan"
+        fixes.append("kind missing: plan")
+    fixed["tasks"] = []
+    for task in tasks:
+        kind = _missing_kind(task, dataset_ids)
+        if kind is not None:
+            task = {**task, "kind": kind.value}
+            fixes.append(f"{task.get('ref')} kind missing: {kind.value}")
+        fixed["tasks"].append(task)
+    return fixed, fixes
+
+
+def with_inferred_dependencies(output: PlannerOutput) -> tuple[PlannerOutput, list[str]]:
+    """``output`` with each task that depends on nothing, yet names earlier tasks or says it
+    works on their results, made to depend on them: the ones it names, else every earlier task
+    (Kimi K3.1 sent no dependsOn; its last task said "using t1–t3"). A note per task changed;
+    ``output`` as it was when nothing changed or the change would not validate."""
+    tasks = output.tasks or []
+    updated, fixes = [], []
+    for index, task in enumerate(tasks):
+        needed = [] if task.depends_on else _earlier_needed(task.goal, tasks[:index])
+        if needed:
+            task = task.model_copy(update={"depends_on": needed})
+            fixes.append(f"{task.ref} depends on {', '.join(needed)}")
+        updated.append(task)
+    if not fixes:
+        return output, []
+    try:
+        return PlannerOutput.model_validate(
+            output.model_copy(update={"tasks": updated}).model_dump()
+        ), fixes
+    except ValidationError:  # a forward dependency would close a cycle
+        return output, []
+
+
+def _json_value(text: str) -> Any:
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return None
+
+
+def _missing_kind(task: Any, dataset_ids: Collection[str]) -> TaskKind | None:
+    """The kind of a planned task that names none; None when it names one, or reads an artifact
+    that is not a dataset, so validation rejects it."""
+    if not isinstance(task, dict) or "kind" in task:
+        return None
+    reads = task.get("inputArtifactIds") or []
+    if not reads:
+        return TaskKind.WEB_SEARCH
+    return TaskKind.SQL_ANALYSIS if all(r in dataset_ids for r in reads) else None
+
+
+def _earlier_needed(goal: str, earlier: list[PlannedTask]) -> list[str]:
+    """The earlier refs ``goal`` names, in plan order; every earlier ref when it names none but
+    says it works on their results."""
+    named = {
+        t.ref.lower() for t in earlier if re.search(rf"\b{re.escape(t.ref)}\b", goal, re.IGNORECASE)
+    }
+    for first, last in _REF_RANGE.findall(goal):
+        named |= {f"t{n}" for n in range(int(first), int(last) + 1)}
+    refs = [t.ref for t in earlier if t.ref.lower() in named]
+    if refs or not _USES_EARLIER.search(goal):
+        return refs
+    return [t.ref for t in earlier]

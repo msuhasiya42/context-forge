@@ -17,7 +17,7 @@ from pydantic import ValidationError
 from contextforge.core.context.builder import ContextInputs, build_context
 from contextforge.core.context.prompts import load_prompt, prompt_version
 from contextforge.core.context.resolver import ResolvedContext, resolve_context
-from contextforge.core.entities.artifact import Artifact, ArtifactStatus
+from contextforge.core.entities.artifact import Artifact, ArtifactKind, ArtifactStatus
 from contextforge.core.entities.message import (
     ClarificationMessage,
     Message,
@@ -31,9 +31,14 @@ from contextforge.core.entities.model_call import Stage
 from contextforge.core.entities.task import Task, TaskStatus
 from contextforge.core.ids import derived_id, new_ulid, now_iso
 from contextforge.core.logging import request_context
-from contextforge.core.models.base import ModelRequest
+from contextforge.core.models.base import ModelRequest, ModelResponse
 from contextforge.core.models.errors import ModelError
-from contextforge.core.planner import PlannedTask, PlannerOutput
+from contextforge.core.planner import (
+    PlannedTask,
+    PlannerOutput,
+    read_plan_leniently,
+    with_inferred_dependencies,
+)
 from contextforge.core.services.credentials import contains_credential
 from contextforge.core.services.memory import user_timezone
 from contextforge.core.state import PendingInterrupt, PlanEntry, RequestState
@@ -275,7 +280,7 @@ def _plan_with_one_retry(
     except ValidationError as rejected:
         errors = one_line(rejected)
         logger.warning("planner output rejected, retrying once: %s", errors)
-        # ModelCall has no metadata field, so the retry is on record as activity (finding L-3).
+        # The retry is on record as activity (finding L-3).
         deps.activity.emit(brief["request_message_id"], "", "Plan was invalid; retry 1 of 1")
         rejection = f"Previous plan was rejected: {errors}"
         retry_inputs = replace(inputs, constraints=[*inputs.constraints, rejection])
@@ -287,7 +292,8 @@ def _plan_with_one_retry(
 
 
 def _call_planner(brief: RequestState, inputs: ContextInputs, deps: WorkerDeps) -> PlannerOutput:
-    """One guarded, recorded planner call; ``ValidationError`` when the output breaks the schema."""
+    """One guarded, recorded planner call, its answer read leniently and its dependencies
+    checked (``core.planner``); ``ValidationError`` when the answer still breaks the schema."""
     check_not_cancelled(deps, brief["chat_id"], brief["request_message_id"])
     built = build_context(inputs, deps.budgets)
     request = ModelRequest(
@@ -300,7 +306,32 @@ def _call_planner(brief: RequestState, inputs: ContextInputs, deps: WorkerDeps) 
     response = deps.model_for(
         brief["request_message_id"], memory_version=brief["memory"]["version"]
     ).invoke(request)
-    return PlannerOutput.model_validate(response.structured)
+    datasets = {s.artifact_id for s in inputs.sources if s.kind == ArtifactKind.DATASET}
+    answer, fixes = read_plan_leniently(response.structured, datasets)
+    _note_fixes(deps, brief["request_message_id"], response, fixes)
+    output, inferred = with_inferred_dependencies(PlannerOutput.model_validate(answer))
+    _note_fixes(deps, brief["request_message_id"], response, inferred)
+    return output
+
+
+def _note_fixes(
+    deps: WorkerDeps, request_message_id: str, response: ModelResponse, fixes: list[str]
+) -> None:
+    """Log what the lenient read fixed in the planner's answer and add it to the answer's
+    ModelCall as ``lenient_fixes``, so the Deep Dive shows the plan was not taken as sent."""
+    if not fixes:
+        return
+    logger.warning("planner answer read leniently: %s", "; ".join(fixes))
+    calls = deps.repos.model_calls
+    call = calls.get(request_message_id, response.model_call_id) if response.model_call_id else None
+    if call is None:  # a replayed answer has no ModelCall of its own
+        return
+    noted = call.metadata.get("lenient_fixes")
+    metadata = {
+        **call.metadata,
+        "lenient_fixes": [*(noted if isinstance(noted, list) else []), *fixes],
+    }
+    calls.save(call.model_copy(update={"metadata": metadata}))
 
 
 def _ask_user(

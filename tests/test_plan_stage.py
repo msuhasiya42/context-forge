@@ -1,4 +1,5 @@
 # tests/test_plan_stage.py
+import json
 from datetime import date
 
 import pytest
@@ -8,6 +9,7 @@ from contextforge.core.entities.user import User
 from contextforge.core.models.base import ModelResponse
 from contextforge.core.models.config import ModelRoute
 from contextforge.core.models.scripted import ScriptedModel
+from contextforge.core.planner import PlannerOutput, read_plan_leniently, with_inferred_dependencies
 from contextforge.core.services.memory import memory_snapshot
 from contextforge.worker.stages.guards import Cancelled
 from contextforge.worker.stages.plan import PlanFailed, clarification_id, plan_gate, plan_stage
@@ -163,6 +165,54 @@ def test_a_rejected_plan_is_retried_on_the_same_model_not_routed() -> None:
     req = seed_chat_with_dataset(deps, chat_id="c1", user_id="u1", dataset_id="a2")
     assert plan_stage(initial_brief(req), 0, deps)["kind"] == "plan"
     assert model.sent == ["p", "p"]
+
+
+def test_the_slips_of_capable_planners_are_read_leniently_and_recorded() -> None:
+    """F9, bake-off: DeepSeek v3.2 sent ``tasks`` as a JSON string, Mistral Large 3 and Nemotron
+    left out the plan's ``kind``; a task without a kind is inferred from what it reads."""
+    tasks = [
+        {"ref": "t1", "goal": "Total by month.", "inputArtifactIds": ["a2"], "dependsOn": []},
+        {"ref": "t2", "goal": "Rates news.", "inputArtifactIds": [], "dependsOn": ["t1"]},
+    ]
+    answer = {**_plan(["a2"]), "tasks": json.dumps(tasks)}
+    del answer["kind"]
+    deps = make_deps(ScriptedModel({"plan": [ModelResponse(structured=answer)]}))
+    req = seed_chat_with_dataset(deps, chat_id="c1", user_id="u1", dataset_id="a2")
+    planned = plan_stage(initial_brief(req), 0, deps)
+    assert [t["kind"] for t in planned["tasks"]] == ["sql_analysis", "web_search"]
+    [call] = deps.repos.model_calls.list_by_request(req.message_id)
+    assert call.metadata["lenient_fixes"] == [
+        "tasks sent as a JSON string",
+        "kind missing: plan",
+        "t1 kind missing: sql_analysis",
+        "t2 kind missing: web_search",
+    ]
+    upload = {"tasks": [{"ref": "t1", "goal": "g", "inputArtifactIds": ["u1"]}]}
+    assert read_plan_leniently(upload, {"a2"})[0]["tasks"][0] == upload["tasks"][0]  # rejected
+
+
+def test_a_task_that_works_on_earlier_results_is_made_to_depend_on_them() -> None:
+    """F9, bake-off: Kimi K3.1 sent no dependsOn, and its last task said "using t1–t3", so it
+    would have run beside the searches it needs. Named refs, else every earlier task."""
+    goals = ["Pune.", "Hyderabad.", "Incentives.", "Cross-check using t1–t3; draft the memo."]
+    tasks = [
+        {"ref": f"t{n}", "kind": "web_search", "goal": goal, "inputArtifactIds": []}
+        for n, goal in enumerate(goals, start=1)
+    ]
+    answer = {**_plan([]), "tasks": tasks}
+    deps = make_deps(ScriptedModel({"plan": [ModelResponse(structured=answer)]}))
+    req = seed_chat_with_dataset(deps, chat_id="c1", user_id="u1", dataset_id="a2")
+    planned = plan_stage(initial_brief(req), 0, deps)
+    assert [t["depends_on"] for t in planned["tasks"]] == [[], [], [], ["t1", "t2", "t3"]]
+    [call] = deps.repos.model_calls.list_by_request(req.message_id)
+    assert call.metadata["lenient_fixes"] == ["t4 depends on t1, t2, t3"]
+
+    unnamed = {**answer, "tasks": [*tasks[:2], {**tasks[3], "goal": "Combine both."}]}
+    inferred, _ = with_inferred_dependencies(PlannerOutput.model_validate(unnamed))
+    assert inferred.tasks is not None and inferred.tasks[2].depends_on == ["t1", "t2"]
+    forward = {**unnamed, "tasks": [{**tasks[0], "dependsOn": ["t2"]}, {**tasks[1], "goal": "t1"}]}
+    output = PlannerOutput.model_validate(forward)
+    assert with_inferred_dependencies(output) == (output, [])  # it would close a cycle
 
 
 @pytest.mark.parametrize(
