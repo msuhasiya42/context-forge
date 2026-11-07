@@ -45,15 +45,21 @@ class _Answer:
     date: str
 
 
-def write_report(brief: RequestState, outcomes: list[TaskOutcome], deps: WorkerDeps) -> str:
+def write_report(
+    brief: RequestState,
+    outcomes: list[TaskOutcome],
+    cite_uncertainties: list[str],
+    deps: WorkerDeps,
+) -> str:
     """Save the report, then end the request: COMPLETED when any task completed, else FAILED.
 
-    The report id derives from the request, so a re-run overwrites it. Returns the final status;
-    raises ``Cancelled`` when the user cancelled meanwhile.
+    ``cite_uncertainties`` are the cite stage's reasons for the facts it dropped. The report id
+    derives from the request, so a re-run overwrites it. Returns the final status; raises
+    ``Cancelled`` when the user cancelled meanwhile.
     """
     with request_context(brief["request_message_id"]):
         check_not_cancelled(deps, brief["chat_id"], brief["request_message_id"])
-        report = _report_message(brief, outcomes, _answers(brief, deps))
+        report = _report_message(brief, outcomes, cite_uncertainties, _answers(brief, deps))
         deps.repos.messages.save(report)
         completed = any(o["status"] == TaskStatus.COMPLETED for o in outcomes)
         status = RequestStatus.COMPLETED if completed else RequestStatus.FAILED
@@ -73,13 +79,16 @@ def fail_request(brief: RequestState, reason: str, deps: WorkerDeps) -> None:
 
 
 def _report_message(
-    brief: RequestState, outcomes: list[TaskOutcome], answers: list[_Answer]
+    brief: RequestState,
+    outcomes: list[TaskOutcome],
+    cite_uncertainties: list[str],
+    answers: list[_Answer],
 ) -> ReportMessage:
     request_message_id = brief["request_message_id"]
     report_id = derived_id(f"{request_message_id}:report")
     claims = _claims(report_id, brief["facts"])
     withheld = [WITHHELD_ANSWER.format(question=a.question) for a in answers if not a.constraint]
-    uncertainties = [*withheld, *_uncertainties(outcomes)]
+    uncertainties = [*withheld, *_uncertainties(outcomes, cite_uncertainties)]
     now = now_iso()
     return ReportMessage(
         message_id=report_id,
@@ -147,15 +156,16 @@ def _inputs_consulted(claims: list[Claim]) -> list[ArtifactRef]:
     return [ArtifactRef(artifact_id=artifact_id, role="input") for artifact_id in sorted(cited)]
 
 
-def _uncertainties(outcomes: list[TaskOutcome]) -> list[str]:
-    """The tasks' own uncertainties, then one line per task that did not complete; no repeats."""
+def _uncertainties(outcomes: list[TaskOutcome], cite_uncertainties: list[str]) -> list[str]:
+    """The tasks' own uncertainties, why cite dropped facts, then one line per task that did not
+    complete; no repeats."""
     reported = [line for outcome in outcomes for line in outcome["uncertainties"]]
     unfinished = [
         f"Task {o['task_id']} {o['status'].lower()}: {o['failure_reason']}"
         for o in outcomes
         if o["status"] in (TaskStatus.SKIPPED, TaskStatus.FAILED)
     ]
-    return list(dict.fromkeys([*reported, *unfinished]))
+    return list(dict.fromkeys([*reported, *cite_uncertainties, *unfinished]))
 
 
 def _constraints(brief: RequestState, answers: list[_Answer]) -> list[ReportConstraint]:

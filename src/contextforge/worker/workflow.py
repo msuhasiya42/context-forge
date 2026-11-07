@@ -22,10 +22,10 @@ from contextforge.core.context.builder import newest_facts
 from contextforge.core.entities.message import RequestStatus
 from contextforge.core.logging import request_context
 from contextforge.core.services.memory import memory_snapshot
-from contextforge.core.state import Fact, OpenQuestion, PlanEntry, RequestState
+from contextforge.core.state import OpenQuestion, PlanEntry, RequestState
 from contextforge.worker.brief import initial_brief, load_request
 from contextforge.worker.deps import WorkerDeps
-from contextforge.worker.stages.cite import cite_stage
+from contextforge.worker.stages.cite import Citations, check_citations
 from contextforge.worker.stages.execute import TaskOutcome, execute_stage
 from contextforge.worker.stages.guards import Cancelled, check_not_cancelled
 from contextforge.worker.stages.plan import (
@@ -48,7 +48,7 @@ class _StageTasks:
     plan: Callable[..., Future[PlanResult]]
     gate: Callable[..., Future[list[PlanEntry]]]
     execute: Callable[..., Future[TaskOutcome]]
-    cite: Callable[..., Future[list[Fact]]]
+    cite: Callable[..., Future[Citations]]
     report: Callable[..., Future[str]]
     fail: Callable[..., Future[None]]
 
@@ -59,7 +59,7 @@ class _StageTasks:
             plan=_as_task("plan", partial(plan_stage, deps=deps)),
             gate=_as_task("gate", partial(plan_gate, deps=deps)),
             execute=_as_task("execute", partial(execute_stage, deps=deps)),
-            cite=_as_task("cite", partial(cite_stage, deps=deps)),
+            cite=_as_task("cite", partial(check_citations, deps=deps)),
             report=_as_task("report", partial(write_report, deps=deps)),
             fail=_as_task("fail_request", partial(fail_request, deps=deps)),
         )
@@ -111,9 +111,10 @@ def _run_to_status(inputs: dict[str, Any], stages: _StageTasks, deps: WorkerDeps
         return RequestStatus.FAILED.value
     brief, outcomes = _run_waves(brief, stages, deps)
     with deps.tracer.stage(inputs["message_id"], "cite"):
-        brief = {**brief, "facts": stages.cite(brief).result()}
+        cited = stages.cite(brief).result()
+    brief = {**brief, "facts": cited["facts"]}
     with deps.tracer.stage(inputs["message_id"], "report"):
-        return stages.report(brief, outcomes).result()
+        return stages.report(brief, outcomes, cited["uncertainties"]).result()
 
 
 def _plan(brief: RequestState, stages: _StageTasks) -> RequestState:

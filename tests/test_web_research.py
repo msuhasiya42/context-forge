@@ -22,7 +22,7 @@ from contextforge.infra.web import FetchURLTool, PublicWebClient, WebSearchTool,
 from contextforge.infra.web_guard import SeenUrls, WebRefusal
 from contextforge.worker.brief import initial_brief
 from contextforge.worker.deps import WorkerDeps
-from contextforge.worker.stages.cite import check_citations, cite_stage
+from contextforge.worker.stages.cite import check_citations
 from contextforge.worker.workflow import build_workflow
 from tests.helpers import make_deps
 
@@ -287,7 +287,6 @@ def test_cite_keeps_only_facts_quoting_their_snapshot_by_url():
         f"unsupported excerpt for {DOCS_URL}",
         "unsupported excerpt for https://invented.example/",
     ]
-    assert cite_stage(brief, deps) == citations["facts"]
 
 
 def _request(content: str) -> RequestMessage:
@@ -461,6 +460,31 @@ def test_injected_page_stays_inside_tool_results_and_cannot_send_data_out():
     )
     report = next(m for m in deps.repos.messages.list_by_chat("c1") if m.kind == "report")
     assert len(report.report.claims) == 1 and DOCS_URL in report.content
+
+
+def test_a_fabricated_excerpt_is_dropped_and_named_in_the_report():
+    snippet = "Python 3.13 adds an experimental free-threaded build."
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text=_search_page((DOCS_URL, "What's New", snippet)))
+
+    def finish(request: ModelRequest) -> ModelResponse:
+        rows_id = _rows(_results(request)["s1"])[0]["artifactId"]
+        return _task_result(
+            _url_ref(rows_id, DOCS_URL, "adds an experimental free-threaded build"),
+            _url_ref(rows_id, DOCS_URL, "Python 3.13 removes the GIL for good"),
+        )
+
+    agent = _WebAgent([lambda request: _tool_call("web_search", "s1", query="python 3.13"), finish])
+    deps = make_deps(agent)
+    assert _run(deps, agent, handler, "What changed in Python 3.13?")["status"] == "COMPLETED"
+
+    report = next(m for m in deps.repos.messages.list_by_chat("c1") if m.kind == "report")
+    assert [claim.text for claim in report.report.claims] == [
+        "adds an experimental free-threaded build"
+    ]
+    assert f"unsupported excerpt for {DOCS_URL}" in report.report.uncertainties
+    assert f"- unsupported excerpt for {DOCS_URL}" in report.content
 
 
 def test_web_search_rows_keep_their_artifact_handle_through_compaction():

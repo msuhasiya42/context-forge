@@ -8,15 +8,12 @@ kept as an uncertainty, never dropped silently.
 """
 
 import json
-import logging
 from typing import Any, TypedDict
 
 from contextforge.core.entities.artifact import Artifact, ArtifactKind, ArtifactStatus
 from contextforge.core.state import Fact, RequestState
 from contextforge.core.values import EvidenceRef, LocatorKind
 from contextforge.worker.deps import WorkerDeps
-
-logger = logging.getLogger(__name__)
 
 # Shorter quotes ("e", "Python") occur on almost any page and prove nothing. The web tools'
 # descriptions tell the model this minimum.
@@ -31,6 +28,8 @@ class Citations(TypedDict):
 
 
 def check_citations(brief: RequestState, deps: WorkerDeps) -> Citations:
+    """The brief's facts that cite their evidence correctly; the reasons for the rest go to the
+    report as uncertainties."""
     facts: list[Fact] = []
     uncertainties: list[str] = []
     for fact in brief["facts"]:
@@ -40,15 +39,6 @@ def check_citations(brief: RequestState, deps: WorkerDeps) -> Citations:
         else:
             uncertainties.append(problem)
     return Citations(facts=facts, uncertainties=list(dict.fromkeys(uncertainties)))
-
-
-def cite_stage(brief: RequestState, deps: WorkerDeps) -> list[Fact]:
-    """The supported facts. Each dropped fact's uncertainty is logged as a warning until the
-    workflow passes ``check_citations``' uncertainties on to the report."""
-    citations = check_citations(brief, deps)
-    for uncertainty in citations["uncertainties"]:
-        logger.warning("dropped a fact: %s", uncertainty)
-    return citations["facts"]
 
 
 def _problem(fact: Fact, brief: RequestState, deps: WorkerDeps) -> str | None:
