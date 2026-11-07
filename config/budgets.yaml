@@ -1,0 +1,18 @@
+# Context window per model call (spec 8.2 and 8.6).
+capInputTokens: 40000
+responseAllowanceTokens: 4000
+marginFraction: 0.10
+keepLastMessages: 6
+factsCap: 30
+
+# Tool result shaping (spec 8.3): rows, columns and characters kept in context.
+toolResultRowCap: 50
+columnCap: 20
+cellCharCap: 200
+
+# Run limits.
+callBudget: 50
+tasksInFlight: 5
+toolCallsPerTask: 6
+taskRetries: 1
+noProgressTurns: 3

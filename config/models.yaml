@@ -1,0 +1,11 @@
+priceVersion: "2026-11-04"
+# USD per million tokens, Bedrock Sydney on-demand = Anthropic list prices (verified 6 Nov 2026)
+prices:
+  anthropic.claude-opus-5-5:  { inputPerMTok: 4.00, outputPerMTok: 20.00, cacheReadPerMTok: 0.20 }
+  anthropic.claude-haiku-5-5: { inputPerMTok: 0.10, outputPerMTok: 0.50,  cacheReadPerMTok: 0.01 }
+  scripted:                   { inputPerMTok: 0.0,  outputPerMTok: 0.0,   cacheReadPerMTok: 0.0 }
+stages:
+  plan:     { model: scripted, effort: high,   maxTokens: 4000 }   # phase 2: anthropic.claude-opus-5-5
+  execute:  { model: scripted, effort: medium, maxTokens: 4000 }   # phase 2: anthropic.claude-haiku-5-5
+  cite:     { model: scripted, effort: high,   maxTokens: 4000 }   # phase 2: anthropic.claude-opus-5-5
+  compress: { model: scripted, effort: low,    maxTokens: 1000 }   # phase 2: anthropic.claude-haiku-5-5
