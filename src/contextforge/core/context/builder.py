@@ -48,6 +48,9 @@ class ContextInputs:
     sources: list[SourceLine]
     prior_messages: list[Message]
     loop_messages: list[AnyMessage]
+    # The planner's code-written ``<context>`` block (spec 9.1): today, the resolved period and
+    # source readiness. Rendered right after the request; empty for every other stage.
+    context_block: str = ""
 
 
 @dataclass(frozen=True)
@@ -99,12 +102,16 @@ def build_context(inputs: ContextInputs, budgets: Budgets) -> BuiltContext:
 
 
 def _render_brief(inputs: ContextInputs) -> str:
-    """Section 2 in the spec 9.1 tag order: request, preferences, constraints, sources, prior."""
+    """Section 2 in the spec 9.1 tag order.
+
+    Request, context, preferences, constraints, next action, sources, prior context.
+    """
     request = inputs.request
     preferences = "   ".join(f"{key}: {value}" for key, value in sorted(inputs.preferences.items()))
     return _join(
         [
             _request_block(request),
+            _block("context", inputs.context_block.splitlines()),
             f"<user_preferences>{preferences or '(none)'}</user_preferences>",
             _block("constraints", [f"- {c}" for c in inputs.constraints], empty="(none yet)"),
             f"<next_action>{inputs.next_action}</next_action>" if inputs.next_action else "",

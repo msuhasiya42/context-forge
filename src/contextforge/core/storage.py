@@ -5,6 +5,11 @@ from typing import Protocol
 MEMORY_SCHEME = "mem://"
 
 
+def dataset_key(chat_id: str, artifact_id: str) -> str:
+    """Blob key of a dataset Artifact: the CSV its rows are queried from."""
+    return f"chats/{chat_id}/datasets/{artifact_id}.csv"
+
+
 def raw_result_key(chat_id: str, artifact_id: str) -> str:
     """Blob key of a raw_result Artifact: the full tool result rows as JSON lines."""
     return f"chats/{chat_id}/raw_results/{artifact_id}.jsonl"
