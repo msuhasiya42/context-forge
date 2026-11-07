@@ -2,6 +2,9 @@ import json
 
 import botocore.session
 import pytest
+from botocore import UNSIGNED
+from botocore.awsrequest import AWSResponse
+from botocore.config import Config
 from botocore.exceptions import ConnectTimeoutError, ReadTimeoutError
 from botocore.stub import Stubber
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
@@ -39,6 +42,32 @@ def _stubbed_runtime() -> tuple[object, Stubber]:
         aws_secret_access_key="test",
     )
     return client, Stubber(client)
+
+
+def _canned_runtime(*bodies: dict) -> object:
+    """A real bedrock-runtime client whose HTTP responses are ``bodies`` in turn, parsed by
+    botocore itself, with no network. The Stubber validates a stubbed response against the
+    pinned botocore's model, which has no reasoningContent block, so it cannot send one."""
+    client = botocore.session.get_session().create_client(
+        "bedrock-runtime",
+        region_name="ap-southeast-2",
+        config=Config(signature_version=UNSIGNED),
+    )
+    pending = [json.dumps(body).encode() for body in bodies]
+
+    class Body:
+        def __init__(self, data: bytes) -> None:
+            self.data = data
+
+        def stream(self, **kwargs):
+            yield self.data
+
+    def send(request, **kwargs) -> AWSResponse:
+        headers = {"content-type": "application/json"}
+        return AWSResponse(request.url, 200, headers, Body(pending.pop(0)))
+
+    client.meta.events.register("before-send.bedrock-runtime.Converse", send)
+    return client
 
 
 def _reply(content: list[dict], stop: str = "end_turn") -> dict:
@@ -342,3 +371,27 @@ def test_a_refused_field_is_dropped_for_the_model_and_reasoning_blocks_are_skipp
     )
     parsed = parse_response(reasoning_first, expects_result=True)
     assert parsed.structured == six_task_plan() and parsed.text is None
+
+
+def test_a_reasoning_block_before_the_answer_is_counted_and_the_output_path_recorded() -> None:
+    """F9 (live, F8): gpt-oss, MiniMax and Kimi answer with a reasoningContent block first,
+    which the pinned botocore reads as SDK_UNKNOWN_MEMBER. A plan written as text after a
+    sentence of the model's own is read through the JSON-in-text path."""
+    thinking = {"reasoningContent": {"reasoningText": {"text": "Rents first.", "signature": "s"}}}
+    as_tool = {"toolUse": {"toolUseId": "r", "name": "return_result", "input": six_task_plan()}}
+    as_text = {"text": "Here is the plan:\n" + json.dumps(six_task_plan())}
+    runtime = _canned_runtime(_reply([thinking, as_tool], "tool_use"), _reply([thinking, as_text]))
+    deps = make_deps(BedrockModel(runtime))
+    request = ModelRequest(
+        stage="plan",
+        model="openai.gpt-oss-120b-1:0",
+        system=["plan"],
+        messages=[HumanMessage("Compare")],
+        output_schema=PlannerOutput,
+    )
+    model = deps.model_for("r1")
+    assert model.invoke(request).structured == six_task_plan()
+    assert model.invoke(request).structured == six_task_plan()
+    by_tool, by_text = deps.repos.model_calls.list_by_request("r1")
+    assert by_tool.metadata == {"output_path": "tool", "reasoning_blocks": 1}
+    assert by_text.metadata == {"output_path": "text", "reasoning_blocks": 1}

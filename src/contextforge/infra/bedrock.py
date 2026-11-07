@@ -10,7 +10,7 @@ from botocore.exceptions import BotoCoreError, ClientError  # type: ignore[impor
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 from pydantic import BaseModel
 
-from contextforge.core.entities.model_call import Stage
+from contextforge.core.entities.model_call import CallMetadata, Stage
 from contextforge.core.models.base import ModelRequest, ModelResponse, ToolCall
 from contextforge.core.models.errors import ModelError, ModelMalformed, ModelRejected
 from contextforge.core.values import Usage
@@ -255,9 +255,10 @@ def _response(raw: dict[str, Any], *, expects_result: bool) -> ModelResponse:
     text_parts: list[str] = []
     calls: list[ToolCall] = []
     structured = None
-    # A reasoning block (reasoningContent, or SDK_UNKNOWN_MEMBER to a botocore that predates it)
-    # has neither key and is skipped: the answer is in the text and tool blocks after it.
-    for block in raw.get("output", {}).get("message", {}).get("content", []):
+    blocks = raw.get("output", {}).get("message", {}).get("content", [])
+    # A reasoning block is skipped: the answer is in the text and tool blocks after it.
+    answer = [block for block in blocks if not _is_reasoning(block)]
+    for block in answer:
         if "text" in block:
             text_parts.append(block["text"])
         if use := block.get("toolUse"):
@@ -275,13 +276,26 @@ def _response(raw: dict[str, Any], *, expects_result: bool) -> ModelResponse:
         stop_reason = "tool_use"
     else:
         stop_reason = "max_tokens" if raw.get("stopReason") == "max_tokens" else "end_turn"
+    metadata: CallMetadata = {
+        "output_path": "tool" if any("toolUse" in block for block in answer) else "text"
+    }
+    if reasoning := len(blocks) - len(answer):
+        metadata["reasoning_blocks"] = reasoning
     return ModelResponse(
         text=text,
         structured=structured,
         tool_calls=calls,
         usage=_usage(raw.get("usage")),
         stop_reason=stop_reason,
+        metadata=metadata,
     )
+
+
+def _is_reasoning(block: dict[str, Any]) -> bool:
+    """A reasoningContent block; the pinned botocore, which predates it, reads it as
+    ``{"SDK_UNKNOWN_MEMBER": {"name": "reasoningContent"}}``."""
+    unknown = block.get("SDK_UNKNOWN_MEMBER") or {}
+    return "reasoningContent" in block or unknown.get("name") == "reasoningContent"
 
 
 def _tool_input(use: dict[str, Any]) -> dict[str, Any]:
@@ -295,13 +309,17 @@ def _tool_input(use: dict[str, Any]) -> dict[str, Any]:
 
 
 def _json_object(text: str) -> dict[str, Any] | None:
-    """A JSON object written as text, fenced or not, by a model that skipped the result tool."""
+    """A JSON object written as text, fenced or not, by a model that skipped the result tool;
+    a sentence before or after it ("Here is the plan:") is dropped."""
     body = text.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
-    try:
-        decoded = json.loads(body)
-    except json.JSONDecodeError:
-        return None
-    return decoded if isinstance(decoded, dict) else None
+    for candidate in (body, body[body.find("{") : body.rfind("}") + 1]):
+        try:
+            decoded = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(decoded, dict):
+            return decoded
+    return None
 
 
 def _usage(raw: dict[str, Any] | None) -> Usage | None:
