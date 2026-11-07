@@ -85,8 +85,10 @@ def build_context(inputs: ContextInputs, budgets: Budgets) -> BuiltContext:
         "open_questions": _block(
             "open_questions", [_open_question_line(q) for q in inputs.open_questions]
         ),
-        "dependencies": _block("dependencies", [f"- {s}" for s in inputs.dependency_summaries]),
-        "evidence": _block("evidence", [f"- {s}" for s in inputs.evidence_slices]),
+        "dependencies": _block(
+            "dependencies", [f"- {_untrusted(s)}" for s in inputs.dependency_summaries]
+        ),
+        "evidence": _block("evidence", [f"- {_untrusted(s)}" for s in inputs.evidence_slices]),
     }
     sections = [
         # Section 1 is the whole system prefix: the memory file and the stage prompt.
@@ -131,19 +133,26 @@ def _render_brief(inputs: ContextInputs) -> str:
 
 # Longest name or detail a ``<sources>`` line shows, in characters, "…" included.
 _SOURCE_FIELD_CAP = 120
+# Longest piece of untrusted text elsewhere in the brief (about 500 tokens): a fact, its
+# evidence, a summary or a prior claim fits; a page pasted into a summary does not.
+_TEXT_CAP = 2000
+
+
+def _untrusted(text: str, cap: int = _TEXT_CAP) -> str:
+    """``text`` that may hold page or upload text, directly or quoted by a model, made safe for
+    a brief block: on one line, cut to ``cap`` characters ("…" included) and escaped, so it
+    cannot close the block it sits in or forge a tag."""
+    flat = " ".join(text.split())
+    if len(flat) > cap:
+        flat = flat[: cap - 1] + "…"
+    return html.escape(flat, quote=False)
 
 
 def _source_text(source: SourceLine) -> str:
     """One ``<sources>`` line. A name or detail can come from outside (an upload's file name or
-    columns, a web snapshot saved before names stopped using page titles), so each field is put
-    on one line, capped and escaped: no value can close the block or forge a tag."""
-    fields = [source.artifact_id, source.kind, _capped(source.name), _capped(source.detail)]
-    return "  ".join(html.escape(field, quote=False) for field in fields)
-
-
-def _capped(text: str) -> str:
-    flat = " ".join(text.split())
-    return flat if len(flat) <= _SOURCE_FIELD_CAP else flat[: _SOURCE_FIELD_CAP - 1] + "…"
+    columns, a web snapshot saved before names stopped using page titles)."""
+    name, detail = (_untrusted(text, _SOURCE_FIELD_CAP) for text in (source.name, source.detail))
+    return "  ".join([_untrusted(source.artifact_id), _untrusted(source.kind), name, detail])
 
 
 def _request_block(request: RequestMessage | None) -> str:
@@ -171,8 +180,9 @@ def newest_facts(facts: list[Fact], cap: int) -> list[Fact]:
 
 
 def _fact_line(fact: Fact) -> str:
+    """A fact and its evidence; both are model output that may quote a page."""
     refs = json.dumps(fact["evidence_refs"], sort_keys=True, ensure_ascii=False)
-    return f"- {fact['text']}  evidence: {refs}"
+    return f"- {_untrusted(fact['text'])}  evidence: {_untrusted(refs)}"
 
 
 def _open_question_line(question: OpenQuestion) -> str:
@@ -181,17 +191,18 @@ def _open_question_line(question: OpenQuestion) -> str:
 
 
 def _prior(message: Message) -> list[str]:
-    """A report contributes its claims, which outlive its transcript; other kinds their text."""
+    """A report contributes its claims, which outlive its transcript; other kinds their text.
+    Claims may quote pages, so they and the texts beside them render as untrusted text."""
     if isinstance(message, ReportMessage):
         return [
             "report:",
-            *(f"- {claim.text}" for claim in message.report.claims),
+            *(f"- {_untrusted(claim.text)}" for claim in message.report.claims),
             *(
-                f"Prior constraint ({c.source}, {c.date}): {c.text}"
+                f"Prior constraint ({c.source}, {c.date}): {_untrusted(c.text)}"
                 for c in message.report.constraints
             ),
         ]
-    return [f"{message.kind.value}: {message.content}"]
+    return [f"{message.kind.value}: {_untrusted(message.content)}"]
 
 
 def _tool_text(tool: ToolSpec) -> str:
