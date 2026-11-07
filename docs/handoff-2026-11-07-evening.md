@@ -77,17 +77,18 @@ gpt-oss-120b → Nova Pro; compress Nova 2 Lite → Nova Lite. Then run ONE live
 and check in the Deep Dive / LangSmith that the planner call used gpt-oss-120b and that a
 reasoning block did not break parsing.
 
-**F10 — report summary covering every subject + conclusions as first-class** (brief
-`fix-wave-2/F10-brief.md`, worktree `.claude/worktrees/fix-F10`, branch `fix-F10`). At handoff:
-commit `a671710` "wip(F10): ruling 1 conclusions first-class, ruling 3 order kept" plus a few
-uncommitted files for rulings 2 and 4; `F10-report.md` states the status. Rulings: (1)
-`TaskResult.conclusions` (text, supporting facts, confidence) rendered as an "Assessment" section,
-never with a source link; (2) the report message body is a model-written summary (new `summary`
-stage on the cheap model, prompt `prompts/summary.1.md`) with a deterministic validator (every
-number and proper noun must occur in a claim/conclusion/goal) and a deterministic fallback; (3)
-answers first, then "Not answered", then Limitations; (4) frontend renders Assessment and uses the
-summary as the message body. **Continue from the worktree**: `git -C .claude/worktrees/fix-F10
-status`, finish or discard per the brief, merge into `phase-1-engine`, delete the worktree.
+**F10 — report summary covering every subject + conclusions as first-class** is COMPLETE on
+branch `fix-F10` (HEAD `650691b`; backend 185 tests green there, frontend commit `4e745af` on
+`web-first`, 20 tests green). It was written against the pre-F9 `WorkerDeps.model_for` and a
+trial merge into `phase-1-engine` gave 37 failures from that one seam (`summary.py` uses
+`deps.executor_model`; F9 routes by stage). The controller reset `phase-1-engine` to `0e8a0dd`
+(green) and dispatched **F11** (brief `fix-wave-2/F11-brief.md`): merge `fix-F10`, add a `summary`
+stage to `config/models.yaml` routed like `compress`, make the summary request take its model from
+the stage route, green the suite, delete the worktree. **If `F11-report.md` does not exist, F11 did
+not finish: do its brief yourself.** F10's open points (its report): short reports keep their
+findings text under the summary (no deliverable), the Deep Dive UI does not yet show the summary
+call under the report, follow-up requests do not carry conclusions as prior context, `reconcile`
+tasks are still a stub without a model call.
 
 ## 5. Remaining work, in order
 
