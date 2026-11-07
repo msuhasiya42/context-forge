@@ -16,6 +16,7 @@ _STAGE_PROMPTS: dict[Stage, str] = {
     Stage.PLAN: "plan.4",
     Stage.EXECUTE: "execute.7",
     Stage.COMPRESS: "compress.2",
+    Stage.SUMMARY: "summary.1",
 }
 
 

@@ -26,12 +26,14 @@ from contextforge.worker.deps import WorkerDeps
 from contextforge.worker.stages.cite import merge_repeats, supported_conclusions
 from contextforge.worker.stages.execute import TaskOutcome
 from contextforge.worker.stages.guards import check_not_cancelled, leave_running
-from contextforge.worker.stages.long_report import attach_if_long
+from contextforge.worker.stages.long_report import with_summary
 from contextforge.worker.stages.plan import answer_constraint, is_plan_mechanics, local_today
+from contextforge.worker.stages.summary import summarize
 
 logger = logging.getLogger(__name__)
 
 EVERY_TASK_FAILED = "every task failed"
+# The summary of a report without claims: there is nothing to summarise.
 NO_CLAIMS = "No finding could be supported with evidence."
 NOT_ANSWERED = "Not answered: {goal}"
 WITHHELD_ANSWER = (
@@ -57,8 +59,8 @@ def write_report(
 ) -> str:
     """Save the report, then end the request: COMPLETED when any task completed, else FAILED.
 
-    A report too long for the chat is saved whole as a deliverable Artifact and summarised
-    (``long_report``).
+    Its text opens with a summary covering every part of the request it answers (``summary``);
+    a report too long for the chat is saved whole as a deliverable Artifact (``long_report``).
 
     ``cite_uncertainties`` are the cite stage's reasons for the facts it dropped. The report id
     derives from the request, so a re-run overwrites it. Returns the final status; raises
@@ -67,8 +69,13 @@ def write_report(
     with request_context(brief["request_message_id"]):
         check_not_cancelled(deps, brief["chat_id"], brief["request_message_id"])
         report = _report_message(brief, outcomes, cite_uncertainties, _answers(brief, deps))
+        summary = (
+            summarize(brief, outcomes, report.report, _not_answered(outcomes), deps)
+            if report.report.claims
+            else NO_CLAIMS
+        )
         # The deliverable is saved before the Message, so its ref never points at nothing.
-        report = attach_if_long(report, brief["goal"], deps)
+        report = with_summary(report, brief["goal"], summary, deps)
         deps.repos.messages.save(report)
         completed = any(o["status"] == TaskStatus.COMPLETED for o in outcomes)
         status = RequestStatus.COMPLETED if completed else RequestStatus.FAILED
@@ -250,14 +257,12 @@ def _answer_text(
     not_answered: list[str],
     uncertainties: list[str],
 ) -> str:
-    """The answers first: each claim, numbered, with its source links, and the assessment
-    drawn from them; then what was not answered, then the limitations (F7 ruling 4, F10
-    rulings 1 and 3). With no claims the rest still follows, so the reader sees what is
+    """The full text, after the summary: each claim, numbered, with its source links, and the
+    assessment drawn from them; then what was not answered, then the limitations (F7 ruling 4,
+    F10 rulings 1 and 3). With no claims the rest still follows, so the reader sees what is
     missing and why nothing could be supported."""
     numbers = {claim.claim_id: number for number, claim in enumerate(claims, 1)}
     lines = [f"{numbers[claim.claim_id]}. {_with_sources(claim)}" for claim in claims]
-    if not claims:
-        lines.append(NO_CLAIMS)
     if assessment:
         conclusions = [_assessment_line(conclusion, numbers) for conclusion in assessment]
         lines.append("Assessment:\n" + "\n".join(conclusions))

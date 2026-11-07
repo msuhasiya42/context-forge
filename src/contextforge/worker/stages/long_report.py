@@ -1,5 +1,6 @@
-"""A report too long to read in the chat: saved whole as a markdown deliverable Artifact, with
-a short summary left in the report Message (F5 ruling: over 1,500 characters)."""
+"""The report Message's text: its summary and counts first, then the full text when it fits the
+chat; a full text too long for the chat is saved whole as a markdown deliverable Artifact
+instead (F5 ruling: over 1,500 characters; F10 ruling 2)."""
 
 from typing import Any
 
@@ -12,17 +13,21 @@ from contextforge.worker.deps import WorkerDeps
 
 LONG_REPORT_CHARS = 1500
 MARKDOWN = "text/markdown"
+ATTACHED = "Full report attached."
 
 
-def attach_if_long(report: ReportMessage, goal: str, deps: WorkerDeps) -> ReportMessage:
-    """``report`` as it is when its text fits the chat. Otherwise the full report is saved as a
-    deliverable Artifact first, then returned with a summary for its text and a ref to it.
+def with_summary(report: ReportMessage, goal: str, summary: str, deps: WorkerDeps) -> ReportMessage:
+    """``report``, whose content is still its full text, led by ``summary`` and the count of its
+    findings and limitations. A full text that fits the chat follows them. A longer one is
+    saved whole as a deliverable Artifact first, and the content says it is attached and the
+    report refs it.
 
     The Artifact id derives from the request, so a re-run overwrites it rather than adding one.
     """
+    counts = _counts(report)
     if len(report.content) <= LONG_REPORT_CHARS:
-        return report
-    data = render_markdown(report, goal).encode()
+        return report.model_copy(update={"content": _paragraphs(summary, counts, report.content)})
+    data = render_markdown(report, goal, summary).encode()
     artifact_id = derived_id(f"{report.request_message_id}:report-deliverable")
     deps.repos.artifacts.save(
         Artifact(
@@ -42,22 +47,29 @@ def attach_if_long(report: ReportMessage, goal: str, deps: WorkerDeps) -> Report
     body = report.report.model_copy(
         update={"deliverables": [ArtifactRef(artifact_id=artifact_id, role="output")]}
     )
-    return report.model_copy(update={"content": _summary(report), "report": body})
+    content = _paragraphs(summary, f"{counts} {ATTACHED}")
+    return report.model_copy(update={"content": content, "report": body})
 
 
-def _summary(report: ReportMessage) -> str:
-    """The report's first paragraph (cut to fit) and a pointer to the full report."""
-    first = report.content.split("\n\n", 1)[0]
-    if len(first) > LONG_REPORT_CHARS:
-        first = first[: LONG_REPORT_CHARS - 1].rstrip() + "…"
+def _counts(report: ReportMessage) -> str:
+    """ "6 findings, 1 limitation.": how much the report holds, for the reader of its summary."""
     claims, limits = len(report.report.claims), len(report.report.uncertainties)
-    return f"{first}\n\nFull report attached: {claims} findings, {limits} limitations."
+    return f"{_count(claims, 'finding')}, {_count(limits, 'limitation')}."
 
 
-def render_markdown(report: ReportMessage, goal: str) -> str:
-    """The full report: its text (findings with source links, then limitations), each claim's
-    evidence with the excerpt it quotes, and what the run covered."""
-    sections = [f"# {_line(goal) or 'Research report'}", report.content]
+def _count(number: int, noun: str) -> str:
+    return f"{number} {noun}{'' if number == 1 else 's'}"
+
+
+def _paragraphs(*texts: str) -> str:
+    return "\n\n".join(text for text in texts if text)
+
+
+def render_markdown(report: ReportMessage, goal: str, summary: str) -> str:
+    """The full report: its summary, its text (numbered findings with source links, the
+    assessment drawn from them, what was not answered, the limitations), each claim's evidence
+    with the excerpt it quotes, and what the run covered."""
+    sections = [f"# {_line(goal) or 'Research report'}", summary, report.content]
     evidence = [_evidence(index, claim) for index, claim in enumerate(report.report.claims, 1)]
     if evidence:
         sections.append("## Evidence\n\n" + "\n".join(evidence))
