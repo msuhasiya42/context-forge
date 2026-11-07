@@ -30,7 +30,7 @@ from contextforge.infra.web import (
 from contextforge.infra.web_guard import SeenUrls, WebRefusal
 from contextforge.worker.deps import WorkerDeps
 from contextforge.worker.stages.cite import check_citations
-from contextforge.worker.stages.execute import TEXT_IS_NOT_A_RESULT
+from contextforge.worker.stages.execute import NO_FACTS, TEXT_IS_NOT_A_RESULT
 from contextforge.worker.stages.report import NO_CLAIMS
 from contextforge.worker.workflow import build_workflow
 from tests.helpers import initial_brief, make_deps
@@ -811,3 +811,29 @@ def test_a_comparison_task_may_cite_the_evidence_its_dependencies_cite():
         "adds an experimental free-threaded build",
         "Python 3.13 adds an experimental",
     ]
+
+
+def test_a_result_without_facts_after_reading_sources_is_returned_once_for_facts():
+    """Live run 3: the US task read pages, summarised their figures and cited none. It is
+    reminded once to cite what its tools saved; a second empty result would be accepted."""
+    snippet = "Python 3.13 adds an experimental free-threaded build."
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text=_search_page((DOCS_URL, "What's New", snippet)))
+
+    def finish(request: ModelRequest) -> ModelResponse:
+        assert request.messages[-1].content == NO_FACTS
+        rows_id = _rows(_results(request)["s1"])[0]["artifactId"]
+        return _task_result(_url_ref(rows_id, DOCS_URL, "adds an experimental free-threaded build"))
+
+    agent = _WebAgent(
+        [
+            lambda request: _tool_call("web_search", "s1", query="python 3.13"),
+            lambda request: _task_result(summary="Python 3.13 adds a free-threaded build."),
+            finish,
+        ]
+    )
+    deps = make_deps(agent)
+    assert _run(deps, agent, handler, "What changed in Python 3.13?")["status"] == "COMPLETED"
+    report = next(m for m in deps.repos.messages.list_by_chat("c1") if m.kind == "report")
+    assert [c.text for c in report.report.claims] == ["adds an experimental free-threaded build"]

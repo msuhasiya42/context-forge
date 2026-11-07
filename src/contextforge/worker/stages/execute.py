@@ -75,6 +75,10 @@ NO_CALLS_REMAIN = "[runtime] no tool calls remain; return your structured result
 TEXT_IS_NOT_A_RESULT = (
     "[runtime] a text reply is not a result; call return_result with the task result now"
 )
+NO_FACTS = (
+    "[runtime] your result has no facts, but your tools saved evidence in this task; return "
+    "it again with facts that cite it, or say in uncertainties why none could be supported"
+)
 TOOL_BUDGET_EXHAUSTED = "tool call budget exhausted"
 NO_PROGRESS = "no progress"
 DEPENDENCY_FAILED = "dependency failed"
@@ -474,11 +478,23 @@ def _handle_response(
         return {"messages": [reply, HumanMessage(TEXT_IS_NOT_A_RESULT)]}
     citable = [*state.get("evidence_artifact_ids", []), *run.dependency_evidence]
     try:
-        return {"result": _parse_result(response, run.task, citable).model_dump(mode="json")}
+        result = _parse_result(response, run.task, citable)
     except ValueError as exc:  # ValidationError is a ValueError
         reason = one_line(exc) if isinstance(exc, ValidationError) else str(exc)
         logger.warning("invalid result: %s", reason)
         return {"error": f"invalid result: {reason}"}
+    if not result.facts and state.get("evidence_artifact_ids") and not _reminded(state):
+        # Live run 3: the US task read pages, summarised their figures and cited none. One
+        # reminder; a second result without facts is accepted as it is.
+        logger.info("result has no facts though tools saved evidence; reminded once")
+        reply = AIMessage(content=response.text or "(result without facts)")
+        return {"messages": [reply, HumanMessage(NO_FACTS)]}
+    return {"result": result.model_dump(mode="json")}
+
+
+def _reminded(state: TaskState) -> bool:
+    """Whether this attempt already got the no-facts reminder."""
+    return any(isinstance(m, HumanMessage) and m.content == NO_FACTS for m in state["messages"])
 
 
 def _ai_message(response: ModelResponse) -> AIMessage:
