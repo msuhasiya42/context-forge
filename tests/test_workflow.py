@@ -6,11 +6,13 @@ from langchain_core.messages import AIMessage, SystemMessage, ToolMessage
 
 from contextforge.core.entities.message import ReportMessage
 from contextforge.core.models.base import ModelRequest, ModelResponse, ToolCall
+from contextforge.core.models.errors import ModelError
 from contextforge.core.models.scripted import ScriptedModel
 from contextforge.core.tools.base import ToolContext
 from contextforge.infra.bedrock import converse_payload
 from contextforge.worker.deps import WorkerDeps
 from contextforge.worker.stages.execute import NO_CALLS_REMAIN
+from contextforge.worker.stages.summary import unsupported_terms
 from contextforge.worker.tools.sql_query import SqlQueryTool
 from contextforge.worker.workflow import build_workflow
 from tests.helpers import (
@@ -102,7 +104,9 @@ def test_fixture_request_produces_six_tasks_and_a_report() -> None:
     report = [m for m in msgs if m.kind == "report"][0]
     assert report.report.claims and all(c.evidence_refs for c in report.report.claims)
     assert deps.repos.messages.get("c1", req.message_id).status == "COMPLETED"
-    assert len(deps.repos.model_calls.list_by_request(req.message_id)) == 5
+    # Plan, four task calls, and the report's summary (unscripted, so it fails and falls back).
+    stages = [c.stage for c in deps.repos.model_calls.list_by_request(req.message_id)]
+    assert len(stages) == 6 and stages[-1] == "summary"
     # the resolved window reaches the report's coverage, its constraints and every execute call
     period = report.report.coverage["period"]
     stated = f"Period: {period['start']} to {period['end']}"
@@ -484,6 +488,8 @@ class _F7Agent:
         self.requests.append(request)
         if request.stage == "plan":
             return ModelResponse(structured=_f7_plan())
+        if request.stage == "summary":
+            raise ModelError("no summary scripted; the report builds its own")
         if self.goal_of(request) == WEATHER:
             turn = len(request.messages)
             sql = {"dataset_id": "a2", "sql": f"SELECT {turn}"}
@@ -552,7 +558,11 @@ def test_the_report_leads_with_answers_then_names_what_was_not_answered() -> Non
     the limitations."""
     _, deps, _ = _run_f7()
     report = next(m for m in deps.repos.messages.list_by_chat("c1") if m.kind == "report")
-    paragraphs = report.content.split("\n\n")
+    summary, counts, *paragraphs = report.content.split("\n\n")
+    assert summary == (
+        "Ajmer to Palanpur is approximately 350+ kms. Two trains a day run from Ajmer to Palanpur."
+    )
+    assert counts.startswith("2 findings, ")
     assert paragraphs[:4] == [
         "1. Ajmer to Palanpur is approximately 350+ kms.",
         "2. Two trains a day run from Ajmer to Palanpur.",
@@ -595,9 +605,16 @@ def _visit_result() -> ModelResponse:
 
 class _VisitAgent:
     """The 7 Nov chat on the fixture chat: weather in each city, a task judging the visit from
-    both, and a trains task whose results are invalid, so it fails."""
+    both, and a trains task whose results are invalid, so it fails. The summary model writes
+    ``summary``."""
+
+    def __init__(self, summary: str) -> None:
+        self.summary, self.requests = summary, []
 
     def invoke(self, request: ModelRequest) -> ModelResponse:
+        self.requests.append(request)
+        if request.stage == "summary":
+            return ModelResponse(text=self.summary)
         if request.stage == "plan":
             plan = [
                 ("t1", AJMER, []),
@@ -614,8 +631,8 @@ class _VisitAgent:
         }[_F7Agent.goal_of(request)]
 
 
-def _visit_report(agent: _VisitAgent) -> ReportMessage:
-    """The report of the 7 Nov chat's request, run serially with ``agent``."""
+def _visit_report(agent: _VisitAgent) -> tuple[ReportMessage, WorkerDeps]:
+    """The report of the 7 Nov chat's request, run serially with ``agent``, and its deps."""
     deps = make_deps(agent, tasks_in_flight=1)
     req = seed_chat_with_dataset(deps, chat_id="c1", user_id="u1", dataset_id="a2")
     _start(deps, req)
@@ -623,20 +640,27 @@ def _visit_report(agent: _VisitAgent) -> ReportMessage:
         {"chat_id": "c1", "message_id": req.message_id}, _cfg(req)
     )
     assert out["status"] == "COMPLETED"
-    return next(m for m in deps.repos.messages.list_by_chat("c1") if m.kind == "report")
+    report = next(m for m in deps.repos.messages.list_by_chat("c1") if m.kind == "report")
+    return report, deps
+
+
+SUMMARY = (
+    "Ajmer highs range from 63°F to 90°F, and Palanpur highs from 86°F to 93°F. Both cities "
+    "suit a visit now, Ajmer being the milder. Trains were not answered."
+)
 
 
 def test_a_judgement_is_a_conclusion_under_assessment_linked_to_its_claims() -> None:
     """F10 rulings 1 and 3: the comparison task's judgement had no excerpt to cite and was
     dropped. It is now a conclusion resting on the claims it compares, shown under Assessment
     after the answers and before what was not answered, never with a source link."""
-    report = _visit_report(_VisitAgent())
+    report, _ = _visit_report(_VisitAgent(SUMMARY))
     ajmer, palanpur = report.report.claims
     (conclusion,) = report.report.conclusions
     assert (ajmer.text, palanpur.text) == (AJMER_FACT, PALANPUR_FACT)
     assert conclusion.text == VISIT_CONCLUSION and conclusion.confidence == "medium"
     assert conclusion.based_on == [ajmer.claim_id, palanpur.claim_id]
-    paragraphs = report.content.split("\n\n")
+    paragraphs = report.content.split("\n\n")[2:]  # after the summary and its counts
     assert paragraphs[:4] == [
         f"1. {AJMER_FACT}",
         f"2. {PALANPUR_FACT}",
@@ -648,6 +672,36 @@ def test_a_judgement_is_a_conclusion_under_assessment_linked_to_its_claims() -> 
         "unsupported conclusion, no finding it rests on held: Book the cheapest fare early."
         in report.report.uncertainties
     )
+
+
+def test_the_summary_covers_every_subject_and_the_assessment_from_one_cheap_call() -> None:
+    """F10 ruling 2: the chat said only "Ajmer has experienced temperatures ranging from 63°F
+    to 90°F" for a request about two cities. The report now opens with a summary of every
+    answered part and the assessment, written by one summary call on the cheap model that
+    reads the report's claims, conclusions and gaps, never page text."""
+    agent = _VisitAgent(SUMMARY)
+    report, deps = _visit_report(agent)
+    summary, counts, first = report.content.split("\n\n")[:3]
+    assert (summary, counts, first) == (SUMMARY, "2 findings, 2 limitations.", f"1. {AJMER_FACT}")
+    (call,) = [r for r in agent.requests if r.stage == "summary"]
+    sent = str(call.messages[0].content)
+    assert call.model == deps.executor_model and call.task_id is None
+    assert AJMER_FACT in sent and VISIT_CONCLUSION in sent and f"Not answered: {RAIL}" in sent
+    recorded = deps.repos.model_calls.list_by_request(report.request_message_id)
+    assert [(c.stage, c.outcome) for c in recorded][-1] == ("summary", "COMPLETED")
+    assert recorded[-1].context_version.endswith("|prompt:summary.1")
+
+
+def test_a_summary_naming_what_the_report_does_not_is_replaced_by_its_claims() -> None:
+    """F10 ruling 2: the summary model's text is checked against the report; a figure or a
+    name the report does not hold means the summary is built from the first claim of each
+    task, in plan order, and the first conclusion instead."""
+    invented = "Ajmer highs reach 95°F, hotter than Jaipur. Both cities suit a visit now."
+    report, _ = _visit_report(_VisitAgent(invented))
+    sources = [*(c.text for c in report.report.claims), VISIT_CONCLUSION]
+    assert unsupported_terms(invented, sources) == ["95", "Jaipur"]
+    assert unsupported_terms(SUMMARY, [*sources, f"Not answered: {RAIL}"]) == []
+    assert report.content.split("\n\n")[0] == f"{AJMER_FACT} {PALANPUR_FACT} {VISIT_CONCLUSION}"
 
 
 def test_scripted_exhaustion_fails_request_with_reason() -> None:

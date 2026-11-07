@@ -16,7 +16,7 @@ from contextforge.core.entities.message import (
     ReportMessage,
     RequestMessage,
 )
-from contextforge.core.entities.model_call import ModelCall
+from contextforge.core.entities.model_call import ModelCall, Stage
 from contextforge.core.entities.task import Task, TaskStatus
 from contextforge.core.models.transcript import Transcript, content_text, tool_results, tool_uses
 
@@ -55,6 +55,10 @@ def build_trace(records: TraceRecords) -> dict[str, Any]:
     def summaries(calls: list[ModelCall]) -> list[dict[str, Any]]:
         return [call_summary(c, tool_calls.get(c.model_call_id, [])) for c in calls]
 
+    # Outside a task the model is called by the planner and, once, for the report's summary.
+    report_calls = [c for c in by_task[None] if c.stage != Stage.PLAN]
+    by_task[None] = [c for c in by_task[None] if c.stage == Stage.PLAN]
+
     request = records.request
     report = next((m for m in records.entries if isinstance(m, ReportMessage)), None)
     return {
@@ -66,7 +70,6 @@ def build_trace(records: TraceRecords) -> dict[str, Any]:
             "createdAt": request.created_at,
             "usage": records.usage,
         },
-        # The planner is the only stage that calls the model outside a task.
         "plan": {
             "calls": summaries(by_task[None]),
             "tasksCreated": [t.task_id for t in records.tasks],
@@ -77,7 +80,7 @@ def build_trace(records: TraceRecords) -> dict[str, Any]:
         "tasks": [
             {**wire(task), "calls": summaries(by_task[task.task_id])} for task in records.tasks
         ],
-        "report": _report_summary(report),
+        "report": _report_summary(report, summaries(report_calls)),
         "events": trace_events(records, by_task, tool_calls, report),
     }
 
@@ -235,14 +238,19 @@ def _clarifications(entries: list[Message]) -> list[Clarification]:
     return [(q, answers.get(q.message_id)) for q in questions]
 
 
-def _report_summary(report: ReportMessage | None) -> dict[str, Any] | None:
+def _report_summary(
+    report: ReportMessage | None, calls: list[dict[str, Any]]
+) -> dict[str, Any] | None:
+    """The report's counts and the model calls that wrote it (its summary, F10 ruling 2)."""
     if report is None:
         return None
     return {
         "messageId": report.message_id,
         "createdAt": report.created_at,
         "claims": len(report.report.claims),
+        "conclusions": len(report.report.conclusions),
         "uncertainties": len(report.report.uncertainties),
+        "calls": calls,
     }
 
 

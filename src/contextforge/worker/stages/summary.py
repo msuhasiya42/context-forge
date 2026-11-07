@@ -90,7 +90,7 @@ def unsupported_terms(summary: str, sources: Iterable[str]) -> list[str]:
 
 def fallback_summary(outcomes: list[TaskOutcome], body: ReportBody) -> str:
     """The first claim of each task, in plan order (task ids sort in it), then the first
-    conclusion: built without a model from what the report already holds."""
+    conclusion, cut at ``MAX_SUMMARY_WORDS``: built without a model from what the report holds."""
     claims = {claim_key(claim.text): claim.text for claim in body.claims}
     firsts: list[str] = []
     for outcome in sorted(outcomes, key=lambda outcome: outcome["task_id"]):
@@ -99,7 +99,10 @@ def fallback_summary(outcomes: list[TaskOutcome], body: ReportBody) -> str:
         if first is not None:
             firsts.append(first)
     lines = [*(firsts or [body.claims[0].text]), *(c.text for c in body.conclusions[:1])]
-    return " ".join(_sentence(line) for line in lines)
+    words = " ".join(_sentence(line) for line in lines).split()
+    if len(words) <= MAX_SUMMARY_WORDS:
+        return " ".join(words)
+    return " ".join(words[:MAX_SUMMARY_WORDS]) + "…"
 
 
 def _written_summary(

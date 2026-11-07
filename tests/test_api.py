@@ -152,16 +152,17 @@ def test_connected_run_takes_the_production_call_path_with_the_users_memory(tmp_
         assert _until(client, path, "COMPLETED", "FAILED") == "COMPLETED"
         usage = client.get(path).json()["usage"]
     calls = deps.repos.model_calls.list_by_request(request_id)
-    # The budgeted client reserved spend for each of the 4 calls; without settings it is 0.
-    assert usage["modelCalls"] == 4 and usage["estimatedCostUsd"] == pytest.approx(0.4)
+    # The budgeted client reserved spend for each of the 5 calls (plan, three tasks, the report's
+    # summary, which has no script and fails); without settings it is 0.
+    assert usage["modelCalls"] == 5 and usage["estimatedCostUsd"] == pytest.approx(0.5)
     assert "Quote every figure in INR." in planner_system[0]
     assert all(c.context_version.startswith(f"mem:{memory['version']}|") for c in calls)
 
 
 def test_a_long_report_becomes_a_deliverable_that_the_content_route_serves(tmp_path):
     """F5 Part B: a report text over 1,500 characters is saved whole as a markdown deliverable;
-    the chat keeps its first paragraph and a pointer, and only deliverables and raw results
-    are served."""
+    the chat keeps its summary, its counts and a pointer (F10 ruling 2), and only deliverables
+    and raw results are served."""
 
     def long_result(task: int) -> ModelResponse:
         result = t1_result()
@@ -194,12 +195,16 @@ def test_a_long_report_becomes_a_deliverable_that_the_content_route_serves(tmp_p
         missing = client.get("/chats/c1/artifacts/none/content")
     claims = report["report"]["claims"]
     assert ref["role"] == "output" and len(claims) == 6
-    assert len(report["content"]) < 1500 and report["content"].startswith(f"1. {claims[0]['text']}")
-    assert "Full report attached: 6 findings" in report["content"]
+    # No summary is scripted, so the summary is built from the first claim, cut to length.
+    summary, counts = report["content"].split("\n\n")
+    assert summary.startswith(claims[0]["text"][:100]) and summary.endswith("…")
+    assert counts == "6 findings, 4 limitations. Full report attached."
     assert served.status_code == 200 and served.headers["content-type"].startswith("text/markdown")
     assert served.headers["x-content-type-options"] == "nosniff"
     body = served.text
-    assert body.startswith("# Explain how October 2026 spending differs from September 2026.")
+    assert body.startswith(
+        f"# Explain how October 2026 spending differs from September 2026.\n\n{summary}\n\n1. "
+    )
     assert all(claim["text"] in body for claim in claims)
     assert "Limitations:" in body and "## Evidence" in body and "## Coverage" in body
     artifact = deps.repos.artifacts.get("c1", ref["artifactId"])
@@ -500,6 +505,8 @@ def test_the_trace_shows_the_planner_its_question_the_tasks_their_calls_and_tool
 
     plan = trace["plan"]
     assert [c["stage"] for c in plan["calls"]] == ["plan", "plan"]
+    # The report's summary call is the report's, not the planner's (F10 ruling 2).
+    assert [c["stage"] for c in trace["report"]["calls"]] == ["summary"]
     assert all(c["hasTranscript"] and c["durationMs"] >= 0 for c in plan["calls"])
     assert [m["content"] for m in plan["clarifications"]] == ["Which months?", "Sep and Oct"]
     first, second = trace["tasks"]
