@@ -3,6 +3,7 @@
 import asyncio
 import hmac
 import json
+import logging
 import sqlite3
 import time
 from collections.abc import AsyncIterator
@@ -16,6 +17,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from langgraph.checkpoint.sqlite import SqliteSaver
 from pydantic import BaseModel, ConfigDict, Field
 from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from contextforge.core.entities.message import RequestMessage, RequestStatus
 from contextforge.core.services.application import (
@@ -37,6 +39,8 @@ from contextforge.worker.runner import RequestRunner
 HEARTBEAT_SECONDS = 15.0
 STREAM_MAX_SECONDS = 900.0
 INTERNAL_MESSAGE = "Something went wrong. Please try again."
+
+logger = logging.getLogger(__name__)
 
 
 class NewChatBody(BaseModel):
@@ -86,6 +90,8 @@ def create_app(settings: Settings | None = None, *, deps: WorkerDeps | None = No
 
     app = FastAPI(title="ContextForge", lifespan=lifespan)
     app.state.service, app.state.consumer = service, consumer
+    # Added first, so it sits inside CORS: the 500 envelope gets the CORS headers too.
+    app.add_middleware(InternalErrorEnvelope)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=config.cors_origins,
@@ -208,10 +214,36 @@ def _install_error_handlers(app: FastAPI) -> None:
             return _error(404, "not_found", "Not found.")
         return _error(exc.status_code, "validation", str(exc.detail))
 
-    @app.exception_handler(Exception)
-    async def internal_error(request: Request, exc: Exception) -> JSONResponse:
-        # Starlette re-raises after this response is sent, so the server still logs the trace.
-        return _error(500, "internal", INTERNAL_MESSAGE)
+
+class InternalErrorEnvelope:
+    """Answers an unhandled exception with the 500 envelope and logs its trace.
+
+    Not an ``exception_handler(Exception)``: Starlette runs that one outside every middleware,
+    so its response would carry no CORS headers and a browser could not read it. An error after
+    the response has started cannot be answered and is re-raised to the server.
+    """
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        started = False
+
+        async def tracked(message: Message) -> None:
+            nonlocal started
+            started = started or message["type"] == "http.response.start"
+            await send(message)
+
+        try:
+            await self.app(scope, receive, tracked)
+        except Exception:
+            if started:
+                raise
+            logger.exception("Unhandled error on %s %s", scope["method"], scope["path"])
+            await _error(500, "internal", INTERNAL_MESSAGE)(scope, receive, send)
 
 
 def _error(status: int, code: str, message: str) -> JSONResponse:

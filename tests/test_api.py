@@ -286,14 +286,15 @@ def test_cancel_succeeds_and_one_that_loses_a_race_gets_the_409_envelope(tmp_pat
     assert lost.json() == {"error": {"code": "invalid_state", "message": "Request is COMPLETED."}}
 
 
-def test_errors_share_one_envelope_without_internals(tmp_path, monkeypatch):
+def test_errors_share_one_envelope_without_internals(tmp_path, monkeypatch, caplog):
     deps = make_deps(ScriptedModel({}))
     seed_chat_with_dataset(deps, chat_id="c1", user_id="u1", dataset_id="a2")
     app = create_app(_settings(tmp_path, run_worker=False, dev_token="s3cret"), deps=deps)
     with TestClient(app, raise_server_exceptions=False) as client:
         denied = client.get("/me")
         assert denied.status_code == 401 and denied.json()["error"]["code"] == "unauthenticated"
-        auth = {"Authorization": "Bearer s3cret"}
+        # The browser app's origin: every envelope must carry CORS headers it can read.
+        auth = {"Authorization": "Bearer s3cret", "Origin": "http://localhost:5173"}
         assert client.get("/me", headers=auth).status_code == 200
         missing = client.get("/no/such/route", headers=auth)
         assert missing.status_code == 404 and missing.json()["error"]["code"] == "not_found"
@@ -305,6 +306,9 @@ def test_errors_share_one_envelope_without_internals(tmp_path, monkeypatch):
         crashed = client.get("/chats/c1/requests/r1", headers=auth)
     assert crashed.status_code == 500
     assert crashed.json() == {"error": {"code": "internal", "message": main.INTERNAL_MESSAGE}}
+    for response in (missing, crashed):
+        assert response.headers["access-control-allow-origin"] == "http://localhost:5173"
+    assert "database password leaked" in caplog.text  # logged with its trace, never sent
 
 
 def test_patch_me_validates_preferences_and_refuses_credentials(tmp_path):
