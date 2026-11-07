@@ -1,5 +1,6 @@
 """Composition root for the real model, web tools and selectable application persistence."""
 
+import logging
 from typing import Any
 
 import boto3  # type: ignore[import-untyped]
@@ -9,6 +10,7 @@ from contextforge.core.context.budgets import load_budgets
 from contextforge.core.entities.model_call import Stage
 from contextforge.core.models.base import ModelClient
 from contextforge.core.models.config import load_models_config
+from contextforge.core.models.recording import PriceTable
 from contextforge.core.models.scripted import ScriptedModel
 from contextforge.core.queue import InProcessQueue, Queue
 from contextforge.core.repositories.memory import Repositories
@@ -16,9 +18,12 @@ from contextforge.core.settings import Settings
 from contextforge.core.storage import BlobStore, MemoryBlobStore
 from contextforge.infra.aws import S3Blobs, SqsQueue, dynamo_repositories
 from contextforge.infra.bedrock import BedrockModel
+from contextforge.infra.tracing import RequestTracer, langsmith_client
 from contextforge.infra.web import FetchURLTool, PublicWebClient, WebSearchTool
 from contextforge.worker.deps import WorkerDeps
 from contextforge.worker.tools.sql_query import SqlQueryTool
+
+logger = logging.getLogger(__name__)
 
 
 def build_worker(settings: Settings) -> WorkerDeps:
@@ -43,12 +48,6 @@ def build_worker(settings: Settings) -> WorkerDeps:
     model: ModelClient = ScriptedModel({})
     if settings.model_backend == "bedrock":
         model = _bedrock_model(session, settings)
-    if settings.langsmith_tracing and settings.langsmith_api_key:
-        from contextforge.infra.tracing import TracedModel
-
-        model = TracedModel(
-            model, settings.langsmith_api_key.get_secret_value(), settings.langsmith_project
-        )
     web = PublicWebClient(
         provider=settings.search_provider,
         api_key=settings.serper_api_key.get_secret_value() if settings.serper_api_key else None,
@@ -58,17 +57,21 @@ def build_worker(settings: Settings) -> WorkerDeps:
         max_chars=settings.web_max_chars,
     )
     models = load_models_config()
+    tracer = _tracer(settings, models.prices)
     return WorkerDeps(
         repos=repos,
         blobs=blobs,
         queue=queue,
-        model=model,
+        model=tracer.model(model),
         budgets=load_budgets(),
-        tools={
-            "sql_query": SqlQueryTool(repos.artifacts, blobs),
-            "web_search": WebSearchTool(web, repos.artifacts, blobs),
-            "fetch_url": FetchURLTool(web, repos.artifacts, blobs),
-        },
+        tools=tracer.tools(
+            {
+                "sql_query": SqlQueryTool(repos.artifacts, blobs),
+                "web_search": WebSearchTool(web, repos.artifacts, blobs),
+                "fetch_url": FetchURLTool(web, repos.artifacts, blobs),
+            }
+        ),
+        tracer=tracer,
         price_version=models.price_version,
         prices=models.prices,
         model_provider=settings.model_backend,
@@ -94,3 +97,18 @@ def _bedrock_model(session: Any, settings: Settings) -> BedrockModel:
         client(settings.executor_timeout_seconds),
         by_stage={Stage.PLAN: planner, Stage.CITE: planner},
     )
+
+
+def _tracer(settings: Settings, prices: PriceTable) -> RequestTracer:
+    """The LangSmith tracer when CONTEXTFORGE_MODEL_TRACING is on and a key is set; otherwise
+    one that traces nothing."""
+    if not settings.model_tracing:
+        return RequestTracer()
+    if settings.langsmith_api_key is None:
+        logger.warning("CONTEXTFORGE_MODEL_TRACING is on but LANGSMITH_API_KEY is not set.")
+        return RequestTracer()
+    content = settings.trace_content
+    client = langsmith_client(
+        settings.langsmith_api_key.get_secret_value(), include_content=content
+    )
+    return RequestTracer(client, settings.langsmith_project, include_content=content, prices=prices)

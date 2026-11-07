@@ -6,10 +6,16 @@ import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from typing import Any
 
 from contextforge.core.activity import ActivityBus
 from contextforge.core.context.budgets import Budgets
 from contextforge.core.context.prompts import MEMORY_VERSION
+from contextforge.core.entities.message import (
+    ActionResponseMessage,
+    ClarificationResponseMessage,
+    RequestMessage,
+)
 from contextforge.core.models.base import ModelClient
 from contextforge.core.models.recording import PriceTable, RecordingModelClient
 from contextforge.core.queue import Queue
@@ -17,13 +23,14 @@ from contextforge.core.repositories.memory import Repositories
 from contextforge.core.settings import Settings
 from contextforge.core.storage import BlobStore
 from contextforge.core.tools.base import Tool
+from contextforge.infra.tracing import RequestTracer
 from contextforge.worker.calls import BudgetedModel
 
 
 @dataclass
 class WorkerDeps:
-    """``model`` is the bare client; stages call it only through ``model_for`` so every call is
-    recorded as a ModelCall of its request."""
+    """``model`` is the provider client (traced when tracing is on); stages call it only through
+    ``model_for`` so every call is admitted and recorded as a ModelCall of its request."""
 
     repos: Repositories
     blobs: BlobStore
@@ -47,6 +54,9 @@ class WorkerDeps:
     activity: ActivityBus = field(default_factory=ActivityBus)
     # time.monotonic() at the start of each request's current segment (see ``segment``).
     segment_started: dict[str, float] = field(default_factory=dict)
+    # Opens the trace runs; the default traces nothing. A tracing tracer also wraps ``model``
+    # and ``tools`` (see ``RequestTracer.model`` and ``.tools``).
+    tracer: RequestTracer = field(default_factory=RequestTracer)
 
     def __post_init__(self) -> None:
         self.semaphore = threading.BoundedSemaphore(self.budgets.tasks_in_flight)
@@ -101,17 +111,40 @@ class WorkerDeps:
         """One run of a request: its start or a resume, from claim until it ends or pauses.
 
         The request deadline counts from the segment's start, so the time a request waits on
-        the user, between segments, never counts against it.
+        the user, between segments, never counts against it. The segment is one trace root.
         """
         self.segment_started[request_message_id] = time.monotonic()
         try:
-            yield
+            with self.tracer.request(
+                request_message_id,
+                chat_id,
+                lambda: self._segment_summary(chat_id, request_message_id),
+            ):
+                yield
         finally:
             self.segment_started.pop(request_message_id, None)
 
-    def touch_chat(self, chat_id: str, user_id: str) -> None:
-        from contextforge.core.entities.message import RequestMessage
+    def _segment_summary(self, chat_id: str, request_message_id: str) -> dict[str, Any]:
+        """The request's status as a segment ends, and which segment it was: 1 for the first
+        run, n + 1 for the run after the user's n-th answer."""
+        messages = self.repos.messages.list_by_chat(chat_id)
+        answers = [
+            m
+            for m in messages
+            if isinstance(m, ClarificationResponseMessage | ActionResponseMessage)
+            and m.request_message_id == request_message_id
+        ]
+        request = next(
+            (
+                m
+                for m in messages
+                if isinstance(m, RequestMessage) and m.message_id == request_message_id
+            ),
+            None,
+        )
+        return {"status": request.status if request else None, "attempt": len(answers) + 1}
 
+    def touch_chat(self, chat_id: str, user_id: str) -> None:
         chat = self.repos.chats.get(user_id, chat_id)
         if chat is None:
             return

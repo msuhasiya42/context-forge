@@ -39,8 +39,12 @@ class Settings(BaseSettings):
     web_timeout_seconds: int = Field(default=15, ge=1, le=60)
     web_max_bytes: int = Field(default=1_000_000, ge=1024)
     web_max_chars: int = Field(default=12_000, ge=100)
+    # Our own switch, not LANGSMITH_TRACING: exporting that turns on the LangSmith SDK's global
+    # auto-tracing, which would send LangGraph's full state (requests, pages) to LangSmith.
+    model_tracing: bool = False
+    # Developer machines only: put prompts and model and tool outputs on trace runs.
+    trace_content: bool = False
     langsmith_api_key: SecretStr | None = Field(default=None, validation_alias="LANGSMITH_API_KEY")
-    langsmith_tracing: bool = Field(default=False, validation_alias="LANGSMITH_TRACING")
     langsmith_project: str = Field(default="contextforge", validation_alias="LANGSMITH_PROJECT")
     run_worker: bool = True
     sse_poll_seconds: float = Field(default=1, gt=0)
