@@ -86,3 +86,23 @@ def test_spec_example_plan_validates() -> None:
         }
     )
     assert out.tasks and out.tasks[1].depends_on == ["t1"]
+
+
+def test_plan_rejects_dependency_cycle() -> None:
+    with pytest.raises(ValidationError, match=r"t1.*t2"):
+        PlannerOutput(
+            kind="plan",
+            goal="g",
+            constraints=[],
+            open_questions=[],
+            tasks=[_task("t1", ["t2"]), _task("t2", ["t1"])],
+            next_action="n",
+        )
+    PlannerOutput(
+        kind="plan",
+        goal="g",
+        constraints=[],
+        open_questions=[],
+        tasks=[_task("t1"), _task("t2", ["t1"]), _task("t3", ["t2"])],
+        next_action="n",
+    )

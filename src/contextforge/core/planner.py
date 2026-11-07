@@ -56,4 +56,38 @@ class PlannerOutput(Entity):
                     raise ValueError(f"task {task.ref} depends on itself")
                 if dependency not in refs:
                     raise ValueError(f"task {task.ref} depends on unknown ref {dependency}")
+        cycle = _find_dependency_cycle(tasks)
+        if cycle:
+            raise ValueError(
+                f"tasks depend on each other in a cycle: {' -> '.join(cycle)} "
+                "(each task depends on the next)"
+            )
         return self
+
+
+def _find_dependency_cycle(tasks: list[PlannedTask]) -> list[str] | None:
+    """Return one cycle in the ``depends_on`` graph as a ref path that starts and ends on the
+    same ref, or None when the graph is acyclic. Expects every dependency to be a known ref."""
+    depends_on = {task.ref: task.depends_on for task in tasks}
+    acyclic: set[str] = set()
+    path: list[str] = []
+
+    def visit(ref: str) -> list[str] | None:
+        if ref in path:
+            return path[path.index(ref) :] + [ref]
+        if ref in acyclic:
+            return None
+        path.append(ref)
+        for dependency in depends_on[ref]:
+            cycle = visit(dependency)
+            if cycle:
+                return cycle
+        path.pop()
+        acyclic.add(ref)
+        return None
+
+    for ref in depends_on:
+        cycle = visit(ref)
+        if cycle:
+            return cycle
+    return None
