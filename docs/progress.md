@@ -140,3 +140,10 @@ Not created on purpose: the stream-to-SQS Lambda and service roles (phase 11, CD
   *Milestone 2:* phases 2, 3, 4, 7 and 10 next, with plans at `docs/superpowers/plans/2026-11-07-phase-*.md` (being drafted); phases 5, 6, 8, 9 and 11 later. Next: merge `phase-1-engine`, then phase 2 once its plan is reviewed.
 
 - **7 Nov 2026, web-first continuation (Codex).** Finished period propagation and the remaining phase-one test corrections. Added native DuckDuckGo/optional Serper search, bounded public page fetching and saved URL evidence; Bedrock Converse and metadata-only model traces; FastAPI/SSE, queue consumption, clarification/cancel, user instructions/preferences and optional DynamoDB/S3/SQS adapters. Added portable frontend patch for SSE/replies/stop/memory controls. Offline checks: 92 backend tests, 14 frontend-preview tests, lint/typecheck/build. Real web/model responses were unavailable and server binding was denied; no live acceptance or AWS provisioning. See the new handoff for exact scope, start commands, dependencies and unfinished work.
+
+## 7 November 2026, evening
+
+Fix wave 2 merged and re-reviewed; live acceptance from the UI in AWS mode passed (market
+comparison and a weather/distance/trains question); Deep Dive, robustness, planner bake-off and
+model routing landed; long reports as deliverables; Serper search; any-model Bedrock policy.
+Handoff for the next agent: `docs/handoff-2026-11-07-evening.md`.
