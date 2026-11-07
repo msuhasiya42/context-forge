@@ -1,0 +1,11 @@
+.toggle {
+  display: none;
+  flex-shrink: 0;
+}
+
+/* Keep in sync with the layout breakpoint in App.module.css and ChatSidebar.module.css. */
+@media (max-width: 767px) {
+  .toggle {
+    display: inline-flex;
+  }
+}
