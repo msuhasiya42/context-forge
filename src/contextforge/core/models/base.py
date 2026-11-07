@@ -42,6 +42,7 @@ class ModelRequest(Entity):
     output_schema: type[BaseModel] | None = None
     max_tokens: int = 4000
     task_id: str | None = None
+    request_message_id: str | None = None
 
 
 class ModelResponse(Entity):
@@ -55,6 +56,7 @@ class ModelResponse(Entity):
     # True when served from a stored earlier result rather than a provider call, so it is
     # not recorded as a new ModelCall.
     replayed: bool = False
+    langsmith_run_id: str | None = None
 
 
 class ModelClient(Protocol):

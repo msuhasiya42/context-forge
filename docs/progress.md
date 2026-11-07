@@ -2,6 +2,10 @@
 
 Updated: 7 November 2026. This is the living status document. Each working session appends to the log at the bottom and updates the checklist. The design is in [system-design.md](system-design.md); the build plan is in [implementation-plan.md](implementation-plan.md).
 
+## Latest continuation: web-first slice
+
+See [handoff-web-first-2026-11-07.md](handoff-web-first-2026-11-07.md). Mayur requested public web research first and chose DuckDuckGo initially. The interrupted phase-one fixes are complete in the working tree. Bedrock, search/fetch, API/SSE, standing instructions and AWS application adapters are implemented and offline-tested; these are partial slices of phases 2, 4, 7 and 10, not phase completion. Backend: 92 tests; frontend patch preview: 14 tests and a production build. Live provider access and browser acceptance remain unverified because the session denied outbound DNS and local socket binding. The official cloud graph checkpointer, evaluation harness and learned memory are still pending. Nothing was merged or deployed.
+
 ## Where things stand
 
 Phase 0, design contracts, and phase 1, the local engine, are complete (7 Nov 2026, branch `phase-1-engine`, 75 tests). The engine runs a request end to end on a scripted fake model and the fixture `sql_query` tool, with SQLite checkpoints, clarification resume, crash restart, duplicate protection and compaction. A frontend was built early in the sibling repository `context-forge-frontend` against a mock API client. Milestone 2 (phases 2, 3, 4, 7, 10) is being planned; see the 7 Nov phase-close log entry. AWS resources exist in Sydney (table below) but phases 1 to 9 do not use them.
@@ -134,3 +138,5 @@ Not created on purpose: the stream-to-SQS Lambda and service roles (phase 11, CD
   *AWS, 7 Nov:* the account is on the Free Plan with $120 credits. Anthropic models are not available on the Free Plan (an upgrade is needed), so phase 2 defaults to Amazon Nova (Pro and Lite) through `config/models.yaml`, with Claude as the default once available; the Anthropic use-case form was submitted in the Bedrock console. Titan Text Embeddings V2 is confirmed in ap-southeast-2. Two of five credit activities are done (Budgets, Bedrock playground); Lambda, EC2 and RDS are pending.
 
   *Milestone 2:* phases 2, 3, 4, 7 and 10 next, with plans at `docs/superpowers/plans/2026-11-07-phase-*.md` (being drafted); phases 5, 6, 8, 9 and 11 later. Next: merge `phase-1-engine`, then phase 2 once its plan is reviewed.
+
+- **7 Nov 2026, web-first continuation (Codex).** Finished period propagation and the remaining phase-one test corrections. Added native DuckDuckGo/optional Serper search, bounded public page fetching and saved URL evidence; Bedrock Converse and metadata-only model traces; FastAPI/SSE, queue consumption, clarification/cancel, user instructions/preferences and optional DynamoDB/S3/SQS adapters. Added portable frontend patch for SSE/replies/stop/memory controls. Offline checks: 92 backend tests, 14 frontend-preview tests, lint/typecheck/build. Real web/model responses were unavailable and server binding was denied; no live acceptance or AWS provisioning. See the new handoff for exact scope, start commands, dependencies and unfinished work.

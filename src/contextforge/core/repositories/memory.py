@@ -10,7 +10,7 @@ mypy (tests, decoded JSON) may pass the plain string, and the stored field must 
 
 import threading
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from contextforge.core.entities.artifact import Artifact, ArtifactStatus
@@ -26,6 +26,7 @@ from contextforge.core.entities.message import (
 )
 from contextforge.core.entities.model_call import ModelCall
 from contextforge.core.entities.task import Task, TaskResult, TaskStatus
+from contextforge.core.entities.user import User
 from contextforge.core.ids import now_iso
 from contextforge.core.repositories.base import (
     ArtifactRepository,
@@ -34,6 +35,7 @@ from contextforge.core.repositories.base import (
     ModelCallRepository,
     StaleStatusError,
     TaskRepository,
+    UserRepository,
 )
 from contextforge.core.values import Usage
 
@@ -117,6 +119,12 @@ class InMemoryMessages:
 
 
 class InMemoryTasks:
+    def save_all(self, tasks: list[Task]) -> None:
+        with self._lock:
+            self._tasks.update({(t.request_message_id, t.task_id): t for t in tasks})
+        for task in tasks:
+            self._after_save(task)
+
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._tasks: dict[tuple[str, str], Task] = {}
@@ -228,6 +236,14 @@ class InMemoryArtifacts:
 
 
 class InMemoryChats:
+    def touch(self, user_id: str, chat_id: str, status: RequestStatus | None) -> None:
+        with self._lock:
+            chat = self._chats.get((user_id, chat_id))
+            if chat is not None:
+                self._chats[(user_id, chat_id)] = chat.model_copy(
+                    update={"updated_at": now_iso(), "last_request_status": status}
+                )
+
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._chats: dict[tuple[str, str], Chat] = {}
@@ -250,6 +266,20 @@ class InMemoryChats:
             )
 
 
+class InMemoryUsers:
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._users: dict[str, User] = {}
+
+    def save(self, user: User) -> None:
+        with self._lock:
+            self._users[user.user_id] = user
+
+    def get(self, user_id: str) -> User | None:
+        with self._lock:
+            return self._users.get(user_id)
+
+
 @dataclass
 class Repositories:
     """The five repositories a service or the worker needs, typed by their Protocols."""
@@ -259,6 +289,7 @@ class Repositories:
     model_calls: ModelCallRepository
     artifacts: ArtifactRepository
     chats: ChatRepository
+    users: UserRepository = field(default_factory=InMemoryUsers)
 
     @classmethod
     def in_memory(cls) -> "Repositories":

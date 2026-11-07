@@ -19,7 +19,7 @@ from contextforge.core.state import Fact, RequestState
 from contextforge.core.values import ArtifactRef, EvidenceRef
 from contextforge.worker.deps import WorkerDeps
 from contextforge.worker.stages.execute import TaskOutcome
-from contextforge.worker.stages.guards import leave_running
+from contextforge.worker.stages.guards import check_not_cancelled, leave_running
 from contextforge.worker.stages.plan import local_today
 
 logger = logging.getLogger(__name__)
@@ -35,6 +35,7 @@ def write_report(brief: RequestState, outcomes: list[TaskOutcome], deps: WorkerD
     raises ``Cancelled`` when the user cancelled meanwhile.
     """
     with request_context(brief["request_message_id"]):
+        check_not_cancelled(deps, brief["chat_id"], brief["request_message_id"])
         report = _report_message(brief, outcomes)
         deps.repos.messages.save(report)
         completed = any(o["status"] == TaskStatus.COMPLETED for o in outcomes)
@@ -66,7 +67,7 @@ def _report_message(brief: RequestState, outcomes: list[TaskOutcome]) -> ReportM
         sender=Sender.ASSISTANT,
         kind=MessageKind.REPORT,
         request_message_id=request_message_id,
-        content="\n".join(claim.text for claim in claims) or NO_CLAIMS,
+        content=_answer_text(claims, _uncertainties(outcomes)),
         created_at=now,
         updated_at=now,
         report=ReportBody(
@@ -74,7 +75,10 @@ def _report_message(brief: RequestState, outcomes: list[TaskOutcome]) -> ReportM
             inputs_consulted=_inputs_consulted(claims),
             uncertainties=_uncertainties(outcomes),
             constraints=_constraints(brief["constraints"]),
-            coverage=_coverage(outcomes),
+            coverage={
+                **_coverage(outcomes),
+                **({"period": brief["period"]} if brief.get("period") else {}),
+            },
         ),
     )
 
@@ -124,3 +128,20 @@ def _coverage(outcomes: list[TaskOutcome]) -> dict[str, dict[str, int]]:
             "failed": counts[TaskStatus.FAILED],
         }
     }
+
+
+def _answer_text(claims: list[Claim], uncertainties: list[str]) -> str:
+    if not claims:
+        return NO_CLAIMS
+    lines = []
+    for claim in claims:
+        urls = list(
+            dict.fromkeys(
+                ref.locator.value for ref in claim.evidence_refs if ref.locator.kind.value == "url"
+            )
+        )
+        links = " ".join(f"[source]({url})" for url in urls)
+        lines.append(f"{claim.text} {links}".strip())
+    if uncertainties:
+        lines.append("Limitations:\n" + "\n".join(f"- {text}" for text in uncertainties))
+    return "\n\n".join(lines)

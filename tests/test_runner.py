@@ -15,10 +15,10 @@ def _saver(path) -> SqliteSaver:
 
 
 def _reply(
-    req, target: str, content: str = "ACC-SAV-1 and ACC-CUR-2"
+    req, target: str, content: str = "ACC-SAV-1 and ACC-CUR-2", *, message_id: str = "m3"
 ) -> ClarificationResponseMessage:
     return ClarificationResponseMessage(
-        message_id="m3",
+        message_id=message_id,
         chat_id="c1",
         user_id="u1",
         sender="user",
@@ -63,6 +63,8 @@ def test_clarification_interrupt_then_resume_completes(tmp_path) -> None:
         "execute": [ModelResponse(structured=t1_result())] * 3,
     }
     deps = make_deps(ScriptedModel(script))
+    requests = []
+    deps.model.on_request = requests.append
     req = seed_chat_with_dataset(deps, chat_id="c1", user_id="u1", dataset_id="a2")
     RequestRunner(deps, _saver(db)).start("c1", req.message_id)
     assert deps.repos.messages.get("c1", req.message_id).status == "WAITING_USER"
@@ -89,15 +91,24 @@ def test_two_clarifications_then_plan(tmp_path) -> None:
         "execute": [ModelResponse(structured=t1_result())] * 3,
     }
     deps = make_deps(ScriptedModel(script))
+    requests = []
+    deps.model.on_request = requests.append
     req = seed_chat_with_dataset(deps, chat_id="c1", user_id="u1", dataset_id="a2")
     RequestRunner(deps, _saver(db)).start("c1", req.message_id)
     for i in range(2):
         pending = [m for m in deps.repos.messages.pending_for_request("c1", req.message_id)]
         assert len(pending) == 1
         out = RequestRunner(deps, _saver(db)).resume(
-            "c1", req.message_id, _reply(req, pending[0].message_id, f"answer {i}")
+            "c1",
+            req.message_id,
+            _reply(req, pending[0].message_id, f"answer {i}", message_id=f"m{i + 3}"),
         )
         assert out.started
+    planner_calls = [r for r in requests if r.stage == "plan"]
+    assert "answer 0" in planner_calls[1].messages[0].content
+    assert all(
+        answer in planner_calls[2].messages[0].content for answer in ("answer 0", "answer 1")
+    )
     assert deps.repos.messages.get("c1", req.message_id).status == "COMPLETED"
     assert (
         len([m for m in deps.repos.messages.list_by_chat("c1") if m.kind == "clarification"]) == 2

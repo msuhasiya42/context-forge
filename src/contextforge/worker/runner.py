@@ -62,6 +62,8 @@ class RequestRunner:
         with request_context(message_id):
             if not self._claim(chat_id, message_id, RequestStatus.ACCEPTED):
                 return RunOutcome(started=False, reason=ALREADY_STARTED)
+            request = load_request(self._deps.repos.messages, chat_id, message_id)
+            self._deps.touch_chat(chat_id, request.user_id)
             return self._run(self._start_input(chat_id, message_id), message_id)
 
     def resume(self, chat_id: str, message_id: str, reply: Reply) -> RunOutcome:
@@ -76,6 +78,23 @@ class RequestRunner:
                 return RunOutcome(started=False, reason=NOT_THE_PENDING_INTERRUPT)
             answer = {"message_id": reply.message_id, "content": reply.content}
             return self._run(Command(resume=answer), message_id)
+
+    def resume_claimed(self, chat_id: str, message_id: str, reply: Reply) -> RunOutcome:
+        """Continue a reply whose WAITING_USER -> RUNNING claim was made by the API."""
+        request = load_request(self._deps.repos.messages, chat_id, message_id)
+        pending = self.pending_interrupt(message_id)
+        if (
+            request.status != RequestStatus.RUNNING
+            or reply.chat_id != chat_id
+            or reply.request_message_id != message_id
+            or reply.user_id != request.user_id
+            or pending is None
+            or pending["message_id"] != reply.in_reply_to_message_id
+        ):
+            return RunOutcome(started=False, reason=NOT_THE_PENDING_INTERRUPT)
+        return self._run(
+            Command(resume={"message_id": reply.message_id, "content": reply.content}), message_id
+        )
 
     def pending_interrupt(self, message_id: str) -> PendingInterrupt | None:
         """What the request's thread is waiting on, or None when it waits on nothing."""
@@ -101,6 +120,13 @@ class RequestRunner:
 
     def _accept(self, chat_id: str, message_id: str, reply: Reply) -> bool:
         """Save ``reply`` and claim the request when the reply answers its pending interrupt."""
+        request = load_request(self._deps.repos.messages, chat_id, message_id)
+        if (
+            reply.chat_id != chat_id
+            or reply.request_message_id != message_id
+            or reply.user_id != request.user_id
+        ):
+            return False
         if not self._awaits(chat_id, message_id, reply.in_reply_to_message_id):
             logger.warning(
                 "reply %s refused: it does not answer the pending interrupt", reply.message_id

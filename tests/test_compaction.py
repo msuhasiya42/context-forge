@@ -69,7 +69,7 @@ def test_level1_is_idempotent() -> None:
     assert [m.content for m in once] == [m.content for m in twice]
 
 
-def test_repeated_compaction_keeps_brief_fields_out_of_scope() -> None:
+def test_repeated_compaction_keeps_tool_call_result_pairs() -> None:
     # compaction only receives messages; brief fields are not passed and cannot be lost
     model = ScriptedModel({"compress": [ModelResponse(text="s")] * 3})
     msgs = _turns(12, big=True)

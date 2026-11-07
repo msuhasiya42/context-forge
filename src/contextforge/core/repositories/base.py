@@ -14,6 +14,7 @@ from contextforge.core.entities.chat import Chat
 from contextforge.core.entities.message import Message, RequestMessage, RequestStatus
 from contextforge.core.entities.model_call import ModelCall
 from contextforge.core.entities.task import Task, TaskResult, TaskStatus
+from contextforge.core.entities.user import User
 from contextforge.core.values import Usage
 
 
@@ -61,6 +62,8 @@ class MessageRepository(Protocol):
 
 
 class TaskRepository(Protocol):
+    def save_all(self, tasks: list[Task]) -> None: ...
+
     def save(self, task: Task) -> None: ...
 
     def get(self, request_message_id: str, task_id: str) -> Task | None: ...
@@ -108,6 +111,8 @@ class ArtifactRepository(Protocol):
 
 
 class ChatRepository(Protocol):
+    def touch(self, user_id: str, chat_id: str, status: RequestStatus | None) -> None: ...
+
     def save(self, chat: Chat) -> None: ...
 
     def get(self, user_id: str, chat_id: str) -> Chat | None: ...
@@ -115,3 +120,8 @@ class ChatRepository(Protocol):
     def list_by_user(self, user_id: str) -> list[Chat]:
         """The user's chats, most recently updated first."""
         ...
+
+
+class UserRepository(Protocol):
+    def save(self, user: User) -> None: ...
+    def get(self, user_id: str) -> User | None: ...

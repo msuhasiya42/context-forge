@@ -1,7 +1,7 @@
 """Work queue boundary between the API and the worker: one message per run to start or resume."""
 
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal, Protocol
 
 
@@ -13,9 +13,12 @@ class WorkMessage:
     message_id: str
     # On ``resume``, the clarification_response or action_response that unblocked the request.
     reply_message_id: str | None = None
+    receipt: str | None = field(default=None, compare=False)
 
 
 class Queue(Protocol):
+    def ack(self, msg: WorkMessage) -> None: ...
+
     def send(self, msg: WorkMessage) -> None: ...
 
     def receive(self) -> WorkMessage | None:
@@ -28,6 +31,9 @@ class InProcessQueue:
 
     def __init__(self) -> None:
         self._items: deque[WorkMessage] = deque()
+
+    def ack(self, msg: WorkMessage) -> None:
+        pass
 
     def send(self, msg: WorkMessage) -> None:
         self._items.append(msg)

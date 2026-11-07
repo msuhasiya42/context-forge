@@ -12,7 +12,7 @@ def dataset_key(chat_id: str, artifact_id: str) -> str:
 
 def raw_result_key(chat_id: str, artifact_id: str) -> str:
     """Blob key of a raw_result Artifact: the full tool result rows as JSON lines."""
-    return f"chats/{chat_id}/raw_results/{artifact_id}.jsonl"
+    return f"raw_result/{chat_id}/{artifact_id}.jsonl"
 
 
 class BlobStore(Protocol):

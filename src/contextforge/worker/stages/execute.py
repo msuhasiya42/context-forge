@@ -56,10 +56,11 @@ from contextforge.core.models.base import (
     ToolCall,
     ToolSpec,
 )
-from contextforge.core.models.scripted import ScriptExhausted
+from contextforge.core.models.errors import ModelError
 from contextforge.core.repositories.base import StaleStatusError
 from contextforge.core.state import Fact, RequestState, TaskState
 from contextforge.core.tools.base import Tool, ToolContext, ToolResult
+from contextforge.worker.brief import load_request
 from contextforge.worker.deps import WorkerDeps
 from contextforge.worker.stages.errors import one_line
 from contextforge.worker.stages.guards import (
@@ -113,6 +114,7 @@ class _Turn:
     made: int
     seen: dict[str, str]
     messages: list[ToolMessage] = field(default_factory=list)
+    artifact_ids: list[str] = field(default_factory=list)
 
 
 def execute_stage(brief: RequestState, task_id: str, deps: WorkerDeps) -> TaskOutcome:
@@ -165,12 +167,16 @@ def call_model(state: TaskState, runtime: Runtime[TaskRun], *, deps: WorkerDeps)
     run = runtime.context
     try:
         check_call_budget(deps, state["request_message_id"])
-        model = deps.model_for(state["request_message_id"])
+        model = deps.model_for(
+            state["request_message_id"],
+            memory_version=run.brief["memory"]["version"] if "memory" in run.brief else None,
+            created_at=run.brief.get("created_at"),
+        )
         specs = [tool.spec for tool in _allowed_tools(run.task.kind, deps).values()]
-        built = build_context(_execute_inputs(state, run, specs), deps.budgets)
+        built = build_context(_execute_inputs(state, run, specs, deps), deps.budgets)
         messages = _compacted_messages(state["messages"], built, model, deps)
         response = model.invoke(_model_request(state, built, messages, specs, deps))
-    except (CallBudgetExceeded, ScriptExhausted) as exc:
+    except (CallBudgetExceeded, ModelError) as exc:
         logger.warning("execute call failed: %s", exc)
         return {"error": str(exc)}
     update = _handle_response(response, state, run.task, deps.budgets)
@@ -195,6 +201,9 @@ def run_tools(state: TaskState, runtime: Runtime[TaskRun], *, deps: WorkerDeps) 
             *turn.messages,
             *_nudges(state["tool_calls_made"], turn.made, budgets.tool_calls_per_task),
         ],
+        "evidence_artifact_ids": list(
+            dict.fromkeys([*state.get("evidence_artifact_ids", []), *turn.artifact_ids])
+        ),
         "tool_calls_made": turn.made,
         "seen_calls": turn.seen,
         "no_progress_turns": no_progress,
@@ -211,7 +220,7 @@ def _run_to_end(task: Task, brief: RequestState, deps: WorkerDeps) -> Task:
     results = _dependency_results(task, deps)
     if results is None:
         return _settle(deps, task, TaskStatus.FAILED, failure_reason=DEPENDENCY_FAILED)
-    if task.kind == TaskKind.SQL_ANALYSIS:
+    if task.kind in (TaskKind.SQL_ANALYSIS, TaskKind.WEB_SEARCH):
         return _run_sql_analysis(task, brief, deps, [result.summary for result in results])
     if task.kind == TaskKind.RECONCILE:
         return _settle(deps, task, TaskStatus.COMPLETED, result=reconcile_stub(task, results))
@@ -401,15 +410,17 @@ def _model_request(
     )
 
 
-def _execute_inputs(state: TaskState, run: TaskRun, specs: list[ToolSpec]) -> ContextInputs:
+def _execute_inputs(
+    state: TaskState, run: TaskRun, specs: list[ToolSpec], deps: WorkerDeps
+) -> ContextInputs:
     """Section 8.2 for an execute call: the brief, the task goal, its sources and its tools."""
     brief = run.brief
     return ContextInputs(
-        memory=load_prompt("agent-memory"),
+        memory=brief["memory"]["text"] if "memory" in brief else load_prompt("agent-memory"),
         stage_prompt=load_prompt(prompt_version(Stage.EXECUTE)),
         chat_id=state["chat_id"],
-        request=None,
-        preferences={},
+        request=load_request(deps.repos.messages, brief["chat_id"], brief["request_message_id"]),
+        preferences=brief["memory"]["preferences"] if "memory" in brief else {},
         constraints=[*state["constraints"], f"Task goal: {run.task.goal}"],
         facts=brief["facts"],
         open_questions=brief["open_questions"],
@@ -433,7 +444,11 @@ def _handle_response(
             return {"error": TOOL_BUDGET_EXHAUSTED}
         return {"messages": [_ai_message(response)]}
     try:
-        return {"result": _parse_result(response, task).model_dump(mode="json")}
+        return {
+            "result": _parse_result(
+                response, task, state.get("evidence_artifact_ids", [])
+            ).model_dump(mode="json")
+        }
     except ValueError as exc:  # ValidationError is a ValueError
         reason = one_line(exc) if isinstance(exc, ValidationError) else str(exc)
         logger.warning("invalid result: %s", reason)
@@ -445,7 +460,7 @@ def _ai_message(response: ModelResponse) -> AIMessage:
     return AIMessage(content=response.text or "", tool_calls=calls)
 
 
-def _parse_result(response: ModelResponse, task: Task) -> TaskResult:
+def _parse_result(response: ModelResponse, task: Task, produced: list[str]) -> TaskResult:
     """The response's TaskResult, keeping only facts grounded in the task's own inputs.
 
     Raises ``ValueError`` (``ValidationError`` included) when it breaks the result schema; the
@@ -453,7 +468,7 @@ def _parse_result(response: ModelResponse, task: Task) -> TaskResult:
     """
     result = TaskResult.model_validate(response.structured)
     validate_structured_data(task.kind, result.structured_data)
-    grounded = [f for f in result.facts if _is_grounded(f, task.input_artifact_ids)]
+    grounded = [f for f in result.facts if _is_grounded(f, [*task.input_artifact_ids, *produced])]
     if len(grounded) < len(result.facts):
         dropped = len(result.facts) - len(grounded)
         logger.info("dropped %d facts that cite no task input", dropped)
@@ -491,7 +506,13 @@ def _run_one_call(
     if turn.made >= deps.budgets.tool_calls_per_task:
         return _result_message(call, _NOT_EXECUTED, state, deps)
     turn.made += 1
+    deps.activity.emit(state["request_message_id"], state["task_id"], f"Calling {call.name}")
     result = _invoke_tool(call, state, task.kind, deps)
+    deps.activity.emit(
+        state["request_message_id"], state["task_id"], f"{call.name}: {result.status}"
+    )
+    if result.status == "ok":
+        turn.artifact_ids.extend(result.artifact_ids)
     logger.info("tool %s returned %s", call.name, result.status)
     message = _result_message(call, result, state, deps)
     if result.status == "ok":
@@ -550,7 +571,9 @@ def _invoke_tool(call: ToolCall, state: TaskState, kind: TaskKind, deps: WorkerD
 
 
 def _allowed_tools(kind: TaskKind, deps: WorkerDeps) -> dict[str, Tool]:
-    return {name: deps.tools[name] for name in TOOL_NAMES_BY_KIND.get(kind, ())}
+    return {
+        name: deps.tools[name] for name in TOOL_NAMES_BY_KIND.get(kind, ()) if name in deps.tools
+    }
 
 
 def _result_message(

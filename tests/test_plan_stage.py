@@ -1,4 +1,6 @@
 # tests/test_plan_stage.py
+from datetime import date
+
 import pytest
 
 from contextforge.core.models.base import ModelResponse
@@ -49,12 +51,14 @@ def test_plan_then_gate_creates_tasks_in_order() -> None:
     deps = make_deps(ScriptedModel({"plan": [ModelResponse(structured=_plan(["a2"]))]}))
     req = seed_chat_with_dataset(deps, chat_id="c1", user_id="u1", dataset_id="a2")
     brief = initial_brief(req)
-    planned = plan_stage(brief, 0, deps)
+    planned = plan_stage(brief, 0, deps, today=date(2026, 11, 7))
     assert (
         planned["kind"] == "plan"
         and planned["constraints"] == ["Exclude transfers"]
         and planned["next_action"] == "run t1"
     )
+    # the fixture request names September and October; the resolver's window is carried on
+    assert planned["period"] == {"start": "2026-09-01", "end": "2026-10-31"}
     entries = plan_gate(brief, planned, deps)
     tasks = deps.repos.tasks.list_by_request(req.message_id)
     assert [t.kind for t in tasks] == ["sql_analysis", "reconcile"]

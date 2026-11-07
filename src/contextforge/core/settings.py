@@ -1,0 +1,42 @@
+"""Validated local settings. Credentials use provider environment/default chains."""
+
+from pathlib import Path
+from typing import Literal
+
+from pydantic import Field, SecretStr
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_prefix="CONTEXTFORGE_", env_file=".env", extra="ignore", protected_namespaces=()
+    )
+    backend: Literal["memory", "aws"] = "memory"
+    model_backend: Literal["bedrock", "scripted"] = "bedrock"
+    aws_region: str = "ap-southeast-2"
+    aws_profile: str | None = None
+    dynamodb_table: str = "contextforge"
+    s3_bucket: str = "contextforge-441186132531-apse2"
+    sqs_queue_url: str | None = None
+    checkpoint_path: Path = Path(".data/checkpoints.sqlite")
+    dev_user_id: str = "local-user"
+    dev_token: SecretStr | None = None
+    cors_origins: list[str] = ["http://localhost:5173"]
+    search_provider: Literal["duckduckgo", "serper"] = "duckduckgo"
+    serper_api_key: SecretStr | None = Field(default=None, validation_alias="SERPER_API_KEY")
+    planner_model: str = "apac.amazon.nova-pro-v1:0"
+    executor_model: str = "apac.amazon.nova-lite-v1:0"
+    model_timeout_seconds: int = Field(default=60, ge=1, le=120)
+    model_retries: int = Field(default=1, ge=0, le=2)
+    request_max_usd: float = Field(default=1.0, gt=0)
+    call_reserve_usd: float = Field(default=0.10, gt=0)
+    request_deadline_seconds: int = Field(default=900, ge=1, le=1800)
+    search_max_results: int = Field(default=5, ge=1, le=10)
+    web_timeout_seconds: int = Field(default=15, ge=1, le=60)
+    web_max_bytes: int = Field(default=1_000_000, ge=1024)
+    web_max_chars: int = Field(default=12_000, ge=100)
+    langsmith_api_key: SecretStr | None = Field(default=None, validation_alias="LANGSMITH_API_KEY")
+    langsmith_tracing: bool = Field(default=False, validation_alias="LANGSMITH_TRACING")
+    langsmith_project: str = Field(default="contextforge", validation_alias="LANGSMITH_PROJECT")
+    run_worker: bool = True
+    sse_poll_seconds: float = Field(default=1, gt=0)

@@ -12,7 +12,7 @@ React, FastAPI/Python, LangGraph and LangSmith are fixed. DynamoDB and S3 hold a
 
 ## What exists
 
-Phase 1, the local engine (planner, task loop, context builder, compaction, checkpoints with resume and restart), runs on a scripted fake model; see [progress](docs/progress.md).
+The local engine now also has a web-first API slice: Bedrock Converse, DuckDuckGo search, bounded page fetching, URL evidence, clarification/resume, SSE, standing instructions and optional AWS application adapters. See the [latest handoff](docs/handoff-web-first-2026-11-07.md) for verified scope and remaining live checks.
 The chat UI lives in the sibling repository `context-forge-frontend`.
 
 ## Run the tests
@@ -28,3 +28,20 @@ uv run mypy src
 ```
 
 Copy `.env.example` to `.env` for local settings. Phase 1 needs no credentials: the tests use the fake model and no AWS; `LANGSMITH_API_KEY` is only for tracing from phase 2.
+
+## Web-first development
+
+No upload or vector database is required for the first research flow.
+
+```bash
+uv sync --frozen
+cp .env.example .env
+uv run contextforge-api
+```
+
+The API binds to `http://127.0.0.1:8000`; interactive API docs are at `/docs`.
+Configure the existing AWS CLI profile in `.env`. Model defaults are Nova Pro/Lite through Bedrock; web search defaults to DuckDuckGo. LangSmith is optional. Application records default to memory and graph checkpoints to local SQLite. `CONTEXTFORGE_BACKEND=aws` selects the implemented DynamoDB/S3/SQS adapters; the cloud graph checkpointer is still pending.
+
+Connect the sibling frontend with `VITE_API_BASE_URL=http://localhost:8000 npm run dev`. The tested SSE/reply/memory UI changes are delivered as [a patch](patches/frontend-web-first.patch), because that repository was outside this session's writable workspace. Apply instructions and remaining work are in the latest handoff.
+
+For a real model/search acceptance run without a server socket: `uv run python scripts/smoke_web.py --live`. This is opt-in and may incur model charges. This session verified the flow offline; external networking and local server binding were restricted.

@@ -1,0 +1,31 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "InvokeSydneyNovaProfiles",
+      "Effect": "Allow",
+      "Action": "bedrock:InvokeModel",
+      "Resource": [
+        "arn:aws:bedrock:ap-southeast-2:441186132531:inference-profile/apac.amazon.nova-pro-v1:0",
+        "arn:aws:bedrock:ap-southeast-2:441186132531:inference-profile/apac.amazon.nova-lite-v1:0"
+      ]
+    },
+    {
+      "Sid": "InvokeNovaModelsThroughSydneyProfiles",
+      "Effect": "Allow",
+      "Action": "bedrock:InvokeModel",
+      "Resource": [
+        "arn:aws:bedrock:*::foundation-model/amazon.nova-pro-v1:0",
+        "arn:aws:bedrock:*::foundation-model/amazon.nova-lite-v1:0"
+      ],
+      "Condition": {
+        "ArnEquals": {
+          "bedrock:InferenceProfileArn": [
+            "arn:aws:bedrock:ap-southeast-2:441186132531:inference-profile/apac.amazon.nova-pro-v1:0",
+            "arn:aws:bedrock:ap-southeast-2:441186132531:inference-profile/apac.amazon.nova-lite-v1:0"
+          ]
+        }
+      }
+    }
+  ]
+}

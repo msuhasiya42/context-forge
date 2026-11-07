@@ -165,7 +165,14 @@ def _open_question_line(question: OpenQuestion) -> str:
 def _prior(message: Message) -> list[str]:
     """A report contributes its claims, which outlive its transcript; other kinds their text."""
     if isinstance(message, ReportMessage):
-        return ["report:", *(f"- {claim.text}" for claim in message.report.claims)]
+        return [
+            "report:",
+            *(f"- {claim.text}" for claim in message.report.claims),
+            *(
+                f"Prior constraint ({c.source}, {c.date}): {c.text}"
+                for c in message.report.constraints
+            ),
+        ]
     return [f"{message.kind.value}: {message.content}"]
 
 

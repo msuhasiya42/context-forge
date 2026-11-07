@@ -21,6 +21,7 @@ from contextforge.core.entities.message import (
     ClarificationMessage,
     Message,
     MessageKind,
+    ReportMessage,
     RequestMessage,
     RequestStatus,
     Sender,
@@ -30,7 +31,7 @@ from contextforge.core.entities.task import Task, TaskStatus
 from contextforge.core.ids import derived_id, new_ulid, now_iso
 from contextforge.core.logging import request_context
 from contextforge.core.models.base import ModelRequest
-from contextforge.core.models.scripted import ScriptExhausted
+from contextforge.core.models.errors import ModelError
 from contextforge.core.planner import PlannedTask, PlannerOutput
 from contextforge.core.state import PendingInterrupt, PlanEntry, RequestState
 from contextforge.worker.brief import load_request
@@ -75,6 +76,7 @@ class PlanResult(TypedDict):
     next_action: str
     tasks: list[dict[str, Any]]
     pending: PendingInterrupt | None
+    period: dict[str, str] | None
 
 
 def clarification_id(request_message_id: str, attempt: int) -> str:
@@ -92,7 +94,20 @@ def plan_stage(
     failed model call; ``Cancelled`` propagates. ``today`` defaults to the user's local date.
     """
     with request_context(brief["request_message_id"]):
-        inputs = _planner_inputs(brief, attempt, deps, today or local_today())
+        timezone = (
+            brief["memory"]["preferences"].get("timezone", USER_TIMEZONE)
+            if "memory" in brief
+            else USER_TIMEZONE
+        )
+        inputs = _planner_inputs(brief, attempt, deps, today or local_today(timezone))
+        resolved = resolve_context(
+            load_request(
+                deps.repos.messages, brief["chat_id"], brief["request_message_id"]
+            ).content,
+            [],
+            today=today or local_today(timezone),
+            timezone=timezone,
+        )
         output = _plan_or_fail(brief, inputs, deps)
         logger.info("planner returned a %s", output.kind)
         pending = None if output.kind == "plan" else _ask_user(brief, attempt, output, deps)
@@ -104,6 +119,9 @@ def plan_stage(
             next_action=output.next_action,
             tasks=[task.model_dump(mode="json") for task in output.tasks or []],
             pending=pending,
+            period={"start": resolved.period_start, "end": resolved.period_end}
+            if resolved.period_start and resolved.period_end
+            else None,
         )
 
 
@@ -123,15 +141,14 @@ def plan_gate(brief: RequestState, planned: PlanResult, deps: WorkerDeps) -> lis
         planned_tasks = [PlannedTask.model_validate(task) for task in planned["tasks"]]
         _check_plan(planned_tasks, deps.repos.artifacts.list_by_chat(brief["chat_id"]))
         tasks = _new_tasks(planned_tasks, request_message_id)
-        for task in tasks:
-            deps.repos.tasks.save(task)
+        deps.repos.tasks.save_all(tasks)
         logger.info("plan gate created %d tasks", len(tasks))
         return [_plan_entry(task) for task in tasks]
 
 
-def local_today() -> date:
+def local_today(timezone: str = USER_TIMEZONE) -> date:
     """Today in the user's timezone."""
-    return datetime.now(ZoneInfo(USER_TIMEZONE)).date()
+    return datetime.now(ZoneInfo(timezone)).date()
 
 
 def _planner_inputs(
@@ -140,14 +157,19 @@ def _planner_inputs(
     """Section 8.2 for the planner: request, sources and prior messages; no tools or facts."""
     request = load_request(deps.repos.messages, brief["chat_id"], brief["request_message_id"])
     artifacts = available_artifacts(deps.repos.artifacts, brief["chat_id"])
-    resolved = resolve_context(request.content, artifacts, today=today, timezone=USER_TIMEZONE)
+    timezone = (
+        brief["memory"]["preferences"].get("timezone", USER_TIMEZONE)
+        if "memory" in brief
+        else USER_TIMEZONE
+    )
+    resolved = resolve_context(request.content, artifacts, today=today, timezone=timezone)
     return ContextInputs(
-        memory=load_prompt("agent-memory"),
+        memory=brief["memory"]["text"] if "memory" in brief else load_prompt("agent-memory"),
         stage_prompt=load_prompt(prompt_version(Stage.PLAN)),
         chat_id=brief["chat_id"],
         request=request,
         # Phase 1 has no User repository; User.instructions arrive in phase 7.
-        preferences={},
+        preferences=brief["memory"]["preferences"] if "memory" in brief else {},
         constraints=_planner_constraints(brief, attempt, resolved),
         facts=[],
         open_questions=[],
@@ -185,9 +207,11 @@ def _context_block(resolved: ResolvedContext) -> str:
 def _prior_messages(deps: WorkerDeps, request: RequestMessage) -> list[Message]:
     """The chat's other Messages, oldest first."""
     in_chat = deps.repos.messages.list_by_chat(request.chat_id)
-    others = [m for m in in_chat if m.message_id != request.message_id]
+    others: list[Message] = [
+        m for m in in_chat if isinstance(m, ReportMessage) and m.created_at < request.created_at
+    ]
     # Not message_id order alone: a clarification's derived id does not sort by time.
-    return sorted(others, key=lambda m: (m.created_at, m.message_id))
+    return sorted(others, key=lambda m: (m.created_at, m.message_id))[-2:]
 
 
 def _plan_or_fail(brief: RequestState, inputs: ContextInputs, deps: WorkerDeps) -> PlannerOutput:
@@ -196,7 +220,7 @@ def _plan_or_fail(brief: RequestState, inputs: ContextInputs, deps: WorkerDeps) 
         return _plan_with_one_retry(brief, inputs, deps)
     except CallBudgetExceeded as exc:
         raise PlanFailed("model budget exhausted") from exc
-    except ScriptExhausted as exc:
+    except ModelError as exc:
         raise PlanFailed(f"planner model call failed: {exc}") from exc
 
 
@@ -230,7 +254,11 @@ def _call_planner(brief: RequestState, inputs: ContextInputs, deps: WorkerDeps) 
         messages=[HumanMessage(built.user_text), *built.messages],
         output_schema=PlannerOutput,
     )
-    response = deps.model_for(brief["request_message_id"]).invoke(request)
+    response = deps.model_for(
+        brief["request_message_id"],
+        memory_version=brief["memory"]["version"] if "memory" in brief else None,
+        created_at=brief.get("created_at"),
+    ).invoke(request)
     return PlannerOutput.model_validate(response.structured)
 
 

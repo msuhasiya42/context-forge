@@ -21,6 +21,7 @@ from langgraph.types import interrupt
 from contextforge.core.context.builder import newest_facts
 from contextforge.core.entities.message import RequestStatus
 from contextforge.core.logging import request_context
+from contextforge.core.services.memory import memory_snapshot
 from contextforge.core.state import Fact, OpenQuestion, PlanEntry, RequestState
 from contextforge.worker.brief import initial_brief, load_request
 from contextforge.worker.deps import WorkerDeps
@@ -73,7 +74,9 @@ def build_workflow(
 
 def initial_brief_from_repo(deps: WorkerDeps, chat_id: str, message_id: str) -> RequestState:
     """The empty brief of request ``message_id``, read from the repository."""
-    return initial_brief(load_request(deps.repos.messages, chat_id, message_id))
+    brief = initial_brief(load_request(deps.repos.messages, chat_id, message_id))
+    brief["memory"] = memory_snapshot(deps.repos.users.get(brief["user_id"]))
+    return brief
 
 
 def _as_task[T](name: str, stage: Callable[..., T]) -> Callable[..., Future[T]]:
@@ -135,8 +138,13 @@ def _with_plan(brief: RequestState, planned: PlanResult) -> RequestState:
         for text in _unique(planned["open_questions"])
         if text not in asked
     ]
+    constraints = list(planned["constraints"])
+    period = planned["period"]
+    if period is not None:
+        constraints.append(f"Period: {period['start']} to {period['end']}")
     return {
-        **_with_constraints(brief, planned["constraints"]),
+        **_with_constraints(brief, constraints),
+        "period": period,
         "goal": planned["goal"],
         "open_questions": [*brief["open_questions"], *new_questions],
         "next_action": planned["next_action"],

@@ -4,12 +4,14 @@ These are TypedDicts rather than Entities because LangGraph checkpoints state as
 enum values are held as their plain strings.
 """
 
-from typing import Annotated, Any, TypedDict
+from typing import Annotated, Any, NotRequired, TypedDict
 
 # AnyMessage comes from langchain_core, its defining module: langgraph.graph.message uses it but
 # does not export it, so importing it from there fails mypy's no-implicit-reexport check.
 from langchain_core.messages import AnyMessage
 from langgraph.graph.message import add_messages
+
+from contextforge.core.services.memory import MemorySnapshot
 
 
 class PlanEntry(TypedDict):
@@ -60,6 +62,9 @@ class RequestState(TypedDict):
     facts: list[Fact]
     open_questions: list[OpenQuestion]
     next_action: str
+    period: NotRequired[dict[str, str] | None]
+    memory: NotRequired[MemorySnapshot]
+    created_at: NotRequired[str]
 
 
 class TaskState(TypedDict):
@@ -77,5 +82,6 @@ class TaskState(TypedDict):
     # Loop-control counters live outside ``messages`` so they survive transcript compaction.
     tool_calls_made: int
     # Canonical tool-call key (name plus canonical JSON arguments) to its ToolMessage content.
+    evidence_artifact_ids: NotRequired[list[str]]
     seen_calls: dict[str, str]
     no_progress_turns: int

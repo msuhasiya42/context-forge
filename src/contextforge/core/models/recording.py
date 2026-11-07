@@ -7,6 +7,7 @@ from contextforge.core.context.prompts import prompt_version
 from contextforge.core.entities.model_call import ModelCall, Outcome
 from contextforge.core.ids import new_ulid, now_iso
 from contextforge.core.models.base import ModelClient, ModelRequest, ModelResponse, ToolSpec
+from contextforge.core.models.errors import ModelTimeout
 from contextforge.core.repositories.base import ModelCallRepository
 
 
@@ -43,9 +44,11 @@ class RecordingModelClient:
         self._request_message_id = request_message_id
         self._memory_version = memory_version
         self._price_version = price_version
+        self.reserve_usd: float | None = None
 
     def invoke(self, request: ModelRequest) -> ModelResponse:
         # Id and start time are taken before the call so records sort by when calls began.
+        request = request.model_copy(update={"request_message_id": self._request_message_id})
         model_call_id = new_ulid()
         started_at = now_iso()
         try:
@@ -56,7 +59,7 @@ class RecordingModelClient:
                     request,
                     model_call_id,
                     started_at,
-                    outcome=Outcome.ERROR,
+                    outcome=Outcome.TIMEOUT if isinstance(exc, ModelTimeout) else Outcome.ERROR,
                     failure_reason=str(exc),
                 )
             )
@@ -89,10 +92,12 @@ class RecordingModelClient:
             context_version=context_version,
             usage=response.usage if response is not None else None,
             price_version=self._price_version,
+            estimated_cost_usd=self.reserve_usd,
             stop_reason=response.stop_reason if response is not None else None,
             tool_set_hash=tool_set_hash(request.tools),
+            langsmith_run_id=response.langsmith_run_id if response else None,
             outcome=outcome,
             failure_reason=failure_reason,
             started_at=started_at,
-            ended_at=now_iso(),
+            ended_at=None if outcome == Outcome.TIMEOUT else now_iso(),
         )

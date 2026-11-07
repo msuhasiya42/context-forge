@@ -7,3 +7,9 @@ __pycache__/
 .idea/
 .claude/worktrees/
 .playwright-mcp/
+
+# Local execution state and tool caches
+.data/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/

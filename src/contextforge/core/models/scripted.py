@@ -5,9 +5,10 @@ from collections import deque
 from collections.abc import Callable
 
 from contextforge.core.models.base import ModelRequest, ModelResponse
+from contextforge.core.models.errors import ModelError
 
 
-class ScriptExhausted(Exception):
+class ScriptExhausted(ModelError):
     """The script has no response left for the requested stage."""
 
 

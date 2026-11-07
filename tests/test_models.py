@@ -39,7 +39,7 @@ def test_recording_client_writes_one_model_call_per_invocation() -> None:
     client.invoke(_req("execute"))
     calls = repos.model_calls.list_by_request("m1")
     assert [c.stage for c in calls] == ["plan"]
-    assert calls[0].context_version == "mem:1|prompt:plan.1"
+    assert calls[0].context_version == "mem:1|prompt:plan.2"
 
 
 def test_recording_client_records_error_and_reraises() -> None:
@@ -96,7 +96,7 @@ def test_models_config_loads_price_version_and_stages() -> None:
 
 
 def test_prompt_version_mapping() -> None:
-    assert prompt_version(Stage.PLAN) == "plan.1"
+    assert prompt_version(Stage.PLAN) == "plan.2"
     assert prompt_version(Stage.CITE) == "none"
 
 

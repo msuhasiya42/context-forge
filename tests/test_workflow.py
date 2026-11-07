@@ -76,6 +76,8 @@ def test_fixture_request_produces_six_tasks_and_a_report() -> None:
     deps = make_deps(
         ScriptedModel(script), tasks_in_flight=1
     )  # serial, so the script order is deterministic
+    requests: list[ModelRequest] = []
+    deps.model.on_request = requests.append  # type: ignore[attr-defined]
     req = seed_chat_with_dataset(deps, chat_id="c1", user_id="u1", dataset_id="a2")
     _start(deps, req)
     out = build_workflow(deps, checkpointer=None).invoke(
@@ -90,6 +92,12 @@ def test_fixture_request_produces_six_tasks_and_a_report() -> None:
     assert report.report.claims and all(c.evidence_refs for c in report.report.claims)
     assert deps.repos.messages.get("c1", req.message_id).status == "COMPLETED"
     assert len(deps.repos.model_calls.list_by_request(req.message_id)) == 5
+    # the resolved window reaches the report's coverage, its constraints and every execute call
+    period = report.report.coverage["period"]
+    stated = f"Period: {period['start']} to {period['end']}"
+    assert stated in [c.text for c in report.report.constraints]
+    executes = [r for r in requests if r.stage == "execute"]
+    assert executes and all(stated in r.messages[0].content for r in executes)
 
 
 def test_request_completes_under_a_small_context_cap() -> None:
@@ -142,7 +150,7 @@ def test_request_completes_under_a_small_context_cap() -> None:
         elif isinstance(message, ToolMessage):
             assert message.tool_call_id in summarized
     # the summary is written back: the next turn sees it and the tail, not the summarized calls
-    next_turn = requests[first + 2].messages  # first + 1 is this turn's execute call
+    next_turn = next(r for r in requests[first + 2 :] if r.stage == "execute").messages
     assert any(
         isinstance(m, SystemMessage) and m.content.startswith("Summary of earlier work")
         for m in next_turn

@@ -14,6 +14,7 @@ MAX_STRUCTURED_LIST_ENTRIES = 50
 
 class TaskKind(StrEnum):
     SQL_ANALYSIS = "sql_analysis"
+    WEB_SEARCH = "web_search"
     PDF_LOOKUP = "pdf_lookup"
     SOURCE_SEARCH = "source_search"
     RECONCILE = "reconcile"

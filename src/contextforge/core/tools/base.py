@@ -32,6 +32,7 @@ class ToolResult(Entity):
     error: str | None = None
     error_class: Literal["code", "system"] | None = None
     retryable: bool = False
+    artifact_ids: list[str] = []
 
 
 class Tool(Protocol):
