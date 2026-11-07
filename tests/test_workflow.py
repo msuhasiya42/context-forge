@@ -8,6 +8,7 @@ from contextforge.core.models.base import ModelRequest, ModelResponse, ToolCall
 from contextforge.core.models.scripted import ScriptedModel
 from contextforge.core.tools.base import ToolContext
 from contextforge.infra.bedrock import converse_payload
+from contextforge.worker.deps import WorkerDeps
 from contextforge.worker.stages.execute import NO_CALLS_REMAIN
 from contextforge.worker.tools.sql_query import SqlQueryTool
 from contextforge.worker.workflow import build_workflow
@@ -496,10 +497,8 @@ class _F7Agent:
         return str(request.messages[0].content).split("Task goal: ", 1)[1].split("\n", 1)[0]
 
 
-def test_a_failed_task_leaves_a_stated_gap_not_an_unanswered_request() -> None:
-    """F7 ruling 2 on the live run: weather failed at its tool budget, the visit task (needing
-    only weather) never ran, and the combining task ran on distance and trains, told what is
-    missing, instead of failing with "dependency failed"."""
+def _run_f7() -> tuple[_F7Agent, WorkerDeps, str]:
+    """The live F7 run on the fixture chat: its agent, its deps and the request id."""
     agent = _F7Agent()
     deps = make_deps(agent)
     req = seed_chat_with_dataset(deps, chat_id="c1", user_id="u1", dataset_id="a2")
@@ -508,7 +507,15 @@ def test_a_failed_task_leaves_a_stated_gap_not_an_unanswered_request() -> None:
         {"chat_id": "c1", "message_id": req.message_id}, _cfg(req)
     )
     assert out["status"] == "COMPLETED"
-    tasks = {t.goal: t for t in deps.repos.tasks.list_by_request(req.message_id)}
+    return agent, deps, req.message_id
+
+
+def test_a_failed_task_leaves_a_stated_gap_not_an_unanswered_request() -> None:
+    """F7 ruling 2 on the live run: weather failed at its tool budget, the visit task (needing
+    only weather) never ran, and the combining task ran on distance and trains, told what is
+    missing, instead of failing with "dependency failed"."""
+    agent, deps, request_id = _run_f7()
+    tasks = {t.goal: t for t in deps.repos.tasks.list_by_request(request_id)}
     statuses = {goal: (t.status, t.failure_reason) for goal, t in tasks.items()}
     assert statuses == {
         WEATHER: ("FAILED", "tool call budget exhausted"),
@@ -528,6 +535,23 @@ def test_a_failed_task_leaves_a_stated_gap_not_an_unanswered_request() -> None:
     ]
     report = next(m for m in deps.repos.messages.list_by_chat("c1") if m.kind == "report")
     assert "No weather data: the weather task did not complete." in report.report.uncertainties
+
+
+def test_the_report_leads_with_answers_then_names_what_was_not_answered() -> None:
+    """F7 ruling 4 on the live run: the report gave distance and trains and left the user's
+    actual question (the weather, when to visit) unmentioned outside the limitations. Each
+    task without a result now names its goal as not answered, after the answers and before
+    the limitations."""
+    _, deps, _ = _run_f7()
+    report = next(m for m in deps.repos.messages.list_by_chat("c1") if m.kind == "report")
+    paragraphs = report.content.split("\n\n")
+    assert paragraphs[:4] == [
+        "Ajmer to Palanpur is approximately 350+ kms.",
+        "Two trains a day run from Ajmer to Palanpur.",
+        f"Not answered: {WEATHER}",
+        f"Not answered: {WHEN_TO_VISIT}",
+    ]
+    assert paragraphs[4].startswith("Limitations:\n") and len(paragraphs) == 5
 
 
 def test_scripted_exhaustion_fails_request_with_reason() -> None:

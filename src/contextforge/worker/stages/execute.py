@@ -100,6 +100,8 @@ class TaskOutcome(TypedDict):
     """What ``execute_stage`` returns: plain JSON values, so the workflow can checkpoint it."""
 
     task_id: str
+    # The part of the request the task was to answer; the report names it when unanswered.
+    goal: str
     status: str  # a TaskStatus value
     summary: str | None
     facts: list[Fact]
@@ -390,6 +392,7 @@ def _outcome(task: Task) -> TaskOutcome:
     result = task.result
     return TaskOutcome(
         task_id=task.task_id,
+        goal=task.goal,
         status=task.status.value,
         summary=result.summary if result else None,
         facts=[_brief_fact(fact) for fact in result.facts] if result else [],
