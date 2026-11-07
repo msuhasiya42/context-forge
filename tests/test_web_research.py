@@ -24,6 +24,7 @@ from contextforge.infra.web import FetchURLTool, PublicWebClient, WebSearchTool,
 from contextforge.infra.web_guard import SeenUrls, WebRefusal
 from contextforge.worker.deps import WorkerDeps
 from contextforge.worker.stages.cite import check_citations
+from contextforge.worker.stages.report import NO_CLAIMS
 from contextforge.worker.workflow import build_workflow
 from tests.helpers import initial_brief, make_deps
 
@@ -514,29 +515,32 @@ def _inside(text: str, block: str) -> str:
     return text.split(f"<{block}>")[1].split(f"</{block}>")[0]
 
 
-def test_a_fabricated_excerpt_is_dropped_and_named_in_the_report():
+@pytest.mark.parametrize("with_a_supported_fact", [True, False])
+def test_a_fabricated_excerpt_is_dropped_and_named_in_the_report(with_a_supported_fact):
+    """Re-review I-2: also when it was the only fact, the visible text names why."""
     snippet = "Python 3.13 adds an experimental free-threaded build."
+    supported = "adds an experimental free-threaded build"
 
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, text=_search_page((DOCS_URL, "What's New", snippet)))
 
     def finish(request: ModelRequest) -> ModelResponse:
         rows_id = _rows(_results(request)["s1"])[0]["artifactId"]
-        return _task_result(
-            _url_ref(rows_id, DOCS_URL, "adds an experimental free-threaded build"),
-            _url_ref(rows_id, DOCS_URL, "Python 3.13 removes the GIL for good"),
-        )
+        fabricated = _url_ref(rows_id, DOCS_URL, "Python 3.13 removes the GIL for good")
+        if not with_a_supported_fact:
+            return _task_result(fabricated)
+        return _task_result(_url_ref(rows_id, DOCS_URL, supported), fabricated)
 
     agent = _WebAgent([lambda request: _tool_call("web_search", "s1", query="python 3.13"), finish])
     deps = make_deps(agent)
     assert _run(deps, agent, handler, "What changed in Python 3.13?")["status"] == "COMPLETED"
 
     report = next(m for m in deps.repos.messages.list_by_chat("c1") if m.kind == "report")
-    assert [claim.text for claim in report.report.claims] == [
-        "adds an experimental free-threaded build"
-    ]
+    claims = [claim.text for claim in report.report.claims]
+    assert claims == ([supported] if with_a_supported_fact else [])
     assert f"unsupported excerpt for {DOCS_URL}" in report.report.uncertainties
     assert f"- unsupported excerpt for {DOCS_URL}" in report.content
+    assert (NO_CLAIMS in report.content) is not with_a_supported_fact
 
 
 def test_web_search_rows_keep_their_artifact_handle_through_compaction():

@@ -198,9 +198,9 @@ def _coverage(outcomes: list[TaskOutcome]) -> dict[str, dict[str, int]]:
 
 
 def _answer_text(claims: list[Claim], uncertainties: list[str]) -> str:
-    if not claims:
-        return NO_CLAIMS
-    lines = []
+    """Each claim with its source links, then the limitations. With no claims the limitations
+    still follow, so the reader sees why nothing could be supported."""
+    lines = [] if claims else [NO_CLAIMS]
     for claim in claims:
         urls = list(
             dict.fromkeys(
