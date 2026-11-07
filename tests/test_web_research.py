@@ -30,6 +30,7 @@ from contextforge.infra.web import (
 from contextforge.infra.web_guard import SeenUrls, WebRefusal
 from contextforge.worker.deps import WorkerDeps
 from contextforge.worker.stages.cite import check_citations
+from contextforge.worker.stages.execute import TEXT_IS_NOT_A_RESULT
 from contextforge.worker.stages.report import NO_CLAIMS
 from contextforge.worker.workflow import build_workflow
 from tests.helpers import initial_brief, make_deps
@@ -182,10 +183,14 @@ def test_fetch_stops_at_its_byte_cap_deadline_and_compressed_bodies():
     url = "https://docs.example.org/big"
     html = {"content-type": "text/html"}
 
-    endless = _Drip(b"x" * 1000, count=100)
+    # Live run 2: cnn.com/markets is over 1 MB of HTML. Its first max_bytes are read and the
+    # page marked truncated, rather than refused; the rest of the body is never read.
+    endless = _Drip(b"<p>" + b"x" * 997, count=100)
     capped = _web(lambda request: httpx.Response(200, headers=html, stream=endless), max_bytes=4096)
-    assert _refused(_fetcher(capped, deps, url).run({"url": url}, _ctx()), "too_large")
+    page = _fetcher(capped, deps, url).run({"url": url}, _ctx())
+    assert page.status == "ok" and json.loads(str(page.text).split("\n")[0])["truncated"]
     assert endless.sent == 5  # stopped as the bytes arrived, not after the whole body
+    (snapshot,) = deps.repos.artifacts.list_by_chat("c1")
 
     bomb = gzip.compress(b"<p>" + b"a" * 1_000_000 + b"</p>")
     zipped = {**html, "content-encoding": "gzip"}
@@ -215,7 +220,7 @@ def test_fetch_stops_at_its_byte_cap_deadline_and_compressed_bodies():
 
     failed = _fetcher(_web(unreachable), deps, url).run({"url": url}, _ctx())
     assert failed.error_class == "system" and failed.retryable
-    assert deps.repos.artifacts.list_by_chat("c1") == []
+    assert deps.repos.artifacts.list_by_chat("c1") == [snapshot]  # no failure saved anything
 
 
 def test_search_keeps_real_hits_and_skips_ads_and_linkless_hits():
@@ -741,3 +746,60 @@ def test_web_search_rows_keep_their_artifact_handle_through_compaction():
     report = next(m for m in deps.repos.messages.list_by_chat("c1") if m.kind == "report")
     cited = {ref.artifact_id for claim in report.report.claims for ref in claim.evidence_refs}
     assert rows_id in cited and len(report.report.claims) == 2
+
+
+def test_a_prose_reply_gets_a_reminder_and_the_same_attempt_completes():
+    """Live runs 1 and 2: Nova answered a task in prose and the attempt was lost, searches and
+    all. The reply now gets a reminder to call return_result, within the same attempt."""
+    snippet = "Python 3.13 adds an experimental free-threaded build."
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text=_search_page((DOCS_URL, "What's New", snippet)))
+
+    def finish(request: ModelRequest) -> ModelResponse:
+        assert request.messages[-1].content == TEXT_IS_NOT_A_RESULT
+        rows_id = _rows(_results(request)["s1"])[0]["artifactId"]
+        return _task_result(_url_ref(rows_id, DOCS_URL, "adds an experimental free-threaded build"))
+
+    agent = _WebAgent(
+        [
+            lambda request: _tool_call("web_search", "s1", query="python 3.13"),
+            lambda request: ModelResponse(text="Python 3.13 adds a free-threaded build."),
+            finish,
+        ]
+    )
+    deps = make_deps(agent)
+    assert _run(deps, agent, handler, "What changed in Python 3.13?")["status"] == "COMPLETED"
+    (task, _) = sorted(deps.repos.tasks.list_by_request("r1"), key=lambda t: t.task_id)
+    assert (task.status, task.attempt, len(task.result.facts)) == ("COMPLETED", 1, 1)
+    assert len(agent.calls("execute")) == 3  # no second attempt re-ran the search
+
+
+def test_a_comparison_task_may_cite_the_evidence_its_dependencies_cite():
+    """Live run 2: the comparison task quoted the India task's page and its fact was dropped
+    as citing no input of its own. A dependent task may cite what its dependencies cite; cite
+    still checks the excerpt against the snapshot."""
+    snippet = "Python 3.13 adds an experimental free-threaded build."
+    rows: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text=_search_page((DOCS_URL, "What's New", snippet)))
+
+    def t1_finish(request: ModelRequest) -> ModelResponse:
+        rows.append(_rows(_results(request)["s1"])[0]["artifactId"])
+        return _task_result(_url_ref(rows[0], DOCS_URL, "adds an experimental free-threaded build"))
+
+    def compare(request: ModelRequest) -> ModelResponse:
+        return _task_result(_url_ref(rows[0], DOCS_URL, "Python 3.13 adds an experimental"))
+
+    agent = _WebAgent(
+        [lambda request: _tool_call("web_search", "s1", query="python 3.13"), t1_finish, compare],
+        then="web_search",
+    )
+    deps = make_deps(agent)
+    assert _run(deps, agent, handler, "What changed in Python 3.13?")["status"] == "COMPLETED"
+    report = next(m for m in deps.repos.messages.list_by_chat("c1") if m.kind == "report")
+    assert [c.text for c in report.report.claims] == [
+        "adds an experimental free-threaded build",
+        "Python 3.13 adds an experimental",
+    ]

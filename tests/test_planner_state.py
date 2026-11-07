@@ -49,14 +49,11 @@ def test_clarification_requires_question() -> None:
         PlannerOutput(
             kind="clarification", goal="g", constraints=[], open_questions=[], next_action="n"
         )
-    PlannerOutput(
-        kind="clarification",
-        goal="g",
-        constraints=[],
-        open_questions=[],
-        question="Which?",
-        next_action="n",
+    # Live: Nova left out an empty constraints list and the planner call was retried for it.
+    asked = PlannerOutput.model_validate(
+        {"kind": "clarification", "goal": "g", "question": "Which?", "nextAction": "n"}
     )
+    assert (asked.constraints, asked.open_questions) == ([], [])
 
 
 def test_spec_example_plan_validates() -> None:

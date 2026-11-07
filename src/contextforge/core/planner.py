@@ -27,8 +27,9 @@ class PlannerOutput(Entity):
 
     kind: Literal["plan", "clarification"]
     goal: str
-    constraints: list[str]
-    open_questions: list[str]
+    # Lists a model may leave out when it has nothing for them (live: constraints).
+    constraints: list[str] = []
+    open_questions: list[str] = []
     question: str | None = None
     tasks: list[PlannedTask] | None = None
     next_action: str

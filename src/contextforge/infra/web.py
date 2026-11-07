@@ -205,13 +205,16 @@ class PublicWebClient:
         content_type = content_type.strip().lower()
         if content_type not in _PAGE_TYPES:
             raise WebRefusal("unsupported_content", "Only HTML and plain text pages are read.")
-        text = _decode(_body(response, self.max_bytes, deadline), response.charset_encoding)
+        # A news page is often over the byte cap in scripts alone (live: cnn.com/markets,
+        # economictimes.indiatimes.com/markets); its first max_bytes are read, not refused.
+        body = _body(response, self.max_bytes, deadline, keep_first=True)
+        text = _decode(body, response.charset_encoding)
         if content_type != "text/plain":
             text = page_text(text)
         return {
             "url": url,
             "text": text[: self.max_chars],
-            "truncated": len(text) > self.max_chars,
+            "truncated": len(text) > self.max_chars or len(body) >= self.max_bytes,
             "retrievedAt": now_iso(),
         }
 
@@ -248,9 +251,12 @@ def _check_status(response: httpx.Response) -> None:
     response.raise_for_status()
 
 
-def _body(response: httpx.Response, max_bytes: int, deadline: float) -> bytes:
-    """The body's raw bytes as they arrive, never decompressed: refused past ``max_bytes``,
-    abandoned once ``deadline`` passes."""
+def _body(
+    response: httpx.Response, max_bytes: int, deadline: float, *, keep_first: bool = False
+) -> bytes:
+    """The body's raw bytes as they arrive, never decompressed: past ``max_bytes`` refused, or
+    with ``keep_first`` cut to its first ``max_bytes`` and the rest never read; abandoned once
+    ``deadline`` passes."""
     encoding = response.headers.get("content-encoding", "identity").strip().lower()
     if encoding not in ("", "identity"):
         raise WebRefusal("unsupported_encoding", f"The body is {encoding}-compressed.")
@@ -260,6 +266,8 @@ def _body(response: httpx.Response, max_bytes: int, deadline: float) -> bytes:
     for chunk in response.iter_bytes():
         body.extend(chunk)
         if len(body) > max_bytes:
+            if keep_first:
+                return bytes(body[:max_bytes])
             raise WebRefusal("too_large", f"The response is over {max_bytes} bytes.")
         if time.monotonic() > deadline:
             raise TimeoutError("The web request passed its total deadline.")

@@ -72,6 +72,9 @@ logger = logging.getLogger(__name__)
 
 ONE_CALL_REMAINS = "[runtime] one tool call remains; return your structured result after it"
 NO_CALLS_REMAIN = "[runtime] no tool calls remain; return your structured result now"
+TEXT_IS_NOT_A_RESULT = (
+    "[runtime] a text reply is not a result; call return_result with the task result now"
+)
 TOOL_BUDGET_EXHAUSTED = "tool call budget exhausted"
 NO_PROGRESS = "no progress"
 DEPENDENCY_FAILED = "dependency failed"
@@ -101,6 +104,9 @@ class TaskRun:
     task: Task
     brief: RequestState
     sources: list[SourceLine]
+    # Artifacts the facts of the task's dependencies cite: a comparison task may cite the
+    # evidence it compares (cite still checks every excerpt against its snapshot).
+    dependency_evidence: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -177,7 +183,7 @@ def call_model(state: TaskState, runtime: Runtime[TaskRun], *, deps: WorkerDeps)
     except ModelError as exc:
         logger.warning("execute call failed: %s", exc)
         return {"error": str(exc)}
-    update = _handle_response(response, state, run.task, deps.budgets)
+    update = _handle_response(response, state, run, deps.budgets)
     return _with_transcript(update, before=state["messages"], after=messages)
 
 
@@ -219,18 +225,29 @@ def _run_to_end(task: Task, brief: RequestState, deps: WorkerDeps) -> Task:
     if results is None:
         return _settle(deps, task, TaskStatus.FAILED, failure_reason=DEPENDENCY_FAILED)
     if task.kind in (TaskKind.SQL_ANALYSIS, TaskKind.WEB_SEARCH):
-        return _run_sql_analysis(task, brief, deps, [result.summary for result in results])
+        return _run_sql_analysis(task, brief, deps, results)
     if task.kind == TaskKind.RECONCILE:
         return _settle(deps, task, TaskStatus.COMPLETED, result=reconcile_stub(task, results))
     return _settle(deps, task, TaskStatus.SKIPPED, failure_reason=skipped_reason(task.kind))
 
 
 def _run_sql_analysis(
-    task: Task, brief: RequestState, deps: WorkerDeps, dependency_summaries: list[str]
+    task: Task, brief: RequestState, deps: WorkerDeps, dependencies: list[TaskResult]
 ) -> Task:
     """Run the subgraph, again from a fresh state after an error; COMPLETED or FAILED."""
     subgraph = build_task_subgraph(deps)
-    run = TaskRun(task=task, brief=brief, sources=_task_sources(task, brief["chat_id"], deps))
+    run = TaskRun(
+        task=task,
+        brief=brief,
+        sources=_task_sources(task, brief["chat_id"], deps),
+        dependency_evidence=[
+            ref.artifact_id
+            for result in dependencies
+            for f in result.facts
+            for ref in f.evidence_refs
+        ],
+    )
+    dependency_summaries = [result.summary for result in dependencies]
     config: RunnableConfig = {"recursion_limit": _recursion_limit(deps.budgets)}
     error = ""
     attempts = deps.budgets.task_retries + 1
@@ -439,20 +456,25 @@ def _execute_inputs(
 
 
 def _handle_response(
-    response: ModelResponse, state: TaskState, task: Task, budgets: Budgets
+    response: ModelResponse, state: TaskState, run: TaskRun, budgets: Budgets
 ) -> dict[str, Any]:
-    """The state update for one response: its tool calls, its parsed result, or an error."""
+    """The state update for one response: its tool calls, its parsed result, a reminder after a
+    prose reply, or an error."""
     if response.tool_calls:
         if state["tool_calls_made"] >= budgets.tool_calls_per_task:
             logger.warning("model called a tool after the last slot was spent")
             return {"error": TOOL_BUDGET_EXHAUSTED}
         return {"messages": [_ai_message(response)]}
+    if response.structured is None:
+        # Live runs 1 and 2: Nova answered in prose and the whole attempt was lost. The reply
+        # and a reminder go into the transcript; the turn runs no tool call, so repeated prose
+        # ends the run through the no-progress limit.
+        logger.info("model replied in text, not a result; reminded to call return_result")
+        reply = AIMessage(content=response.text or "(empty reply)")
+        return {"messages": [reply, HumanMessage(TEXT_IS_NOT_A_RESULT)]}
+    citable = [*state.get("evidence_artifact_ids", []), *run.dependency_evidence]
     try:
-        return {
-            "result": _parse_result(
-                response, task, state.get("evidence_artifact_ids", [])
-            ).model_dump(mode="json")
-        }
+        return {"result": _parse_result(response, run.task, citable).model_dump(mode="json")}
     except ValueError as exc:  # ValidationError is a ValueError
         reason = one_line(exc) if isinstance(exc, ValidationError) else str(exc)
         logger.warning("invalid result: %s", reason)
@@ -465,7 +487,8 @@ def _ai_message(response: ModelResponse) -> AIMessage:
 
 
 def _parse_result(response: ModelResponse, task: Task, produced: list[str]) -> TaskResult:
-    """The response's TaskResult, keeping only facts grounded in the task's own inputs.
+    """The response's TaskResult, keeping only facts grounded in the task's own inputs or in
+    ``produced``: what its tools saved, and the evidence its dependencies cite.
 
     Raises ``ValueError`` (``ValidationError`` included) when it breaks the result schema; the
     schema already caps the facts at six.
