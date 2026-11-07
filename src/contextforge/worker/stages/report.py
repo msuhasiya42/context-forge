@@ -22,6 +22,7 @@ from contextforge.core.services.memory import user_timezone
 from contextforge.core.state import Fact, RequestState
 from contextforge.core.values import ArtifactRef, EvidenceRef
 from contextforge.worker.deps import WorkerDeps
+from contextforge.worker.stages.cite import merge_repeats
 from contextforge.worker.stages.execute import TaskOutcome
 from contextforge.worker.stages.guards import check_not_cancelled, leave_running
 from contextforge.worker.stages.long_report import attach_if_long
@@ -31,6 +32,7 @@ logger = logging.getLogger(__name__)
 
 EVERY_TASK_FAILED = "every task failed"
 NO_CLAIMS = "No finding could be supported with evidence."
+NOT_ANSWERED = "Not answered: {goal}"
 WITHHELD_ANSWER = (
     "Your answer to '{question}' was not used because it looked like a password, key or token."
 )
@@ -104,7 +106,7 @@ def _report_message(
         sender=Sender.ASSISTANT,
         kind=MessageKind.REPORT,
         request_message_id=request_message_id,
-        content=_answer_text(claims, uncertainties),
+        content=_answer_text(claims, _not_answered(outcomes), uncertainties),
         created_at=now,
         updated_at=now,
         report=ReportBody(
@@ -145,16 +147,9 @@ def _answers(brief: RequestState, deps: WorkerDeps) -> list[_Answer]:
 
 
 def _claims(report_id: str, facts: list[Fact]) -> list[Claim]:
-    """One UNKNOWN claim per distinct fact text, first occurrence first: a comparison task
-    restates its dependencies' facts (live run 3). Checking claims against their evidence is
-    phase 3."""
-    seen: set[str] = set()
-    distinct: list[Fact] = []
-    for fact in facts:
-        key = " ".join(fact["text"].split()).casefold()
-        if key not in seen:
-            seen.add(key)
-            distinct.append(fact)
+    """One UNKNOWN claim per distinct claim, first occurrence first, citing the evidence of all
+    its repeats: a comparison task restates its dependencies' facts (live run 3, F7 ruling 3).
+    Checking claims against their evidence is phase 3."""
     return [
         Claim(
             claim_id=derived_id(f"{report_id}:{index}"),
@@ -162,7 +157,7 @@ def _claims(report_id: str, facts: list[Fact]) -> list[Claim]:
             evidence_refs=[EvidenceRef.model_validate(ref) for ref in fact["evidence_refs"]],
             status="UNKNOWN",
         )
-        for index, fact in enumerate(distinct)
+        for index, fact in enumerate(merge_repeats(facts))
     ]
 
 
@@ -213,9 +208,21 @@ def _coverage(outcomes: list[TaskOutcome]) -> dict[str, dict[str, int]]:
     }
 
 
-def _answer_text(claims: list[Claim], uncertainties: list[str]) -> str:
-    """Each claim with its source links, then the limitations. With no claims the limitations
-    still follow, so the reader sees why nothing could be supported."""
+def _not_answered(outcomes: list[TaskOutcome]) -> list[str]:
+    """One line per task without a result, naming its goal: the planner writes each goal from
+    a part of the user's question, so this is what the report leaves unanswered (F7 ruling 4).
+    """
+    return [
+        NOT_ANSWERED.format(goal=" ".join(outcome["goal"].split()))
+        for outcome in outcomes
+        if outcome["status"] != TaskStatus.COMPLETED
+    ]
+
+
+def _answer_text(claims: list[Claim], not_answered: list[str], uncertainties: list[str]) -> str:
+    """The answers first: each claim with its source links, then what was not answered, then
+    the limitations. With no claims the rest still follows, so the reader sees what is missing
+    and why nothing could be supported."""
     lines = [] if claims else [NO_CLAIMS]
     for claim in claims:
         urls = list(
@@ -225,6 +232,7 @@ def _answer_text(claims: list[Claim], uncertainties: list[str]) -> str:
         )
         links = " ".join(f"[source]({url})" for url in urls)
         lines.append(f"{claim.text} {links}".strip())
+    lines.extend(not_answered)
     if uncertainties:
         lines.append("Limitations:\n" + "\n".join(f"- {text}" for text in uncertainties))
     return "\n\n".join(lines)

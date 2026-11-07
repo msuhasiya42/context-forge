@@ -71,7 +71,14 @@ from contextforge.worker.tools import TOOL_NAMES_BY_KIND
 logger = logging.getLogger(__name__)
 
 ONE_CALL_REMAINS = "[runtime] one tool call remains; return your structured result after it"
-NO_CALLS_REMAIN = "[runtime] no tool calls remain; return your structured result now"
+NO_CALLS_REMAIN = (
+    "[runtime] no tool calls remain; return your structured result now with the facts you "
+    "have, and say in uncertainties what you could not read"
+)
+NO_PROGRESS_LEFT = (
+    "[runtime] {turns} turns in a row ran no new tool call; return your structured result now "
+    "with the facts you have"
+)
 TEXT_IS_NOT_A_RESULT = (
     "[runtime] a text reply is not a result; call return_result with the task result now"
 )
@@ -93,6 +100,8 @@ class TaskOutcome(TypedDict):
     """What ``execute_stage`` returns: plain JSON values, so the workflow can checkpoint it."""
 
     task_id: str
+    # The part of the request the task was to answer; the report names it when unanswered.
+    goal: str
     status: str  # a TaskStatus value
     summary: str | None
     facts: list[Fact]
@@ -161,7 +170,7 @@ def build_task_subgraph(
     graph.add_node("run_tools", partial(run_tools, deps=deps))
     graph.add_edge(START, "call_model")
     graph.add_conditional_edges("call_model", _after_model, ["run_tools", END])
-    graph.add_conditional_edges("run_tools", _after_tools, ["call_model", END])
+    graph.add_edge("run_tools", "call_model")
     # False, not None: None would inherit the workflow's checkpointer and save the transcript.
     return graph.compile(checkpointer=False)
 
@@ -176,18 +185,22 @@ def call_model(state: TaskState, runtime: Runtime[TaskRun], *, deps: WorkerDeps)
     """
     check_not_cancelled(deps, state["chat_id"], state["request_message_id"])
     run = runtime.context
+    stop = _stop_reason(state, deps.budgets)
     try:
         model = deps.model_for(
             state["request_message_id"], memory_version=run.brief["memory"]["version"]
         )
-        specs = [tool.spec for tool in _allowed_tools(run.task.kind, deps).values()]
+        # F7 ruling 1: the call that ends an attempt offers no tools, so return_result is the
+        # only tool left and the adapter forces it; the task returns what it has gathered.
+        tools = {} if stop else _allowed_tools(run.task.kind, deps)
+        specs = [tool.spec for tool in tools.values()]
         built = build_context(_execute_inputs(state, run, specs, deps), deps.budgets)
         messages = _compacted_messages(state, built, model, deps)
         response = model.invoke(_model_request(state, built, messages, specs, deps))
     except ModelError as exc:
         logger.warning("execute call failed: %s", exc)
         return {"error": str(exc)}
-    update = _handle_response(response, state, run, deps.budgets)
+    update = _handle_response(response, state, run, deps.budgets, stop)
     return _with_transcript(update, before=state["messages"], after=messages)
 
 
@@ -195,19 +208,21 @@ def run_tools(state: TaskState, runtime: Runtime[TaskRun], *, deps: WorkerDeps) 
     """Answer every tool call of the last turn with a ToolMessage, failures included.
 
     A repeated call is answered from its earlier result and spends no slot; a call past the cap
-    is not run. A nudge follows the results as the cap nears. A turn that ran nothing new is a
-    no-progress turn, and ``budgets.no_progress_turns`` of them in a row end the run.
+    is not run. A turn that ran nothing new is a no-progress turn. A nudge follows the results
+    as the cap nears, and when ``budgets.no_progress_turns`` of them in a row are reached; the
+    call after the last slot or that limit may only return the result (``_stop_reason``).
     """
-    budgets = deps.budgets
     turn = _Turn(made=state["tool_calls_made"], seen=dict(state["seen_calls"]))
     for call in _requested_calls(state):
         turn.messages.append(_run_one_call(call, turn, state, runtime.context.task, deps))
     progressed = turn.made > state["tool_calls_made"]
     no_progress = 0 if progressed else state["no_progress_turns"] + 1
-    update: dict[str, Any] = {
+    if no_progress == deps.budgets.no_progress_turns:
+        logger.warning("%d turns in a row ran no new tool call", no_progress)
+    return {
         "messages": [
             *turn.messages,
-            *_nudges(state["tool_calls_made"], turn.made, budgets.tool_calls_per_task),
+            *_nudges(state["tool_calls_made"], turn.made, no_progress, deps.budgets),
         ],
         "evidence_artifact_ids": list(
             dict.fromkeys([*state.get("evidence_artifact_ids", []), *turn.artifact_ids])
@@ -216,29 +231,38 @@ def run_tools(state: TaskState, runtime: Runtime[TaskRun], *, deps: WorkerDeps) 
         "seen_calls": turn.seen,
         "no_progress_turns": no_progress,
     }
-    if no_progress >= budgets.no_progress_turns:
-        logger.warning("%d turns in a row ran no new tool call", no_progress)
-        update["error"] = NO_PROGRESS
-    return update
 
 
 def _run_to_end(task: Task, brief: RequestState, deps: WorkerDeps) -> Task:
-    """The Task as stored after its final transition: FAILED when a dependency did not
-    complete, whatever the kind; otherwise what that is depends on its kind."""
-    results = _dependency_results(task, deps)
-    if results is None:
+    """The Task as stored after its final transition: FAILED when it has dependencies and none
+    completed, whatever the kind (I-2); otherwise what that is depends on its kind.
+
+    F7 ruling 2: a task with at least one completed dependency runs, told which of the others
+    did not complete and why, so it states the gap instead of the whole answer being lost.
+    """
+    results, gaps = _dependencies(task, deps)
+    if gaps and not results:
         return _settle(deps, task, TaskStatus.FAILED, failure_reason=DEPENDENCY_FAILED)
     if task.kind in (TaskKind.SQL_ANALYSIS, TaskKind.WEB_SEARCH):
-        return _run_sql_analysis(task, brief, deps, results)
+        return _run_sql_analysis(task, brief, deps, results, gaps)
     if task.kind == TaskKind.RECONCILE:
-        return _settle(deps, task, TaskStatus.COMPLETED, result=reconcile_stub(task, results))
+        result = reconcile_stub(task, results, gaps)
+        return _settle(deps, task, TaskStatus.COMPLETED, result=result)
     return _settle(deps, task, TaskStatus.SKIPPED, failure_reason=skipped_reason(task.kind))
 
 
 def _run_sql_analysis(
-    task: Task, brief: RequestState, deps: WorkerDeps, dependencies: list[TaskResult]
+    task: Task,
+    brief: RequestState,
+    deps: WorkerDeps,
+    dependencies: list[TaskResult],
+    gaps: list[str],
 ) -> Task:
-    """Run the subgraph, again from a fresh state after an error; COMPLETED or FAILED."""
+    """Run the subgraph, again from a fresh state after an error; COMPLETED or FAILED.
+
+    The completed dependencies' summaries and the ``gaps`` left by the others form its
+    ``<dependencies>`` block.
+    """
     subgraph = build_task_subgraph(deps)
     run = TaskRun(
         task=task,
@@ -251,7 +275,7 @@ def _run_sql_analysis(
             for ref in f.evidence_refs
         ],
     )
-    dependency_summaries = [result.summary for result in dependencies]
+    dependency_summaries = [*(result.summary for result in dependencies), *gaps]
     config: RunnableConfig = {"recursion_limit": _recursion_limit(deps.budgets)}
     error = ""
     attempts = deps.budgets.task_retries + 1
@@ -305,14 +329,25 @@ def _get_task(deps: WorkerDeps, request_message_id: str, task_id: str) -> Task:
     return task
 
 
-def _dependency_results(task: Task, deps: WorkerDeps) -> list[TaskResult] | None:
-    """Each dependency's result in ``depends_on`` order; None when any did not complete
-    (FAILED, SKIPPED or CANCELLED), since the task would otherwise run without its input."""
-    dependencies = [_get_task(deps, task.request_message_id, d) for d in task.depends_on_task_ids]
-    results = [
-        d.result for d in dependencies if d.status == TaskStatus.COMPLETED and d.result is not None
-    ]
-    return results if len(results) == len(dependencies) else None
+def _dependencies(task: Task, deps: WorkerDeps) -> tuple[list[TaskResult], list[str]]:
+    """The results of the task's completed dependencies, and a gap line for each one that did
+    not complete (FAILED, SKIPPED or CANCELLED), both in ``depends_on`` order."""
+    results: list[TaskResult] = []
+    gaps: list[str] = []
+    for task_id in task.depends_on_task_ids:
+        dependency = _get_task(deps, task.request_message_id, task_id)
+        if dependency.status == TaskStatus.COMPLETED and dependency.result is not None:
+            results.append(dependency.result)
+        else:
+            gaps.append(_gap(dependency))
+    return results, gaps
+
+
+def _gap(dependency: Task) -> str:
+    """What a dependency that did not complete leaves out, and why, for the dependent's brief.
+    Named by its goal, not its id: the dependent states the gap in words the user reads."""
+    reason = dependency.failure_reason or dependency.status.value.lower()
+    return f"A dependency did not complete ({reason}); not covered: {dependency.goal}"
 
 
 def _task_sources(task: Task, chat_id: str, deps: WorkerDeps) -> list[SourceLine]:
@@ -344,10 +379,11 @@ def _fresh_state(task: Task, brief: RequestState, dependency_summaries: list[str
 def _recursion_limit(budgets: Budgets) -> int:
     """Graph steps one run may take, two per turn.
 
-    Every turn runs a new call (at most the cap of them, plus the one that ends the run) or is
-    one of fewer than ``no_progress_turns`` duplicate-only turns in a row.
+    Until the attempt must stop, every turn runs a new call (at most the cap of them) or is one
+    of at most ``no_progress_turns`` turns in a row that ran none. After that come at most two
+    calls: the one that may only return the result, and one more after the no-facts reminder.
     """
-    turns = (budgets.tool_calls_per_task + 1) * budgets.no_progress_turns
+    turns = budgets.tool_calls_per_task * budgets.no_progress_turns + 2
     return 2 * turns + 1
 
 
@@ -356,6 +392,7 @@ def _outcome(task: Task) -> TaskOutcome:
     result = task.result
     return TaskOutcome(
         task_id=task.task_id,
+        goal=task.goal,
         status=task.status.value,
         summary=result.summary if result else None,
         facts=[_brief_fact(fact) for fact in result.facts] if result else [],
@@ -373,10 +410,6 @@ def _after_model(state: TaskState) -> str:
     """To ``run_tools`` when the model asked for tools; END once a result or an error is set."""
     finished = state["result"] is not None or state["error"] is not None
     return END if finished else "run_tools"
-
-
-def _after_tools(state: TaskState) -> str:
-    return END if state["error"] is not None else "call_model"
 
 
 def _compacted_messages(
@@ -460,14 +493,23 @@ def _execute_inputs(
 
 
 def _handle_response(
-    response: ModelResponse, state: TaskState, run: TaskRun, budgets: Budgets
+    response: ModelResponse,
+    state: TaskState,
+    run: TaskRun,
+    budgets: Budgets,
+    stop: str | None,
 ) -> dict[str, Any]:
     """The state update for one response: its tool calls, its parsed result, a reminder after a
-    prose reply, or an error."""
-    if response.tool_calls:
-        if state["tool_calls_made"] >= budgets.tool_calls_per_task:
-            logger.warning("model called a tool after the last slot was spent")
-            return {"error": TOOL_BUDGET_EXHAUSTED}
+    prose reply, or an error.
+
+    ``stop`` is why this call could only return the result (``_stop_reason``). Its result
+    carries that reason as an uncertainty, and a response without one ends the attempt with it
+    as the error: nothing usable even then.
+    """
+    if stop is not None and response.structured is None:
+        logger.warning("no result from the call that ends the attempt (%s)", stop)
+        return {"error": stop}
+    if response.tool_calls and stop is None:
         return {"messages": [_ai_message(response)]}
     if response.structured is None:
         # Live runs 1 and 2: Nova answered in prose and the whole attempt was lost. The reply
@@ -489,7 +531,34 @@ def _handle_response(
         logger.info("result has no facts though tools saved evidence; reminded once")
         reply = AIMessage(content=response.text or "(result without facts)")
         return {"messages": [reply, HumanMessage(NO_FACTS)]}
+    if stop is not None:
+        note = _stop_note(stop, state, budgets)
+        result = result.model_copy(update={"uncertainties": [*result.uncertainties, note]})
     return {"result": result.model_dump(mode="json")}
+
+
+def _stop_reason(state: TaskState, budgets: Budgets) -> str | None:
+    """Why the attempt's next call may only return its result: every tool call is spent, or
+    ``budgets.no_progress_turns`` turns in a row ran none. None while it may still call tools.
+
+    The handoff's "seven responses per attempt" is the cap of tool calls plus this last one.
+    """
+    if state["tool_calls_made"] >= budgets.tool_calls_per_task:
+        return TOOL_BUDGET_EXHAUSTED
+    if state["no_progress_turns"] >= budgets.no_progress_turns:
+        return NO_PROGRESS
+    return None
+
+
+def _stop_note(stop: str, state: TaskState, budgets: Budgets) -> str:
+    """The uncertainty a result returned at the end of its attempt carries: why it stopped and
+    how much it read. A page is any distinct tool result that came back: a search's hits, a
+    fetched page, a query's rows."""
+    pages = len(state["seen_calls"])
+    read = f"{pages} page{'' if pages == 1 else 's'} read"
+    if stop == TOOL_BUDGET_EXHAUSTED:
+        return f"stopped at the tool-call budget; {read}"
+    return f"stopped after {budgets.no_progress_turns} turns without progress; {read}"
 
 
 def _reminded(state: TaskState) -> bool:
@@ -697,9 +766,16 @@ def _tool_message(
     )
 
 
-def _nudges(made_before: int, made_after: int, cap: int) -> list[HumanMessage]:
-    """The runtime's reminder after a turn that spent slots: one slot left, or none left."""
+def _nudges(
+    made_before: int, made_after: int, no_progress: int, budgets: Budgets
+) -> list[HumanMessage]:
+    """The runtime's reminder after a turn: after one that spent slots, one slot left or none
+    left; after one that reached the no-progress limit with slots left, return the result now.
+    """
+    cap = budgets.tool_calls_per_task
     if made_after == made_before:
+        if no_progress == budgets.no_progress_turns and made_after < cap:
+            return [HumanMessage(NO_PROGRESS_LEFT.format(turns=no_progress))]
         return []
     if made_after >= cap:
         return [HumanMessage(NO_CALLS_REMAIN)]

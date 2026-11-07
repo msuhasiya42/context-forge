@@ -7,12 +7,13 @@ collapsed, case folded and pictographs left out on both sides, ignoring a leadin
 ellipsis. A web fact cited with another locator (a model wrote
 ``{"kind": "row", "value": "0"}`` for a search hit) is pointed at the URL whose saved text holds
 its excerpt. A fact failing all that is dropped, and the reason is kept as an uncertainty,
-never dropped silently.
+never dropped silently. Facts that state the same claim are then merged (``merge_repeats``).
 """
 
 import json
 import re
 import unicodedata
+from collections.abc import Iterable
 from typing import Any, TypedDict
 
 from contextforge.core.entities.artifact import Artifact, ArtifactKind, ArtifactStatus
@@ -34,7 +35,9 @@ class Citations(TypedDict):
 
 def check_citations(brief: RequestState, deps: WorkerDeps) -> Citations:
     """The brief's facts that cite their evidence correctly, each web ref naming the URL it
-    quotes; the reasons for the rest go to the report as uncertainties."""
+    quotes, with repeats merged; the reasons for the rest go to the report as uncertainties.
+
+    Each fact is checked before merging, so one repeat's bad ref cannot drop the claim."""
     facts: list[Fact] = []
     uncertainties: list[str] = []
     for fact in brief["facts"]:
@@ -43,7 +46,64 @@ def check_citations(brief: RequestState, deps: WorkerDeps) -> Citations:
             uncertainties.append(checked)
         else:
             facts.append(checked)
-    return Citations(facts=facts, uncertainties=list(dict.fromkeys(uncertainties)))
+    return Citations(facts=merge_repeats(facts), uncertainties=list(dict.fromkeys(uncertainties)))
+
+
+def merge_repeats(facts: list[Fact]) -> list[Fact]:
+    """One fact per claim, first occurrence first, with the first one's text and every repeat's
+    evidence refs (F7 ruling 3: a comparison task restates its dependencies' facts, "350+ kms."
+    beside "350+ km.")."""
+    groups: dict[str, list[Fact]] = {}
+    for fact in facts:
+        groups.setdefault(claim_key(fact["text"]), []).append(fact)
+    return [
+        Fact(text=group[0]["text"], evidence_refs=_union(f["evidence_refs"] for f in group))
+        for group in groups.values()
+    ]
+
+
+def claim_key(text: str) -> str:
+    """``text`` as two facts are compared for stating the same claim: normalised as excerpts are
+    (case, whitespace, pictographs), each punctuation mark read as a space, and a unit's plural
+    read as the unit ("kms" as "km", "hours" as "hour").
+
+    A decimal point, thousands separator or minus sign before a digit, and a percent sign, are
+    kept: "3.5" and "35", or "-5" and "5", are different claims.
+    """
+    text = _normalised(text)
+    spaced = "".join(" " if _is_separator(text, i) else char for i, char in enumerate(text))
+    return " ".join(_unit_singular(word) for word in spaced.split())
+
+
+def _is_separator(text: str, index: int) -> bool:
+    """Whether the character at ``index`` is punctuation that is not part of a number."""
+    char = text[index]
+    if char == "%" or not unicodedata.category(char).startswith("P"):
+        return False
+    return not (char in ".,-" and text[index + 1 : index + 2].isdigit())
+
+
+# Units a fact may write in the plural; "kms" and "km" state the same distance. Ambiguous
+# words are left out: "ms" is milliseconds, not metres, and "second" is also an ordinal.
+_UNITS = frozenset(
+    "km kilometre kilometer mile metre meter kg hr hour min minute day week month yr year "
+    "degree".split()
+)
+
+
+def _unit_singular(word: str) -> str:
+    unit = word.removesuffix("s")
+    return unit if unit != word and unit in _UNITS else word
+
+
+def _union(ref_lists: Iterable[list[dict[str, Any]]]) -> list[dict[str, Any]]:
+    """The refs of every list, each once, first occurrence first (refs compare by value)."""
+    union: list[dict[str, Any]] = []
+    for refs in ref_lists:
+        for ref in refs:
+            if ref not in union:
+                union.append(ref)
+    return union
 
 
 def _checked(fact: Fact, brief: RequestState, deps: WorkerDeps) -> Fact | str:

@@ -7,6 +7,9 @@ from langchain_core.messages import AIMessage, SystemMessage, ToolMessage
 from contextforge.core.models.base import ModelRequest, ModelResponse, ToolCall
 from contextforge.core.models.scripted import ScriptedModel
 from contextforge.core.tools.base import ToolContext
+from contextforge.infra.bedrock import converse_payload
+from contextforge.worker.deps import WorkerDeps
+from contextforge.worker.stages.execute import NO_CALLS_REMAIN
 from contextforge.worker.tools.sql_query import SqlQueryTool
 from contextforge.worker.workflow import build_workflow
 from tests.helpers import (
@@ -218,7 +221,57 @@ def test_cancel_between_waves_stops_the_run() -> None:
     assert not [m for m in deps.repos.messages.list_by_chat("c1") if m.kind == "report"]
 
 
-def test_tool_call_cap_fails_the_task_not_the_request() -> None:
+def test_a_task_out_of_tool_calls_returns_the_facts_it_has() -> None:
+    """F7 ruling 1 (live run, 7 Nov): the weather task kept searching until its tool-call budget
+    ran out and failed, losing all it had read. The call after the last slot now offers no tool,
+    so return_result is forced, and the task completes with its facts and says why it stopped."""
+
+    class KeepsQuerying(ScriptedModel):
+        """Runs a new query whenever a tool is offered; returns its script's result otherwise."""
+
+        def invoke(self, request):
+            if request.stage != "execute" or not request.tools:
+                return super().invoke(request)
+            turn = len(request.messages)  # the transcript grows, so every query is new
+            sql = f"SELECT {turn}"
+            call = ToolCall(
+                id=f"q{turn}", name="sql_query", arguments={"dataset_id": "a2", "sql": sql}
+            )
+            return ModelResponse(tool_calls=[call], stop_reason="tool_use")
+
+    model = KeepsQuerying(
+        {
+            "plan": [ModelResponse(structured=six_task_plan())],
+            "execute": [ModelResponse(structured=t1_result())] * 3,
+        }
+    )
+    requests: list[ModelRequest] = []
+    model.on_request = requests.append
+    deps = make_deps(model, tasks_in_flight=1)
+    req = seed_chat_with_dataset(deps, chat_id="c1", user_id="u1", dataset_id="a2")
+    _start(deps, req)
+    out = build_workflow(deps, checkpointer=None).invoke(
+        {"chat_id": "c1", "message_id": req.message_id}, _cfg(req)
+    )
+    assert out["status"] == "COMPLETED"
+    sql_tasks = [
+        t for t in deps.repos.tasks.list_by_request(req.message_id) if t.kind == "sql_analysis"
+    ]
+    stopped = "stopped at the tool-call budget; 6 pages read"
+    for task in sql_tasks:
+        assert (task.status, task.attempt, len(task.result.facts)) == ("COMPLETED", 1, 2)
+        assert task.result.uncertainties[-1] == stopped
+    last_calls = [r for r in requests if r.stage == "execute" and not r.tools]
+    assert len(last_calls) == len(sql_tasks)  # one per task, after its sixth query
+    assert last_calls[0].messages[-1].content == NO_CALLS_REMAIN
+    forced = converse_payload(last_calls[0])["toolConfig"]
+    assert forced["toolChoice"] == {"tool": {"name": "return_result"}}
+    report = next(m for m in deps.repos.messages.list_by_chat("c1") if m.kind == "report")
+    assert report.report.claims and stopped in report.report.uncertainties
+
+
+def test_no_result_even_at_the_tool_call_cap_fails_the_task_not_the_request() -> None:
+    # A model that still calls a tool when only return_result is offered has nothing usable.
     calls = [
         ModelResponse(
             tool_calls=[
@@ -311,34 +364,38 @@ def test_tool_error_is_a_result_the_model_sees() -> None:
 
 
 def test_duplicate_tool_call_spends_no_slot() -> None:
+    # Three repeats in a row run nothing new, so the next call may only return the result.
     call = ModelResponse(
         tool_calls=[
             ToolCall(id="x", name="sql_query", arguments={"dataset_id": "a2", "sql": "SELECT 1"})
         ],
         stop_reason="tool_use",
     )
-    deps = make_deps(
-        ScriptedModel(
-            {
-                "plan": [ModelResponse(structured=six_task_plan())],
-                "execute": [call] * 8 + [ModelResponse(structured=t1_result())] * 3,
-            }
-        ),
-        tasks_in_flight=1,
+    model = ScriptedModel(
+        {
+            "plan": [ModelResponse(structured=six_task_plan())],
+            "execute": [call] * 4 + [ModelResponse(structured=t1_result())] * 3,
+        }
     )
+    requests: list[ModelRequest] = []
+    model.on_request = requests.append
+    deps = make_deps(model, tasks_in_flight=1)
     req = seed_chat_with_dataset(deps, chat_id="c1", user_id="u1", dataset_id="a2")
     _start(deps, req)
     build_workflow(deps, checkpointer=None).invoke(
         {"chat_id": "c1", "message_id": req.message_id}, _cfg(req)
     )
     t1 = deps.repos.tasks.list_by_request(req.message_id)[0]
-    assert (
-        t1.status == "FAILED" and t1.failure_reason == "no progress"
-    )  # the duplicate never counted; no-progress ended it
+    assert (t1.status, t1.attempt) == ("COMPLETED", 1)
+    # the duplicates never counted: one query read, then the no-progress limit ended the loop
+    assert t1.result.uncertainties[-1] == "stopped after 3 turns without progress; 1 page read"
+    turns = [r for r in requests if r.task_id == t1.task_id]
+    assert [bool(r.tools) for r in turns] == [True] * 4 + [False]
 
 
-def test_failed_dependency_fails_its_dependents() -> None:
-    # t1 returns an invalid result on both of its attempts; t3 needs no t1 and completes
+def test_a_dependent_runs_on_what_completed_and_one_with_nothing_fails() -> None:
+    # t1 returns an invalid result on both of its attempts; t3 needs no t1 and completes. t2
+    # needs only t1, so it never runs (I-2); t6 needs t1, t2 and t3, so it runs (F7 ruling 2).
     invalid = ModelResponse(structured={})
     deps = make_deps(
         ScriptedModel(
@@ -357,9 +414,144 @@ def test_failed_dependency_fails_its_dependents() -> None:
     t1, t2, t3, _, _, t6 = deps.repos.tasks.list_by_request(req.message_id)
     assert t1.status == "FAILED" and "invalid result" in t1.failure_reason
     assert t2.status == "FAILED" and t2.failure_reason == "dependency failed"
-    assert t6.status == "FAILED" and t6.failure_reason == "dependency failed"
     assert t3.status == "COMPLETED" and out["status"] == "COMPLETED"
+    assert t6.status == "COMPLETED" and t6.result.uncertainties[1:] == [
+        f"A dependency did not complete ({t1.failure_reason}); not covered: {t1.goal}",
+        f"A dependency did not complete (dependency failed); not covered: {t2.goal}",
+    ]
     assert deps.repos.messages.get("c1", req.message_id).status == "COMPLETED"
+
+
+WEATHER = "Daily weather in Ajmer and Palanpur over the last two weeks."
+WHEN_TO_VISIT = "Whether this is a good time to visit, from that weather."
+DISTANCE = "Road distance between Ajmer and Palanpur."
+TRAINS = "Trains between Ajmer and Palanpur."
+ANSWER = "Combine the weather, distance and trains into one answer."
+
+
+def _f7_plan() -> dict:
+    """The plan of the live F7 run (7 Nov, Nova Pro) on the fixture chat."""
+    tasks = [
+        ("t1", WEATHER, []),
+        ("t2", WHEN_TO_VISIT, ["t1"]),
+        ("t3", DISTANCE, []),
+        ("t4", TRAINS, []),
+        ("t5", ANSWER, ["t1", "t2", "t3", "t4"]),
+    ]
+    return {
+        "kind": "plan",
+        "goal": "Weather, a good time to visit, distance and trains for Ajmer and Palanpur.",
+        "constraints": [],
+        "openQuestions": [],
+        "tasks": [
+            {
+                "ref": ref,
+                "kind": "sql_analysis",
+                "goal": goal,
+                "inputArtifactIds": ["a2"],
+                "dependsOn": depends_on,
+            }
+            for ref, goal, depends_on in tasks
+        ],
+        "nextAction": "Run t1, t3 and t4, then t2, then t5.",
+    }
+
+
+def _f7_result(fact: str, row: str, uncertainties: list[str] | None = None) -> ModelResponse:
+    ref = {"artifactId": "a2", "locator": {"kind": "row", "value": row}}
+    facts = [{"text": fact, "evidenceRefs": [ref]}]
+    return ModelResponse(
+        structured={"summary": fact, "facts": facts, "uncertainties": uncertainties or []}
+    )
+
+
+class _F7Agent:
+    """The live F7 run's executor, by task goal: the weather task never stops calling tools,
+    even when it may only return its result; distance, trains and the answer return facts."""
+
+    def __init__(self) -> None:
+        self.requests: list[ModelRequest] = []
+
+    def invoke(self, request: ModelRequest) -> ModelResponse:
+        self.requests.append(request)
+        if request.stage == "plan":
+            return ModelResponse(structured=_f7_plan())
+        if self.goal_of(request) == WEATHER:
+            turn = len(request.messages)
+            sql = {"dataset_id": "a2", "sql": f"SELECT {turn}"}
+            return ModelResponse(
+                tool_calls=[ToolCall(id=f"w{turn}", name="sql_query", arguments=sql)]
+            )
+        return {
+            DISTANCE: _f7_result("Ajmer to Palanpur is approximately 350+ kms.", "1"),
+            TRAINS: _f7_result("Two trains a day run from Ajmer to Palanpur.", "2"),
+            ANSWER: _f7_result(
+                "Ajmer to Palanpur is approximately 350+ km.",
+                "3",
+                ["No weather data: the weather task did not complete."],
+            ),
+        }[self.goal_of(request)]
+
+    @staticmethod
+    def goal_of(request: ModelRequest) -> str:
+        return str(request.messages[0].content).split("Task goal: ", 1)[1].split("\n", 1)[0]
+
+
+def _run_f7() -> tuple[_F7Agent, WorkerDeps, str]:
+    """The live F7 run on the fixture chat: its agent, its deps and the request id."""
+    agent = _F7Agent()
+    deps = make_deps(agent)
+    req = seed_chat_with_dataset(deps, chat_id="c1", user_id="u1", dataset_id="a2")
+    _start(deps, req)
+    out = build_workflow(deps, checkpointer=None).invoke(
+        {"chat_id": "c1", "message_id": req.message_id}, _cfg(req)
+    )
+    assert out["status"] == "COMPLETED"
+    return agent, deps, req.message_id
+
+
+def test_a_failed_task_leaves_a_stated_gap_not_an_unanswered_request() -> None:
+    """F7 ruling 2 on the live run: weather failed at its tool budget, the visit task (needing
+    only weather) never ran, and the combining task ran on distance and trains, told what is
+    missing, instead of failing with "dependency failed"."""
+    agent, deps, request_id = _run_f7()
+    tasks = {t.goal: t for t in deps.repos.tasks.list_by_request(request_id)}
+    statuses = {goal: (t.status, t.failure_reason) for goal, t in tasks.items()}
+    assert statuses == {
+        WEATHER: ("FAILED", "tool call budget exhausted"),
+        WHEN_TO_VISIT: ("FAILED", "dependency failed"),
+        DISTANCE: ("COMPLETED", None),
+        TRAINS: ("COMPLETED", None),
+        ANSWER: ("COMPLETED", None),
+    }
+    executes = [r for r in agent.requests if r.stage == "execute"]
+    (brief,) = {str(r.messages[0].content) for r in executes if agent.goal_of(r) == ANSWER}
+    dependencies = brief.split("<dependencies>")[1].split("</dependencies>")[0]
+    assert dependencies.splitlines()[1:] == [
+        "- Ajmer to Palanpur is approximately 350+ kms.",
+        "- Two trains a day run from Ajmer to Palanpur.",
+        f"- A dependency did not complete (tool call budget exhausted); not covered: {WEATHER}",
+        f"- A dependency did not complete (dependency failed); not covered: {WHEN_TO_VISIT}",
+    ]
+    report = next(m for m in deps.repos.messages.list_by_chat("c1") if m.kind == "report")
+    assert "No weather data: the weather task did not complete." in report.report.uncertainties
+
+
+def test_the_report_leads_with_answers_then_names_what_was_not_answered() -> None:
+    """F7 ruling 4 on the live run: the report gave distance and trains and left the user's
+    actual question (the weather, when to visit) unmentioned outside the limitations. Each
+    task without a result now names its goal as not answered, after the answers and before
+    the limitations."""
+    _, deps, _ = _run_f7()
+    report = next(m for m in deps.repos.messages.list_by_chat("c1") if m.kind == "report")
+    paragraphs = report.content.split("\n\n")
+    assert paragraphs[:4] == [
+        "Ajmer to Palanpur is approximately 350+ kms.",
+        "Two trains a day run from Ajmer to Palanpur.",
+        f"Not answered: {WEATHER}",
+        f"Not answered: {WHEN_TO_VISIT}",
+    ]
+    assert paragraphs[4].startswith("Limitations:\n") and len(paragraphs) == 5
 
 
 def test_scripted_exhaustion_fails_request_with_reason() -> None:
