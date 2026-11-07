@@ -2,6 +2,7 @@ import { streamRequest } from './stream';
 import { parseMemory } from './parse';
 import type { ApiClient } from './client';
 import { ApiError, invalidResponse } from './errors';
+import { parseRequestTrace, parseTranscript } from './parseTrace';
 import {
   parseApiError,
   parseChat,
@@ -23,6 +24,8 @@ type JsonCaller = (
 ) => Promise<unknown>;
 
 const chatPath = (chatId: string) => `/chats/${encodeURIComponent(chatId)}`;
+const requestPath = (chatId: string, requestId: string) =>
+  `${chatPath(chatId)}/requests/${encodeURIComponent(requestId)}`;
 
 /** Talks to the FastAPI backend (endpoints E1, E2, E3, E4, E15). */
 export function createHttpClient(baseUrl: string): ApiClient {
@@ -32,16 +35,13 @@ export function createHttpClient(baseUrl: string): ApiClient {
     streamRequest: (chatId, requestId, onEvent) => streamRequest(root, chatId, requestId, onEvent),
     replyToRequest: async (chatId, requestId, targetId, content) =>
       parseMessage(
-        await call(
-          'POST',
-          `${chatPath(chatId)}/requests/${encodeURIComponent(requestId)}/replies`,
-          { inReplyToMessageId: targetId, content },
-        ),
+        await call('POST', `${requestPath(chatId, requestId)}/replies`, {
+          inReplyToMessageId: targetId,
+          content,
+        }),
       ),
     cancelRequest: async (chatId, requestId) =>
-      parseMessage(
-        await call('POST', `${chatPath(chatId)}/requests/${encodeURIComponent(requestId)}/cancel`),
-      ),
+      parseMessage(await call('POST', `${requestPath(chatId, requestId)}/cancel`)),
     getMemory: async () => parseMemory(await call('GET', '/me')),
     getArtifactContent: async (chatId, artifactId) => {
       const path = `${chatPath(chatId)}/artifacts/${encodeURIComponent(artifactId)}/content`;
@@ -50,6 +50,15 @@ export function createHttpClient(baseUrl: string): ApiClient {
       return response.text();
     },
     saveMemory: async (instructions) => parseMemory(await call('PATCH', '/me', { instructions })),
+    getRequestTrace: async (chatId, requestId) =>
+      parseRequestTrace(await call('GET', `${requestPath(chatId, requestId)}/trace`)),
+    getModelCallTranscript: async (chatId, requestId, modelCallId) =>
+      parseTranscript(
+        await call(
+          'GET',
+          `${requestPath(chatId, requestId)}/model-calls/${encodeURIComponent(modelCallId)}/transcript`,
+        ),
+      ),
     listChats: async () =>
       parsePageItems(await call('GET', `/chats?limit=${CHAT_PAGE_SIZE}`), parseChat),
     createChat: async () => parseChat(await call('POST', '/chats', {})),

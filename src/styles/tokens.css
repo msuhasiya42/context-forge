@@ -26,6 +26,7 @@
   --space-6: 32px;
 
   --font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  --font-family-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   --font-size-sm: 0.8125rem;
   --font-size-md: 0.9375rem;
   --font-size-lg: 1.125rem;
@@ -44,6 +45,9 @@
 
   --sidebar-width: 280px;
   --content-max-width: 760px;
+  --drawer-wide-width: 1040px;
+  /* A code pane scrolls beyond this height rather than pushing everything else away. */
+  --code-max-height: 24rem;
 }
 
 @media (prefers-color-scheme: dark) {

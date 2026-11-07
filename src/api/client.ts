@@ -1,6 +1,7 @@
 // The single boundary between the UI and the ContextForge API.
 import { createHttpClient } from './httpClient';
 import { createMockClient } from './mockClient';
+import type { ModelCallTranscript, RequestTrace } from './traceTypes';
 import type { Chat, Message, StreamEvent, UserMemory } from './types';
 
 export interface ApiClient {
@@ -20,6 +21,14 @@ export interface ApiClient {
   /** The stored text of a deliverable Artifact, such as a long report's markdown. */
   getArtifactContent?(chatId: string, artifactId: string): Promise<string>;
   saveMemory?(instructions: string): Promise<UserMemory>;
+  /** E17: how a request was worked: planner calls, tasks, model and tool calls, in order. */
+  getRequestTrace?(chatId: string, requestId: string): Promise<RequestTrace>;
+  /** E18: exactly what one model call of the request sent and got back. */
+  getModelCallTranscript?(
+    chatId: string,
+    requestId: string,
+    modelCallId: string,
+  ): Promise<ModelCallTranscript>;
   /** E2: my chats, most recently updated first (first page). */
   listChats(): Promise<Chat[]>;
   /** E1: create an untitled chat. */

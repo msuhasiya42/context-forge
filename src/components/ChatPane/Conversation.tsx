@@ -4,6 +4,7 @@ import type { Message } from '../../api/types';
 import type { AsyncState } from '../../utils/asyncState';
 import { AsyncContent } from '../AsyncContent/AsyncContent';
 import { Composer } from '../Composer/Composer';
+import { DeepDivePanel } from '../DeepDive/DeepDivePanel';
 import { MessageList } from '../MessageList/MessageList';
 import { ReportPanel } from '../ReportPanel/ReportPanel';
 import controls from '../../styles/controls.module.css';
@@ -21,7 +22,10 @@ interface ConversationProps {
   refreshError: string | null;
 }
 
-/** The selected chat's messages above its composer, and a long report when one is opened. */
+/**
+ * The selected chat's messages above its composer, with a long report or a request's Deep Dive
+ * in a drawer when one is opened.
+ */
 export function Conversation({
   client,
   chatId,
@@ -33,7 +37,9 @@ export function Conversation({
   refreshError,
 }: ConversationProps) {
   const [openReportId, setOpenReportId] = useState<string | null>(null);
+  const [deepDiveRequestId, setDeepDiveRequestId] = useState<string | null>(null);
   const onOpenReport = client.getArtifactContent ? setOpenReportId : undefined;
+  const onOpenDeepDive = client.getRequestTrace ? setDeepDiveRequestId : undefined;
   return (
     <>
       <AsyncContent
@@ -42,7 +48,13 @@ export function Conversation({
         emptyText="Start the conversation"
         onRetry={onRetry}
       >
-        {(items) => <MessageList messages={items} onOpenReport={onOpenReport} />}
+        {(items) => (
+          <MessageList
+            messages={items}
+            onOpenReport={onOpenReport}
+            onOpenDeepDive={onOpenDeepDive}
+          />
+        )}
       </AsyncContent>
       {refreshError && (
         <div className={styles.noticeSlot}>
@@ -62,6 +74,14 @@ export function Conversation({
           chatId={chatId}
           artifactId={openReportId}
           onClose={() => setOpenReportId(null)}
+        />
+      )}
+      {deepDiveRequestId && (
+        <DeepDivePanel
+          client={client}
+          chatId={chatId}
+          requestId={deepDiveRequestId}
+          onClose={() => setDeepDiveRequestId(null)}
         />
       )}
     </>

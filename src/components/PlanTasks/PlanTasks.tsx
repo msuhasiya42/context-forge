@@ -1,14 +1,6 @@
 import type { RequestTask } from '../../api/types';
+import { taskStatusLabel } from '../../utils/tasks';
 import styles from './PlanTasks.module.css';
-
-const STATUS_LABELS: Record<string, string> = {
-  PLANNED: 'Waiting',
-  RUNNING: 'Working',
-  COMPLETED: 'Done',
-  FAILED: 'Failed',
-  SKIPPED: 'Skipped',
-  CANCELLED: 'Cancelled',
-};
 
 /** The tasks the request was broken into, each with its status in words. */
 export function PlanTasks({ tasks }: { tasks: readonly RequestTask[] }) {
@@ -20,7 +12,7 @@ export function PlanTasks({ tasks }: { tasks: readonly RequestTask[] }) {
         {tasks.map((task) => (
           <li key={task.taskId} className={styles.task}>
             <span className={styles.goal}>{task.goal}</span>
-            <span className={styles.status}>{STATUS_LABELS[task.status] ?? task.status}</span>
+            <span className={styles.status}>{taskStatusLabel(task.status)}</span>
           </li>
         ))}
       </ol>

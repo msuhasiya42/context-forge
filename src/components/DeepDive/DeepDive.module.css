@@ -1,0 +1,159 @@
+.trace {
+  display: grid;
+  gap: var(--space-3);
+}
+
+.request {
+  padding-bottom: var(--space-3);
+  border-bottom: var(--border);
+}
+
+.requestText {
+  margin: 0 0 var(--space-1);
+  font-weight: var(--font-weight-bold);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.muted {
+  margin: 0;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+  overflow-wrap: anywhere;
+}
+
+.result {
+  margin: var(--space-1) 0;
+  overflow-wrap: anywhere;
+}
+
+/* The pressed view is shown by weight and an inset rule as well as colour. */
+.views {
+  display: flex;
+  gap: var(--space-2);
+}
+
+.activeView {
+  border-color: var(--color-accent);
+  background: var(--color-selected);
+  box-shadow: inset 0 -2px 0 var(--color-accent);
+  font-weight: var(--font-weight-bold);
+}
+
+/* List view */
+.steps {
+  display: grid;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.step {
+  min-width: 0;
+  padding: var(--space-2) var(--space-3);
+  border: var(--border);
+  border-radius: var(--radius-sm);
+}
+
+.stepLine {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-1) var(--space-3);
+  margin: 0;
+}
+
+.stepNumber {
+  min-width: 2ch;
+  font-weight: var(--font-weight-bold);
+}
+
+.offset {
+  color: var(--color-text-muted);
+  font-family: var(--font-family-mono);
+  font-size: var(--font-size-sm);
+}
+
+.kind {
+  padding: 0 var(--space-2);
+  border: var(--border);
+  border-radius: var(--radius-pill);
+  font-size: var(--font-size-sm);
+}
+
+.summary {
+  flex: 1 1 20rem;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+/* Tree view: nested lists with a rule down each level. */
+.tree {
+  display: grid;
+  gap: var(--space-4);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.branch {
+  min-width: 0;
+}
+
+.branchTitle {
+  margin: 0 0 var(--space-2);
+  font-size: var(--font-size-md);
+}
+
+.children {
+  display: grid;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0 0 0 var(--space-4);
+  border-left: var(--border);
+  list-style: none;
+}
+
+.node {
+  min-width: 0;
+}
+
+.nodeTitle {
+  margin: 0;
+  font-weight: var(--font-weight-medium);
+  overflow-wrap: anywhere;
+}
+
+.call,
+.tool {
+  display: grid;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.facts {
+  margin: 0;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+  overflow-wrap: anywhere;
+}
+
+/* Transcript: Input beside Output where there is room, stacked on a phone. */
+.transcript {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 22rem), 1fr));
+  gap: var(--space-3);
+}
+
+.transcriptSide {
+  display: grid;
+  align-content: start;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.sideTitle {
+  margin: 0;
+  font-size: var(--font-size-md);
+}

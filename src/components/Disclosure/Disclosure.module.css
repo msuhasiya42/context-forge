@@ -1,0 +1,38 @@
+.disclosure {
+  min-width: 0;
+}
+
+.toggle {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  width: 100%;
+  min-height: 32px;
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+
+.toggle:hover {
+  border-color: var(--color-border);
+}
+
+.marker {
+  flex: none;
+  color: var(--color-text-muted);
+}
+
+.content {
+  display: grid;
+  gap: var(--space-2);
+  padding: var(--space-1) 0 var(--space-2) var(--space-4);
+}
+
+/* `display: grid` above would otherwise override the hidden attribute. */
+.content[hidden] {
+  display: none;
+}

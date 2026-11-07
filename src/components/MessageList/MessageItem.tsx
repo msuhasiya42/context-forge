@@ -8,11 +8,14 @@ interface MessageItemProps {
   message: Message;
   /** Opens a report's full text; the control is shown only when this is given. */
   onOpenReport?: (artifactId: string) => void;
+  /** Opens how a request was worked; shown on requests and reports when this is given. */
+  onOpenDeepDive?: (requestId: string) => void;
 }
 
-export function MessageItem({ message, onOpenReport }: MessageItemProps) {
+export function MessageItem({ message, onOpenReport, onOpenDeepDive }: MessageItemProps) {
   const tag = kindLabel(message.kind);
-  const reportId = message.deliverableArtifactIds?.[0];
+  const reportId = onOpenReport && message.deliverableArtifactIds?.[0];
+  const deepDiveId = onOpenDeepDive && deepDiveRequestId(message);
   return (
     <li
       className={classNames(
@@ -26,19 +29,38 @@ export function MessageItem({ message, onOpenReport }: MessageItemProps) {
         <time dateTime={message.createdAt}>{formatMessageTime(message.createdAt)}</time>
       </p>
       {message.content && <p className={styles.content}>{linkedSources(message.content)}</p>}
-      {reportId && onOpenReport && (
-        <button
-          type="button"
-          className={classNames(controls.button, styles.reportButton)}
-          onClick={() => onOpenReport(reportId)}
-        >
-          View full report
-        </button>
+      {(reportId || deepDiveId) && (
+        <div className={styles.actions}>
+          {reportId && (
+            <button
+              type="button"
+              className={controls.button}
+              onClick={() => onOpenReport?.(reportId)}
+            >
+              View full report
+            </button>
+          )}
+          {deepDiveId && (
+            <button
+              type="button"
+              className={controls.button}
+              onClick={() => onOpenDeepDive?.(deepDiveId)}
+            >
+              Deep dive
+            </button>
+          )}
+        </div>
       )}
       {message.status && <p className={styles.status}>Status: {statusLabel(message.status)}</p>}
       {message.failureReason && <p className={styles.status}>Reason: {message.failureReason}</p>}
     </li>
   );
+}
+
+/** The request a Deep Dive opens from this message: a request itself, or a report's request. */
+function deepDiveRequestId(message: Message): string | undefined {
+  if (message.kind === 'request') return message.messageId;
+  return message.kind === 'report' ? message.requestMessageId : undefined;
 }
 
 function linkedSources(text: string) {

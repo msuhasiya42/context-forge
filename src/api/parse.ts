@@ -18,14 +18,14 @@ const STATUSES_BY_KIND: Partial<Record<MessageKind, readonly MessageStatus[]>> =
   proposed_action: PROPOSED_ACTION_STATUSES,
 };
 
-type JsonRecord = Record<string, unknown>;
+export type JsonRecord = Record<string, unknown>;
 
-function asRecord(value: unknown): JsonRecord {
+export function asRecord(value: unknown): JsonRecord {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) throw invalidResponse();
   return value as JsonRecord;
 }
 
-function readString(record: JsonRecord, key: string): string {
+export function readString(record: JsonRecord, key: string): string {
   const value = record[key];
   if (typeof value !== 'string') throw invalidResponse();
   return value;
@@ -37,11 +37,11 @@ function readEnum<T extends string>(record: JsonRecord, key: string, allowed: re
   return value as T;
 }
 
-function isAbsent(value: unknown): boolean {
+export function isAbsent(value: unknown): boolean {
   return value === undefined || value === null;
 }
 
-function readOptionalString(record: JsonRecord, key: string): string | undefined {
+export function readOptionalString(record: JsonRecord, key: string): string | undefined {
   return isAbsent(record[key]) ? undefined : readString(record, key);
 }
 
