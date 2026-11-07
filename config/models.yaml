@@ -1,31 +1,58 @@
 priceVersion: "2026-11-07"
-# USD per million tokens, Bedrock on-demand. A geo inference profile (apac.<model>) bills at the
-# source region's price for <model>. Nova rows: Sydney on-demand, recorded 7 Nov 2026.
+# USD per million tokens, Bedrock on-demand. A geo or global inference profile (apac.<model>,
+# global.<model>) bills at its model's row. Every model a stage below names needs a row; a call
+# to a model without one is charged CONTEXTFORGE_CALL_RESERVE_USD.
+# Nova Pro and Nova Lite: the AWS Price List for Bedrock in ap-southeast-2 (published 6 Nov
+# 2026), on-demand standard tier, recorded 7 Nov 2026.
 # Claude rows: Anthropic list prices, not verified for Bedrock Sydney; unused until the account
 # has Anthropic model access.
 prices:
-  "amazon.nova-pro-v1:0":     { inputPerMTok: 0.80, outputPerMTok: 3.20,  cacheReadPerMTok: 0.0 }
-  "amazon.nova-lite-v1:0":    { inputPerMTok: 0.06, outputPerMTok: 0.24,  cacheReadPerMTok: 0.0 }
-  anthropic.claude-opus-5-5:  { inputPerMTok: 4.00, outputPerMTok: 20.00, cacheReadPerMTok: 0.20 }
-  anthropic.claude-haiku-5-5: { inputPerMTok: 0.10, outputPerMTok: 0.50,  cacheReadPerMTok: 0.01 }
-  scripted:                   { inputPerMTok: 0.0,  outputPerMTok: 0.0,   cacheReadPerMTok: 0.0 }
-  # Planner bake-off candidates: the AWS Price List for Bedrock in ap-southeast-2 (published
-  # 6 Nov 2026), on-demand standard tier, recorded 7 Nov 2026. Nova 2 Lite runs only through its
-  # global profile and these are that profile's prices. cacheReadPerMTok is 0.0 where the list
-  # has no cache price; no call sends a cache point. Kimi K3.1 is not in the price list: the
-  # Bedrock pricing page's Global CRIS price for "Kimi K3.1 Pro - Highspeed", unverified.
+  "amazon.nova-pro-v1:0":     { inputPerMTok: 0.84,  outputPerMTok: 3.36,  cacheReadPerMTok: 0.0 }
+  "amazon.nova-lite-v1:0":    { inputPerMTok: 0.063, outputPerMTok: 0.252, cacheReadPerMTok: 0.0 }
+  anthropic.claude-opus-5-5:  { inputPerMTok: 4.00,  outputPerMTok: 20.00, cacheReadPerMTok: 0.20 }
+  anthropic.claude-haiku-5-5: { inputPerMTok: 0.10,  outputPerMTok: 0.50,  cacheReadPerMTok: 0.01 }
+  scripted:                   { inputPerMTok: 0.0,   outputPerMTok: 0.0,   cacheReadPerMTok: 0.0 }
+  # Planner bake-off candidates: the same price list, recorded 7 Nov 2026. Nova 2 Lite runs only
+  # through its global profile and these are that profile's prices. cacheReadPerMTok is 0.0
+  # where the list has no cache price; no call sends a cache point.
   "amazon.nova-2-lite-v1:0":               { inputPerMTok: 0.32,   outputPerMTok: 2.63,   cacheReadPerMTok: 0.08 }
   "mistral.mistral-large-3-675b-instruct": { inputPerMTok: 0.515,  outputPerMTok: 1.545,  cacheReadPerMTok: 0.0 }
   "deepseek.v3.2":                         { inputPerMTok: 0.64,   outputPerMTok: 1.91,   cacheReadPerMTok: 0.0 }
   "qwen.qwen3-235b-a22b-2507-v1:0":        { inputPerMTok: 0.2266, outputPerMTok: 0.9064, cacheReadPerMTok: 0.0 }
   "openai.gpt-oss-120b-1:0":               { inputPerMTok: 0.1545, outputPerMTok: 0.618,  cacheReadPerMTok: 0.0 }
+  # Not in the price list: the Bedrock pricing page's Global CRIS price for "Kimi K3.1 Pro -
+  # Highspeed", read 7 Nov 2026; that this row is the model id below is unverified.
   "moonshotai.kimi-k3.1":                  { inputPerMTok: 4.00,   outputPerMTok: 20.00,  cacheReadPerMTok: 0.0 }
   "minimax.minimax-m2.5":                  { inputPerMTok: 0.31,   outputPerMTok: 1.24,   cacheReadPerMTok: 0.0 }
   "nvidia.nemotron-super-3-120b":          { inputPerMTok: 0.15,   outputPerMTok: 0.67,   cacheReadPerMTok: 0.0 }
-# The model per stage on the Bedrock backend. CONTEXTFORGE_PLANNER_MODEL (plan, cite) and
-# CONTEXTFORGE_EXECUTOR_MODEL (execute, compress) may override it; prices always come from above.
+# The model per stage on the Bedrock backend, and its fallbacks: any Bedrock model id with a
+# price row above. A call goes to the next fallback while the model before is down (unavailable,
+# unreachable, throttled after the retry, or not available for this account); a model that was
+# down is tried last for 60 s. CONTEXTFORGE_PLANNER_MODEL / _FALLBACKS override plan and cite,
+# CONTEXTFORGE_EXECUTOR_MODEL / _FALLBACKS execute; compress keeps its own.
+# Plan (bake-off 7 Nov 2026, docs/evals/plan-bakeoff-2026-11-07.md): gpt-oss-120b, Qwen3-235B
+# and Nova 2 Lite gave valid plans first try. Kimi K3.1 also did, at 45 times the cost and with
+# no dependencies; to plan with it: model "global.moonshotai.kimi-k3.1", fallbacks
+# ["deepseek.v3.2", "apac.amazon.nova-pro-v1:0"].
 stages:
-  plan:     { model: "apac.amazon.nova-pro-v1:0",  effort: high,   maxTokens: 4000 }  # later: au.anthropic.claude-opus-5-5
-  execute:  { model: "apac.amazon.nova-lite-v1:0", effort: medium, maxTokens: 4000 }  # later: au.anthropic.claude-haiku-5-5
-  cite:     { model: "apac.amazon.nova-pro-v1:0",  effort: high,   maxTokens: 4000 }
-  compress: { model: "apac.amazon.nova-lite-v1:0", effort: low,    maxTokens: 1000 }
+  plan:
+    model: "openai.gpt-oss-120b-1:0"
+    fallbacks: ["qwen.qwen3-235b-a22b-2507-v1:0", "global.amazon.nova-2-lite-v1:0"]
+    effort: high
+    maxTokens: 4000
+  # Qwen3-235B's tool loop has not been run live yet (the bake-off planned only).
+  execute:
+    model: "qwen.qwen3-235b-a22b-2507-v1:0"
+    fallbacks: ["openai.gpt-oss-120b-1:0", "apac.amazon.nova-pro-v1:0"]
+    effort: medium
+    maxTokens: 4000
+  # Makes no model call yet; served by the planner's read timeout.
+  cite:
+    model: "openai.gpt-oss-120b-1:0"
+    effort: high
+    maxTokens: 4000
+  compress:
+    model: "global.amazon.nova-2-lite-v1:0"
+    fallbacks: ["apac.amazon.nova-lite-v1:0"]
+    effort: low
+    maxTokens: 1000

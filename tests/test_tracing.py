@@ -108,7 +108,9 @@ def test_trace_tree_of_a_two_task_run_is_metadata_only_unless_content_is_on(cont
     assert root["requestId"] == req.message_id and root["chatId"] == "c1"
     assert root["status"] == "COMPLETED" and root["attempt"] == 1
     call = client.ended("model:execute")["extra"]["metadata"]
-    assert call["usage_metadata"]["total_cost"] == pytest.approx((1_000 * 0.06 + 100 * 0.24) / 1e6)
+    # The executor, Qwen3-235B, at its Sydney price (F9)
+    total = (1_000 * 0.2266 + 100 * 0.9064) / 1e6
+    assert call["usage_metadata"]["total_cost"] == pytest.approx(total)
     assert call["model"] == deps.model_id(Stage.EXECUTE) and call["stopReason"] == "tool_use"
     tool = client.ended("tool:sql_query")["extra"]["metadata"]
     assert tool["status"] == "ok" and tool["rowCount"] == 1

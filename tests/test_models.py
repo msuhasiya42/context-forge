@@ -18,7 +18,7 @@ from contextforge.core.models.errors import (
     ModelTimeout,
     ModelUnavailable,
 )
-from contextforge.core.models.recording import RecordingModelClient
+from contextforge.core.models.recording import RecordingModelClient, price_row
 from contextforge.core.models.scripted import ScriptedModel, ScriptExhausted
 from contextforge.core.models.transcript import TranscriptWriter
 from contextforge.core.repositories.memory import Repositories
@@ -178,11 +178,23 @@ def test_a_transcript_is_stored_per_call_redacted_and_never_fails_the_call() -> 
     assert unstored.outcome == "COMPLETED" and unstored.transcript_ref is None
 
 
-def test_models_config_loads_price_version_and_stages() -> None:
+def test_models_config_loads_the_shipped_routes_each_model_priced() -> None:
+    """F9: the bake-off's planners, Qwen3-235B executing, Nova 2 Lite compressing; every model
+    a stage may call has a price row, so no call is charged the reserve for want of one."""
     config = load_models_config()
     assert config.price_version == "2026-11-07"
-    assert config.stages["plan"].model == "apac.amazon.nova-pro-v1:0"
-    assert config.stages["execute"].model == "apac.amazon.nova-lite-v1:0"
+    assert config.stages["plan"].route == ModelRoute(
+        "openai.gpt-oss-120b-1:0",
+        ("qwen.qwen3-235b-a22b-2507-v1:0", "global.amazon.nova-2-lite-v1:0"),
+    )
+    assert config.stages["execute"].route == ModelRoute(
+        "qwen.qwen3-235b-a22b-2507-v1:0", ("openai.gpt-oss-120b-1:0", "apac.amazon.nova-pro-v1:0")
+    )
+    assert config.stages["compress"].route == ModelRoute(
+        "global.amazon.nova-2-lite-v1:0", ("apac.amazon.nova-lite-v1:0",)
+    )
+    routed = {m for stage in config.stages.values() for m in (stage.model, *stage.fallbacks)}
+    assert [m for m in routed if price_row(config.prices, m) is None] == []
 
 
 def test_a_call_is_priced_from_its_usage_and_unknown_usage_is_charged_the_reserve() -> None:
@@ -212,18 +224,20 @@ def test_a_call_is_priced_from_its_usage_and_unknown_usage_is_charged_the_reserv
     priced, timed_out = repos.model_calls.list_by_request("m1")
     assert priced.model == "bedrock/apac.amazon.nova-pro-v1:0"
     assert priced.price_version == "2026-11-07"
-    assert priced.estimated_cost_usd == pytest.approx((31_920 * 0.80 + 2_724 * 3.20) / 1e6)
+    # Sydney list price (F9): $0.84 / $3.36 per million tokens
+    assert priced.estimated_cost_usd == pytest.approx((31_920 * 0.84 + 2_724 * 3.36) / 1e6)
     assert timed_out.usage is None and timed_out.estimated_cost_usd == 0.10
 
 
 def test_spend_cap_admits_more_than_ten_cheap_calls() -> None:
-    """Live finding L-1: the flat reserve recorded per call refused the eleventh call."""
+    """Live finding L-1 (on Nova Lite): the flat reserve recorded per call refused the eleventh
+    call."""
     reply = ModelResponse(text="ok", usage=Usage(input_tokens=3_192, output_tokens=272))
     deps = make_deps(ScriptedModel({"execute": [reply] * 12}))
     deps.settings = Settings(_env_file=None, request_max_usd=1.0, call_reserve_usd=0.10)
     deps.prices = load_models_config().prices
     request = ModelRequest(
-        stage="execute", model=deps.model_id(Stage.EXECUTE), system=[], messages=[]
+        stage="execute", model="apac.amazon.nova-lite-v1:0", system=[], messages=[]
     )
     model = deps.model_for("m1")
     for _ in range(12):
@@ -242,8 +256,9 @@ def _capped_deps(model: ModelClient, max_usd: float, **settings: float) -> Worke
 
 def test_three_concurrent_calls_are_all_admitted_under_the_smoke_cap() -> None:
     """Re-review I-1: a flat $0.10 reserve let only two calls run in flight under the $0.25
-    cap. Each call now reserves its own worst case (Nova Lite at the context cap: ~$0.0034),
-    so three parallel tasks run. Each call waits at the barrier until all three are in flight."""
+    cap. Each call now reserves its own worst case (the executor's at the context cap: ~$0.013
+    for Qwen3-235B), so three parallel tasks run. Each call waits at the barrier until all
+    three are in flight."""
     in_flight = threading.Barrier(3, timeout=5)
     reply = ModelResponse(text="ok", usage=Usage(input_tokens=3_000, output_tokens=300))
 
@@ -274,12 +289,12 @@ def test_three_concurrent_calls_are_all_admitted_under_the_smoke_cap() -> None:
 
 
 def test_spend_cap_refuses_a_call_whose_worst_case_would_pass_it() -> None:
-    """A planner call reserves Nova Pro's worst case (~$0.045); after $0.01 spent, a $0.05 cap
+    """A Nova Pro planner call reserves its worst case (~$0.047); after $0.01 spent, a $0.05 cap
     refuses it before the provider is called, and nothing is recorded for it."""
     spent = ModelResponse(text="ok", usage=Usage(input_tokens=10_000, output_tokens=625))
     model = ScriptedModel({"plan": [spent, spent]})
     deps = _capped_deps(model, 0.05)
-    request = ModelRequest(stage="plan", model=deps.model_id(Stage.PLAN), system=[], messages=[])
+    request = ModelRequest(stage="plan", model="apac.amazon.nova-pro-v1:0", system=[], messages=[])
     budgeted = deps.model_for("m1")
     budgeted.invoke(request)
     with pytest.raises(ModelError, match="^Request spend budget exhausted\\.$"):
