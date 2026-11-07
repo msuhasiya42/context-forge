@@ -1,4 +1,4 @@
-"""LangGraph state (implementation plan section 5): the request working brief and per-task state.
+"""LangGraph state (implementation plan section 5): the request state and per-task state.
 
 These are TypedDicts rather than Entities because LangGraph checkpoints state as plain dicts, so
 enum values are held as their plain strings.
@@ -57,7 +57,7 @@ class PendingInterrupt(TypedDict):
 
 
 class RequestState(TypedDict):
-    """The working brief passed between workflow tasks and checkpointed with their results.
+    """The request state passed between workflow tasks and checkpointed with their results.
 
     It carries no transcript. ``chat_id`` and ``user_id`` are identity, carried so stages can
     write Messages and Artifacts without a lookup. ``memory`` is the user's memory snapshot
@@ -76,6 +76,7 @@ class RequestState(TypedDict):
     period: NotRequired[dict[str, str] | None]
     # Questions the planner wanted but may not ask, each with the reading it planned on.
     assumptions: NotRequired[list[str]]
+    verification: NotRequired[dict[str, Any]]
     memory: MemorySnapshot
 
 

@@ -11,7 +11,7 @@ import socket
 import threading
 from collections import OrderedDict
 from collections.abc import Callable, Iterable
-from urllib.parse import urldefrag, urlsplit
+from urllib.parse import urlsplit, urlunsplit
 
 from contextforge.core.tools.base import ToolContext
 
@@ -92,12 +92,34 @@ _TRAILING = ".,;:!?)]}"
 
 def urls_in(text: str) -> set[str]:
     """The http(s) URLs written in ``text``, in the form the allowlist compares."""
-    return {_comparable(match.rstrip(_TRAILING)) for match in _URL_IN_TEXT.findall(text)}
+    return {_comparable(_trim_url(match)) for match in _URL_IN_TEXT.findall(text)}
+
+
+def _trim_url(url: str) -> str:
+    while url and url[-1] in _TRAILING:
+        last = url[-1]
+        opening = {")": "(", "]": "[", "}": "{"}.get(last)
+        if opening and url.count(last) <= url.count(opening):
+            break
+        url = url[:-1]
+    return url
 
 
 def _comparable(url: str) -> str:
-    """A URL trimmed and without its fragment, which no server ever sees."""
-    return urldefrag(url.strip()).url
+    """Normalize safe equivalent spellings; keep paths and query parameters distinct."""
+    parts = urlsplit(url.strip())
+    netloc = parts.netloc.lower()
+    if (parts.scheme.lower() == "https" and netloc.endswith(":443")) or (
+        parts.scheme.lower() == "http" and netloc.endswith(":80")
+    ):
+        netloc = netloc.rsplit(":", 1)[0]
+    path = re.sub(r"%([0-9a-fA-F]{2})", _unreserved, parts.path or "/")
+    return urlunsplit((parts.scheme.lower(), netloc, path, parts.query, ""))
+
+
+def _unreserved(match: re.Match[str]) -> str:
+    char = chr(int(match[1], 16))
+    return char if char.isascii() and (char.isalnum() or char in "-._~") else match[0].upper()
 
 
 class SeenUrls:
@@ -124,9 +146,9 @@ class SeenUrls:
             while len(self._returned) > self._max_tasks:
                 self._returned.popitem(last=False)
 
-    def allows(self, ctx: ToolContext, url: str) -> bool:
+    def allows(self, tool_context: ToolContext, url: str) -> bool:
         wanted = _comparable(url)
         with self._lock:
-            if wanted in self._returned.get(ctx.task_id, ()):
+            if wanted in self._returned.get(tool_context.task_id, ()):
                 return True
-        return wanted in urls_in(self._task_text(ctx))
+        return wanted in urls_in(self._task_text(tool_context))

@@ -8,7 +8,8 @@ written as one markdown report for a person to judge which model plans best.
 
 ``--probe`` sends each model id a three-token call and records it as available, denied or not
 found (a refused call is free); ``listed`` probes every id this region lists for a text model.
-``--models`` runs ``plan_stage`` once per model (``--repeat`` times) exactly as the worker does:
+``--models`` runs ``create_research_plan`` once per model (``--repeat`` times),
+as the worker does:
 prompt, context builder, result schema, resolver with today's date, the default memory, no
 sources. A live run states its expected cost (a dry pass, offline) before its first call and is
 held to ``--max-usd`` by the engine's own request spend cap. ``--dry-run`` answers every call
@@ -49,10 +50,15 @@ from contextforge.core.settings import Settings
 from contextforge.core.storage import MemoryBlobStore
 from contextforge.infra.bedrock import RESULT_TOOL, BedrockModel, parse_response
 from contextforge.infra.boto_errors import error_code
-from contextforge.worker.brief import initial_brief
-from contextforge.worker.deps import WorkerDeps
+from contextforge.worker.dependencies import WorkerDependencies
+from contextforge.worker.request_state import create_initial_request_state
 from contextforge.worker.stages.errors import one_line
-from contextforge.worker.stages.plan import PlanFailed, PlanResult, local_today, plan_stage
+from contextforge.worker.stages.plan import (
+    PlanFailed,
+    PlanResult,
+    create_research_plan,
+    local_today,
+)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_MAX_USD = 0.50
@@ -191,11 +197,11 @@ def run_plan(
     *,
     max_usd: float,
 ) -> PlanRun:
-    """``plan_stage`` for ``query`` as the first request of an empty chat, planned by ``model``
+    """Plan ``query`` as the first request of an empty chat, using ``model``
     through ``runtime``, with the worker's call admission, retries and records."""
     capture = CapturingRuntime(runtime)
-    deps = WorkerDeps(
-        repos=Repositories.in_memory(),
+    worker_dependencies = WorkerDependencies(
+        repositories=Repositories.in_memory(),
         blobs=MemoryBlobStore(),
         model=BedrockModel(capture),
         budgets=load_budgets(),
@@ -207,15 +213,17 @@ def run_plan(
         settings=settings.model_copy(update={"request_max_usd": max_usd}),
     )
     request = _request(query)
-    deps.repos.messages.save(request)
+    worker_dependencies.repositories.messages.save(request)
     planned, failure = None, None
     started = time.monotonic()
     try:
-        planned = plan_stage(initial_brief(request, memory_snapshot(None)), 0, deps)
+        planned = create_research_plan(
+            create_initial_request_state(request, memory_snapshot(None)), 0, worker_dependencies
+        )
     except PlanFailed as exc:
         failure = exc.reason
     seconds = time.monotonic() - started
-    records = deps.repos.model_calls.list_by_request(request.message_id)
+    records = worker_dependencies.repositories.model_calls.list_by_request(request.message_id)
     return PlanRun(model, planned, failure, seconds, capture.calls, records)
 
 
@@ -484,7 +492,7 @@ def _summary_row(run: PlanRun, config: ModelsConfig) -> str:
     calls = answered(run)
     cells = [
         f"`{run.model}`",
-        _outcome(run),
+        _build_task_outcome(run),
         "yes" if first_answer_problem(run) is None else "no",
         run_path(run),
         str(len(tasks)) if tasks else "–",
@@ -498,7 +506,7 @@ def _summary_row(run: PlanRun, config: ModelsConfig) -> str:
     return "| " + " | ".join(_cell(c) for c in cells) + " |"
 
 
-def _outcome(run: PlanRun) -> str:
+def _build_task_outcome(run: PlanRun) -> str:
     if run.planned is None:
         return "failed"
     return "plan, after a question" if run.planned["assumption"] else "plan"
@@ -565,7 +573,7 @@ def _cell(text: str) -> str:
 def _progress(run: PlanRun, config: ModelsConfig) -> str:
     cost = run_cost(run, config)
     priced = f"${cost:.4f}" if cost is not None else "cost unknown"
-    outcome = _outcome(run) if run.planned else f"failed: {run.failure}"
+    outcome = _build_task_outcome(run) if run.planned else f"failed: {run.failure}"
     return f"{run.model}: {outcome}, {run.seconds:.1f} s, {priced}"
 
 

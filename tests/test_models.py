@@ -27,7 +27,7 @@ from contextforge.core.storage import MemoryBlobStore
 from contextforge.core.values import Usage
 from contextforge.infra.runtime import stage_routes
 from contextforge.worker import calls
-from contextforge.worker.deps import WorkerDeps
+from contextforge.worker.dependencies import WorkerDependencies
 from contextforge.worker.routing import ModelCooldown
 from tests.helpers import ByModel, make_deps
 
@@ -45,44 +45,44 @@ def test_scripted_model_returns_in_order_then_exhausts() -> None:
 
 
 def test_recording_client_writes_one_model_call_per_invocation() -> None:
-    repos = Repositories.in_memory()
+    repositories = Repositories.in_memory()
     inner = ScriptedModel(
         {"plan": [ModelResponse(text="x")], "execute": [ModelResponse(text="y", replayed=True)]}
     )
     client = RecordingModelClient(
         inner,
-        repos.model_calls,
+        repositories.model_calls,
         request_message_id="m1",
         memory_version="1",
         price_version="2026-11-04",
     )
     client.invoke(_req("plan"))
     client.invoke(_req("execute"))
-    calls = repos.model_calls.list_by_request("m1")
+    calls = repositories.model_calls.list_by_request("m1")
     assert [c.stage for c in calls] == ["plan"]
-    assert calls[0].context_version == "mem:1|prompt:plan.4"
+    assert calls[0].context_version == "mem:1|prompt:plan.5"
 
 
 def test_recording_client_records_error_and_reraises() -> None:
-    repos = Repositories.in_memory()
+    repositories = Repositories.in_memory()
     client = RecordingModelClient(
         ScriptedModel({}),
-        repos.model_calls,
+        repositories.model_calls,
         request_message_id="m1",
         memory_version="1",
         price_version="2026-11-04",
     )
     with pytest.raises(ScriptExhausted):
         client.invoke(_req("plan"))
-    assert repos.model_calls.list_by_request("m1")[0].outcome == "ERROR"
+    assert repositories.model_calls.list_by_request("m1")[0].outcome == "ERROR"
 
 
 def test_recording_client_records_price_stop_reason_and_order_free_tool_set_hash() -> None:
-    repos = Repositories.in_memory()
+    repositories = Repositories.in_memory()
     reply = ModelResponse(stop_reason="tool_use", usage=Usage(input_tokens=10, output_tokens=2))
     client = RecordingModelClient(
         ScriptedModel({"execute": [reply, reply]}),
-        repos.model_calls,
+        repositories.model_calls,
         request_message_id="m1",
         memory_version="1",
         price_version="2026-11-04",
@@ -102,7 +102,7 @@ def test_recording_client_records_price_stop_reason_and_order_free_tool_set_hash
                 task_id="t1",
             )
         )
-    calls = repos.model_calls.list_by_request("m1")
+    calls = repositories.model_calls.list_by_request("m1")
     assert len(calls) == 2
     assert all(c.price_version == "2026-11-04" and c.stop_reason == "tool_use" for c in calls)
     assert all(c.task_id == "t1" and c.usage == reply.usage for c in calls)
@@ -113,7 +113,7 @@ def test_recording_client_records_price_stop_reason_and_order_free_tool_set_hash
 def test_a_transcript_is_stored_per_call_redacted_and_never_fails_the_call() -> None:
     """F6: the exact request and the answer (or error) beside each ModelCall, known secrets
     redacted; a store that fails leaves the call recorded without a transcript."""
-    repos, blobs = Repositories.in_memory(), MemoryBlobStore()
+    repositories, blobs = Repositories.in_memory(), MemoryBlobStore()
     asked = AIMessage("", tool_calls=[{"id": "x1", "name": "web_search", "args": {"q": "k"}}])
     result = ToolMessage(
         "page text with KEY-123",
@@ -138,7 +138,7 @@ def test_a_transcript_is_stored_per_call_redacted_and_never_fails_the_call() -> 
         writer = TranscriptWriter(store, secrets=["KEY-123", ""])
         return RecordingModelClient(
             model,
-            repos.model_calls,
+            repositories.model_calls,
             request_message_id="m1",
             memory_version="1",
             price_version="p",
@@ -151,7 +151,7 @@ def test_a_transcript_is_stored_per_call_redacted_and_never_fails_the_call() -> 
         recorder(ScriptedModel({}), blobs).invoke(request)
     unstored_answer = recorder(ScriptedModel({"execute": [answer]}), FailingBlobs()).invoke(request)
     assert unstored_answer.text == answer.text
-    answered, failed, unstored = repos.model_calls.list_by_request("m1")
+    answered, failed, unstored = repositories.model_calls.list_by_request("m1")
     stored = json.loads(blobs.get(answered.transcript_ref))
     assert answered.transcript_ref == f"mem://transcripts/m1/{answered.model_call_id}.json"
     assert stored["request"]["messages"] == [
@@ -199,7 +199,7 @@ def test_models_config_loads_the_shipped_routes_each_model_priced() -> None:
 
 def test_a_call_is_priced_from_its_usage_and_unknown_usage_is_charged_the_reserve() -> None:
     config = load_models_config()
-    repos = Repositories.in_memory()
+    repositories = Repositories.in_memory()
     usage = Usage(input_tokens=31_920, output_tokens=2_724)  # the live run's ten calls in one
 
     class TimesOut:
@@ -209,7 +209,7 @@ def test_a_call_is_priced_from_its_usage_and_unknown_usage_is_charged_the_reserv
     def recorder(inner: ModelClient) -> RecordingModelClient:
         return RecordingModelClient(
             inner,
-            repos.model_calls,
+            repositories.model_calls,
             request_message_id="m1",
             memory_version="1",
             price_version=config.price_version,
@@ -221,7 +221,7 @@ def test_a_call_is_priced_from_its_usage_and_unknown_usage_is_charged_the_reserv
     recorder(ScriptedModel({"plan": [ModelResponse(usage=usage)]})).invoke(pro)
     with pytest.raises(ModelTimeout):
         recorder(TimesOut()).invoke(pro)
-    priced, timed_out = repos.model_calls.list_by_request("m1")
+    priced, timed_out = repositories.model_calls.list_by_request("m1")
     assert priced.model == "bedrock/apac.amazon.nova-pro-v1:0"
     assert priced.price_version == "2026-11-07"
     # Sydney list price (F9): $0.84 / $3.36 per million tokens
@@ -233,25 +233,27 @@ def test_spend_cap_admits_more_than_ten_cheap_calls() -> None:
     """Live finding L-1 (on Nova Lite): the flat reserve recorded per call refused the eleventh
     call."""
     reply = ModelResponse(text="ok", usage=Usage(input_tokens=3_192, output_tokens=272))
-    deps = make_deps(ScriptedModel({"execute": [reply] * 12}))
-    deps.settings = Settings(_env_file=None, request_max_usd=1.0, call_reserve_usd=0.10)
-    deps.prices = load_models_config().prices
+    worker_dependencies = make_deps(ScriptedModel({"execute": [reply] * 12}))
+    worker_dependencies.settings = Settings(
+        _env_file=None, request_max_usd=1.0, call_reserve_usd=0.10
+    )
+    worker_dependencies.prices = load_models_config().prices
     request = ModelRequest(
         stage="execute", model="apac.amazon.nova-lite-v1:0", system=[], messages=[]
     )
-    model = deps.model_for("m1")
+    model = worker_dependencies.model_for("m1")
     for _ in range(12):
         model.invoke(request)
-    calls = deps.repos.model_calls.list_by_request("m1")
+    calls = worker_dependencies.repositories.model_calls.list_by_request("m1")
     assert len(calls) == 12 and sum(c.estimated_cost_usd or 0 for c in calls) < 0.01
 
 
-def _capped_deps(model: ModelClient, max_usd: float, **settings: float) -> WorkerDeps:
+def _capped_deps(model: ModelClient, max_usd: float, **settings: float) -> WorkerDependencies:
     """Deps on the production call path at ``max_usd`` per request, with config prices."""
-    deps = make_deps(model)
-    deps.settings = Settings(_env_file=None, request_max_usd=max_usd, **settings)
-    deps.prices = load_models_config().prices
-    return deps
+    worker_dependencies = make_deps(model)
+    worker_dependencies.settings = Settings(_env_file=None, request_max_usd=max_usd, **settings)
+    worker_dependencies.prices = load_models_config().prices
+    return worker_dependencies
 
 
 def test_three_concurrent_calls_are_all_admitted_under_the_smoke_cap() -> None:
@@ -267,15 +269,15 @@ def test_three_concurrent_calls_are_all_admitted_under_the_smoke_cap() -> None:
             in_flight.wait()
             return reply
 
-    deps = _capped_deps(WaitsForTheOthers(), 0.25, call_reserve_usd=0.10)
+    worker_dependencies = _capped_deps(WaitsForTheOthers(), 0.25, call_reserve_usd=0.10)
     request = ModelRequest(
-        stage="execute", model=deps.model_id(Stage.EXECUTE), system=[], messages=[]
+        stage="execute", model=worker_dependencies.model_id(Stage.EXECUTE), system=[], messages=[]
     )
     errors: list[Exception] = []
 
     def call() -> None:
         try:
-            deps.model_for("m1").invoke(request)
+            worker_dependencies.model_for("m1").invoke(request)
         except Exception as exc:
             errors.append(exc)
 
@@ -284,8 +286,11 @@ def test_three_concurrent_calls_are_all_admitted_under_the_smoke_cap() -> None:
         thread.start()
     for thread in threads:
         thread.join()
-    assert errors == [] and len(deps.repos.model_calls.list_by_request("m1")) == 3
-    assert deps.pending_calls["m1"] == []
+    assert (
+        errors == []
+        and len(worker_dependencies.repositories.model_calls.list_by_request("m1")) == 3
+    )
+    assert worker_dependencies.pending_calls["m1"] == []
 
 
 def test_spend_cap_refuses_a_call_whose_worst_case_would_pass_it() -> None:
@@ -293,31 +298,31 @@ def test_spend_cap_refuses_a_call_whose_worst_case_would_pass_it() -> None:
     refuses it before the provider is called, and nothing is recorded for it."""
     spent = ModelResponse(text="ok", usage=Usage(input_tokens=10_000, output_tokens=625))
     model = ScriptedModel({"plan": [spent, spent]})
-    deps = _capped_deps(model, 0.05)
+    worker_dependencies = _capped_deps(model, 0.05)
     request = ModelRequest(stage="plan", model="apac.amazon.nova-pro-v1:0", system=[], messages=[])
-    budgeted = deps.model_for("m1")
+    budgeted = worker_dependencies.model_for("m1")
     budgeted.invoke(request)
     with pytest.raises(ModelError, match="^Request spend budget exhausted\\.$"):
         budgeted.invoke(request)
-    assert len(deps.repos.model_calls.list_by_request("m1")) == 1
+    assert len(worker_dependencies.repositories.model_calls.list_by_request("m1")) == 1
     assert model.invoke(request) is spent  # the refused call never consumed the script
 
 
 def test_deadline_refuses_a_call_once_the_segment_has_run_past_it() -> None:
     model = ScriptedModel({"execute": [ModelResponse(text="never")]})
-    deps = _capped_deps(model, 1.0, request_deadline_seconds=1)
-    deps.segment_started["m1"] = time.monotonic() - 2
+    worker_dependencies = _capped_deps(model, 1.0, request_deadline_seconds=1)
+    worker_dependencies.segment_started["m1"] = time.monotonic() - 2
     request = ModelRequest(
-        stage="execute", model=deps.model_id(Stage.EXECUTE), system=[], messages=[]
+        stage="execute", model=worker_dependencies.model_id(Stage.EXECUTE), system=[], messages=[]
     )
     with pytest.raises(ModelError, match="^Request deadline exceeded\\.$"):
-        deps.model_for("m1").invoke(request)
-    assert deps.repos.model_calls.list_by_request("m1") == []
+        worker_dependencies.model_for("m1").invoke(request)
+    assert worker_dependencies.repositories.model_calls.list_by_request("m1") == []
 
 
 def test_prompt_version_mapping() -> None:
     stages = (Stage.PLAN, Stage.EXECUTE, Stage.COMPRESS, Stage.CITE)
-    assert [prompt_version(s) for s in stages] == ["plan.4", "execute.7", "compress.2", "none"]
+    assert [prompt_version(s) for s in stages] == ["plan.5", "execute.8", "compress.2", "cite.1"]
 
 
 def test_load_prompt_reads_file() -> None:
@@ -333,19 +338,21 @@ def test_a_call_goes_to_the_fallback_while_its_model_is_down_then_back_after_the
     answer = ModelResponse(text="ok", usage=Usage(input_tokens=10, output_tokens=2))
     down = ModelUnavailable("ServiceUnavailableException")
     model = ByModel({"primary": [down, down, answer], "fallback": [answer, answer]})
-    deps = _capped_deps(model, 1.0)
-    deps.routes = {Stage.PLAN: ModelRoute("primary", ("fallback",))}
+    worker_dependencies = _capped_deps(model, 1.0)
+    worker_dependencies.routes = {Stage.PLAN: ModelRoute("primary", ("fallback",))}
     clock = [1000.0]
-    deps.cooldown = ModelCooldown(clock=lambda: clock[0])
+    worker_dependencies.cooldown = ModelCooldown(clock=lambda: clock[0])
     monkeypatch.setattr(calls.time, "sleep", lambda seconds: None)
-    request = ModelRequest(stage="plan", model=deps.model_id(Stage.PLAN), system=[], messages=[])
+    request = ModelRequest(
+        stage="plan", model=worker_dependencies.model_id(Stage.PLAN), system=[], messages=[]
+    )
 
-    assert deps.model_for("m1").invoke(request).text == "ok"
-    deps.model_for("m1").invoke(request)  # in the cooldown: the fallback first
+    assert worker_dependencies.model_for("m1").invoke(request).text == "ok"
+    worker_dependencies.model_for("m1").invoke(request)  # in the cooldown: the fallback first
     clock[0] += 61
-    deps.model_for("m1").invoke(request)
+    worker_dependencies.model_for("m1").invoke(request)
     assert model.sent == ["primary", "primary", "fallback", "fallback", "primary"]
-    records = deps.repos.model_calls.list_by_request("m1")
+    records = worker_dependencies.repositories.model_calls.list_by_request("m1")
     assert [(c.model, c.outcome) for c in records] == [
         ("bedrock/primary", "ERROR"),
         ("bedrock/primary", "ERROR"),
@@ -358,31 +365,35 @@ def test_a_call_goes_to_the_fallback_while_its_model_is_down_then_back_after_the
     denied = ByModel(
         {"kimi": [ModelAccessDenied("not available for this account")], "deepseek": [answer]}
     )
-    deps = _capped_deps(denied, 1.0)
-    deps.routes = {Stage.PLAN: ModelRoute("kimi", ("deepseek",))}
+    worker_dependencies = _capped_deps(denied, 1.0)
+    worker_dependencies.routes = {Stage.PLAN: ModelRoute("kimi", ("deepseek",))}
     request = request.model_copy(update={"model": "kimi"})
-    assert deps.model_for("m2").invoke(request).text == "ok"
+    assert worker_dependencies.model_for("m2").invoke(request).text == "ok"
     assert denied.sent == ["kimi", "deepseek"]
 
 
 def test_a_failure_another_model_cannot_fix_is_not_routed() -> None:
     """A refused answer, an exhausted budget or the last fallback down is raised as it is."""
     model = ByModel({"primary": [ModelRejected("guardrail_intervened")], "fallback": []})
-    deps = make_deps(model)
-    deps.routes = {Stage.EXECUTE: ModelRoute("primary", ("fallback",))}
+    worker_dependencies = make_deps(model)
+    worker_dependencies.routes = {Stage.EXECUTE: ModelRoute("primary", ("fallback",))}
     request = ModelRequest(stage="execute", model="primary", system=[], messages=[])
     with pytest.raises(ModelRejected):
-        deps.model_for("m1").invoke(request)
+        worker_dependencies.model_for("m1").invoke(request)
     assert model.sent == ["primary"]
 
     down = ModelThrottled("ThrottlingException")
     model = ByModel({"primary": [down], "fallback": [down]})
-    deps = make_deps(model)
-    deps.routes = {Stage.EXECUTE: ModelRoute("primary", ("fallback",))}
+    worker_dependencies = make_deps(model)
+    worker_dependencies.routes = {Stage.EXECUTE: ModelRoute("primary", ("fallback",))}
     with pytest.raises(ModelThrottled):
-        deps.model_for("m1").invoke(request)
+        worker_dependencies.model_for("m1").invoke(request)
     assert model.sent == ["primary", "fallback"]
-    assert deps.cooldown.order(["primary", "fallback", "other"]) == ["other", "primary", "fallback"]
+    assert worker_dependencies.cooldown.order(["primary", "fallback", "other"]) == [
+        "other",
+        "primary",
+        "fallback",
+    ]
 
 
 def test_settings_override_the_primary_and_the_fallbacks_of_their_stages() -> None:

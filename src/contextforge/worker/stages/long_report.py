@@ -9,14 +9,16 @@ from contextforge.core.entities.message import Claim, ReportMessage
 from contextforge.core.ids import derived_id, now_iso
 from contextforge.core.storage import deliverable_key
 from contextforge.core.values import ArtifactRef, LocatorKind
-from contextforge.worker.deps import WorkerDeps
+from contextforge.worker.dependencies import WorkerDependencies
 
 LONG_REPORT_CHARS = 1500
 MARKDOWN = "text/markdown"
 ATTACHED = "Full report attached."
 
 
-def with_summary(report: ReportMessage, goal: str, summary: str, deps: WorkerDeps) -> ReportMessage:
+def with_summary(
+    report: ReportMessage, goal: str, summary: str, worker_dependencies: WorkerDependencies
+) -> ReportMessage:
     """``report``, whose content is still its full text, led by ``summary`` and the count of its
     findings and limitations. A full text that fits the chat follows them. A longer one is
     saved whole as a deliverable Artifact first, and the content says it is attached and the
@@ -29,7 +31,7 @@ def with_summary(report: ReportMessage, goal: str, summary: str, deps: WorkerDep
         return report.model_copy(update={"content": _paragraphs(summary, counts, report.content)})
     data = render_markdown(report, goal, summary).encode()
     artifact_id = derived_id(f"{report.request_message_id}:report-deliverable")
-    deps.repos.artifacts.save(
+    worker_dependencies.repositories.artifacts.save(
         Artifact(
             artifact_id=artifact_id,
             user_id=report.user_id,
@@ -38,7 +40,9 @@ def with_summary(report: ReportMessage, goal: str, summary: str, deps: WorkerDep
             name=f"report-{report.request_message_id}.md",
             media_type=MARKDOWN,
             size_bytes=len(data),
-            storage_ref=deps.blobs.put(deliverable_key(report.chat_id, artifact_id), data),
+            storage_ref=worker_dependencies.blobs.put(
+                deliverable_key(report.chat_id, artifact_id), data
+            ),
             status=ArtifactStatus.AVAILABLE,
             index_status=IndexStatus.NOT_INDEXED,
             created_at=now_iso(),

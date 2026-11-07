@@ -12,17 +12,22 @@ from contextforge.core.models.scripted import ScriptedModel
 from contextforge.core.planner import PlannerOutput, read_plan_leniently, with_inferred_dependencies
 from contextforge.core.services.memory import memory_snapshot
 from contextforge.worker.stages.guards import Cancelled
-from contextforge.worker.stages.plan import PlanFailed, clarification_id, plan_gate, plan_stage
+from contextforge.worker.stages.plan import (
+    PlanFailed,
+    clarification_id,
+    create_research_plan,
+    validate_and_save_tasks,
+)
 from tests.helpers import (
     ByModel,
     clarification,
-    initial_brief,
+    create_initial_request_state,
     make_deps,
     seed_chat_with_dataset,
 )
 
 
-def _plan(ids: list[str]) -> dict:
+def _plan_research_tasks(ids: list[str]) -> dict:
     return {
         "kind": "plan",
         "goal": "g",
@@ -60,10 +65,12 @@ def _clarification(q: str) -> dict:
 
 
 def test_plan_then_gate_creates_tasks_in_order() -> None:
-    deps = make_deps(ScriptedModel({"plan": [ModelResponse(structured=_plan(["a2"]))]}))
-    req = seed_chat_with_dataset(deps, chat_id="c1", user_id="u1", dataset_id="a2")
-    brief = initial_brief(req)
-    planned = plan_stage(brief, 0, deps, today=date(2026, 11, 7))
+    worker_dependencies = make_deps(
+        ScriptedModel({"plan": [ModelResponse(structured=_plan_research_tasks(["a2"]))]})
+    )
+    req = seed_chat_with_dataset(worker_dependencies, chat_id="c1", user_id="u1", dataset_id="a2")
+    request_state = create_initial_request_state(req)
+    planned = create_research_plan(request_state, 0, worker_dependencies, today=date(2026, 11, 7))
     assert (
         planned["kind"] == "plan"
         and planned["constraints"] == ["Exclude transfers"]
@@ -71,100 +78,163 @@ def test_plan_then_gate_creates_tasks_in_order() -> None:
     )
     # the fixture request names September and October; the resolver's window is carried on
     assert planned["period"] == {"start": "2026-09-01", "end": "2026-10-31"}
-    entries = plan_gate(brief, planned, deps)
-    tasks = deps.repos.tasks.list_by_request(req.message_id)
+    entries = validate_and_save_tasks(request_state, planned, worker_dependencies)
+    tasks = worker_dependencies.repositories.tasks.list_by_request(req.message_id)
     assert [t.kind for t in tasks] == ["sql_analysis", "reconcile"]
     assert tasks[1].depends_on_task_ids == [tasks[0].task_id]
     assert [e["task_id"] for e in entries] == [t.task_id for t in tasks]
-    assert plan_gate(brief, planned, deps) == entries  # re-run creates nothing new
-    assert len(deps.repos.tasks.list_by_request(req.message_id)) == 2
+    assert (
+        validate_and_save_tasks(request_state, planned, worker_dependencies) == entries
+    )  # re-run creates nothing new
+    assert len(worker_dependencies.repositories.tasks.list_by_request(req.message_id)) == 2
 
 
 def test_gate_rejects_artifact_from_another_chat() -> None:
-    deps = make_deps(ScriptedModel({"plan": [ModelResponse(structured=_plan(["a9"]))]}))
-    req = seed_chat_with_dataset(deps, chat_id="c1", user_id="u1", dataset_id="a2")
-    seed_chat_with_dataset(deps, chat_id="c2", user_id="u1", dataset_id="a9")
-    planned = plan_stage(initial_brief(req), 0, deps)
+    worker_dependencies = make_deps(
+        ScriptedModel({"plan": [ModelResponse(structured=_plan_research_tasks(["a9"]))]})
+    )
+    req = seed_chat_with_dataset(worker_dependencies, chat_id="c1", user_id="u1", dataset_id="a2")
+    seed_chat_with_dataset(worker_dependencies, chat_id="c2", user_id="u1", dataset_id="a9")
+    planned = create_research_plan(create_initial_request_state(req), 0, worker_dependencies)
     with pytest.raises(PlanFailed) as e:
-        plan_gate(initial_brief(req), planned, deps)
-    assert "a9" in e.value.reason and deps.repos.tasks.list_by_request(req.message_id) == []
+        validate_and_save_tasks(create_initial_request_state(req), planned, worker_dependencies)
+    assert (
+        "a9" in e.value.reason
+        and worker_dependencies.repositories.tasks.list_by_request(req.message_id) == []
+    )
 
 
 def test_clarification_writes_one_message_and_pending_payload() -> None:
-    deps = make_deps(
+    worker_dependencies = make_deps(
         ScriptedModel(
             {"plan": [ModelResponse(structured=_clarification("Which accounts are yours?"))] * 3}
         )
     )
-    req = seed_chat_with_dataset(deps, chat_id="c1", user_id="u1", dataset_id="a2")
-    deps.repos.messages.update_request_status("c1", req.message_id, "ACCEPTED", "RUNNING")
-    first = plan_stage(initial_brief(req), 0, deps)
+    req = seed_chat_with_dataset(worker_dependencies, chat_id="c1", user_id="u1", dataset_id="a2")
+    worker_dependencies.repositories.messages.update_request_status(
+        "c1", req.message_id, "ACCEPTED", "RUNNING"
+    )
+    first = create_research_plan(create_initial_request_state(req), 0, worker_dependencies)
     assert first["kind"] == "clarification" and first["pending"]["kind"] == "clarification"
     assert (
         first["pending"]["question"] == "Which accounts are yours?"
         and first["pending"]["next_action"] == "wait"
     )
-    assert deps.repos.messages.get("c1", req.message_id).status == "WAITING_USER"
-    deps.repos.messages.update_request_status("c1", req.message_id, "WAITING_USER", "RUNNING")
-    second = plan_stage(initial_brief(req), 0, deps)  # same attempt re-run = same message id
+    assert (
+        worker_dependencies.repositories.messages.get("c1", req.message_id).status == "WAITING_USER"
+    )
+    worker_dependencies.repositories.messages.update_request_status(
+        "c1", req.message_id, "WAITING_USER", "RUNNING"
+    )
+    second = create_research_plan(
+        create_initial_request_state(req), 0, worker_dependencies
+    )  # same attempt re-run = same message id
     assert second["pending"]["message_id"] == first["pending"]["message_id"]
     assert (
-        len([m for m in deps.repos.messages.list_by_chat("c1") if m.kind == "clarification"]) == 1
+        len(
+            [
+                m
+                for m in worker_dependencies.repositories.messages.list_by_chat("c1")
+                if m.kind == "clarification"
+            ]
+        )
+        == 1
     )
     # A cancel that lands while the planner is answering stops the run before any question is
     # written for that attempt.
-    deps.repos.messages.update_request_status("c1", req.message_id, "WAITING_USER", "RUNNING")
-    deps.model.on_request = lambda _: deps.repos.messages.update_request_status(  # type: ignore[attr-defined]
-        "c1", req.message_id, "RUNNING", "CANCELLED"
+    worker_dependencies.repositories.messages.update_request_status(
+        "c1", req.message_id, "WAITING_USER", "RUNNING"
+    )
+    worker_dependencies.model.on_request = lambda _: (
+        worker_dependencies.repositories.messages.update_request_status(  # type: ignore[attr-defined]
+            "c1", req.message_id, "RUNNING", "CANCELLED"
+        )
     )
     with pytest.raises(Cancelled):
-        plan_stage(initial_brief(req), 1, deps)
-    assert deps.repos.messages.get("c1", clarification_id(req.message_id, 1)) is None
+        create_research_plan(create_initial_request_state(req), 1, worker_dependencies)
+    assert (
+        worker_dependencies.repositories.messages.get("c1", clarification_id(req.message_id, 1))
+        is None
+    )
 
 
 def test_third_question_fails_the_plan() -> None:
-    deps = make_deps(ScriptedModel({"plan": [ModelResponse(structured=_clarification("Again?"))]}))
-    req = seed_chat_with_dataset(deps, chat_id="c1", user_id="u1", dataset_id="a2")
+    worker_dependencies = make_deps(
+        ScriptedModel({"plan": [ModelResponse(structured=_clarification("Again?"))]})
+    )
+    req = seed_chat_with_dataset(worker_dependencies, chat_id="c1", user_id="u1", dataset_id="a2")
     with pytest.raises(PlanFailed):
-        plan_stage(initial_brief(req), 2, deps)
+        create_research_plan(create_initial_request_state(req), 2, worker_dependencies)
 
 
 def test_malformed_planner_output_fails_plainly() -> None:
-    deps = make_deps(ScriptedModel({"plan": [ModelResponse(structured={"kind": "plan"})]}))
-    req = seed_chat_with_dataset(deps, chat_id="c1", user_id="u1", dataset_id="a2")
+    worker_dependencies = make_deps(
+        ScriptedModel({"plan": [ModelResponse(structured={"kind": "plan"})]})
+    )
+    req = seed_chat_with_dataset(worker_dependencies, chat_id="c1", user_id="u1", dataset_id="a2")
     with pytest.raises(PlanFailed):
-        plan_stage(initial_brief(req), 0, deps)
+        create_research_plan(create_initial_request_state(req), 0, worker_dependencies)
 
 
 def test_planner_is_retried_once_with_its_errors() -> None:
-    deps = make_deps(
+    worker_dependencies = make_deps(
         ScriptedModel(
             {
                 "plan": [
                     ModelResponse(structured={"kind": "plan"}),
-                    ModelResponse(structured=_plan(["a2"])),
+                    ModelResponse(structured=_plan_research_tasks(["a2"])),
                 ]
             }
         )
     )
-    req = seed_chat_with_dataset(deps, chat_id="c1", user_id="u1", dataset_id="a2")
-    planned = plan_stage(initial_brief(req), 0, deps)
+    req = seed_chat_with_dataset(worker_dependencies, chat_id="c1", user_id="u1", dataset_id="a2")
+    planned = create_research_plan(create_initial_request_state(req), 0, worker_dependencies)
     assert (
         planned["kind"] == "plan"
-        and len(deps.repos.model_calls.list_by_request(req.message_id)) == 2
+        and len(worker_dependencies.repositories.model_calls.list_by_request(req.message_id)) == 2
     )
 
 
 def test_a_rejected_plan_is_retried_on_the_same_model_not_routed() -> None:
     """F9: a schema failure is the planner's own retry; only availability routes a call."""
     model = ByModel(
-        {"p": [ModelResponse(structured={"kind": "plan"}), ModelResponse(structured=_plan(["a2"]))]}
+        {
+            "p": [
+                ModelResponse(structured={"kind": "plan"}),
+                ModelResponse(structured=_plan_research_tasks(["a2"])),
+            ]
+        }
     )
-    deps = make_deps(model)
-    deps.routes = {Stage.PLAN: ModelRoute("p", ("f",))}
-    req = seed_chat_with_dataset(deps, chat_id="c1", user_id="u1", dataset_id="a2")
-    assert plan_stage(initial_brief(req), 0, deps)["kind"] == "plan"
+    worker_dependencies = make_deps(model)
+    worker_dependencies.routes = {Stage.PLAN: ModelRoute("p", ("f",))}
+    req = seed_chat_with_dataset(worker_dependencies, chat_id="c1", user_id="u1", dataset_id="a2")
+    assert (
+        create_research_plan(create_initial_request_state(req), 0, worker_dependencies)["kind"]
+        == "plan"
+    )
     assert model.sent == ["p", "p"]
+
+
+def test_a_plan_with_an_empty_question_array_runs_without_a_retry() -> None:
+    """Live GPT-OSS returned question: [] on both otherwise valid plan attempts."""
+    answer = {**_plan_research_tasks(["a2"]), "question": []}
+    worker_dependencies = make_deps(ScriptedModel({"plan": [ModelResponse(structured=answer)] * 2}))
+    req = seed_chat_with_dataset(worker_dependencies, chat_id="c1", user_id="u1", dataset_id="a2")
+    request_state = create_initial_request_state(req)
+    planned = create_research_plan(request_state, 0, worker_dependencies)
+    assert len(validate_and_save_tasks(request_state, planned, worker_dependencies)) == 2
+    [call] = worker_dependencies.repositories.model_calls.list_by_request(req.message_id)
+    assert call.metadata["lenient_fixes"] == ["plan question sent as an empty array"]
+    assert answer["question"] == []  # Keep the recorded model output intact.
+
+    # The same malformed question must never become a clarification to the user.
+    invalid = {**_clarification("Which accounts?"), "question": []}
+    worker_dependencies = make_deps(
+        ScriptedModel({"plan": [ModelResponse(structured=invalid)] * 2})
+    )
+    req = seed_chat_with_dataset(worker_dependencies, chat_id="c1", user_id="u1", dataset_id="a2")
+    with pytest.raises(PlanFailed, match="question"):
+        create_research_plan(create_initial_request_state(req), 0, worker_dependencies)
 
 
 def test_the_slips_of_capable_planners_are_read_leniently_and_recorded() -> None:
@@ -174,13 +244,13 @@ def test_the_slips_of_capable_planners_are_read_leniently_and_recorded() -> None
         {"ref": "t1", "goal": "Total by month.", "inputArtifactIds": ["a2"], "dependsOn": []},
         {"ref": "t2", "goal": "Rates news.", "inputArtifactIds": [], "dependsOn": ["t1"]},
     ]
-    answer = {**_plan(["a2"]), "tasks": json.dumps(tasks)}
+    answer = {**_plan_research_tasks(["a2"]), "tasks": json.dumps(tasks)}
     del answer["kind"]
-    deps = make_deps(ScriptedModel({"plan": [ModelResponse(structured=answer)]}))
-    req = seed_chat_with_dataset(deps, chat_id="c1", user_id="u1", dataset_id="a2")
-    planned = plan_stage(initial_brief(req), 0, deps)
+    worker_dependencies = make_deps(ScriptedModel({"plan": [ModelResponse(structured=answer)]}))
+    req = seed_chat_with_dataset(worker_dependencies, chat_id="c1", user_id="u1", dataset_id="a2")
+    planned = create_research_plan(create_initial_request_state(req), 0, worker_dependencies)
     assert [t["kind"] for t in planned["tasks"]] == ["sql_analysis", "web_search"]
-    [call] = deps.repos.model_calls.list_by_request(req.message_id)
+    [call] = worker_dependencies.repositories.model_calls.list_by_request(req.message_id)
     assert call.metadata["lenient_fixes"] == [
         "tasks sent as a JSON string",
         "kind missing: plan",
@@ -199,12 +269,12 @@ def test_a_task_that_works_on_earlier_results_is_made_to_depend_on_them() -> Non
         {"ref": f"t{n}", "kind": "web_search", "goal": goal, "inputArtifactIds": []}
         for n, goal in enumerate(goals, start=1)
     ]
-    answer = {**_plan([]), "tasks": tasks}
-    deps = make_deps(ScriptedModel({"plan": [ModelResponse(structured=answer)]}))
-    req = seed_chat_with_dataset(deps, chat_id="c1", user_id="u1", dataset_id="a2")
-    planned = plan_stage(initial_brief(req), 0, deps)
+    answer = {**_plan_research_tasks([]), "tasks": tasks}
+    worker_dependencies = make_deps(ScriptedModel({"plan": [ModelResponse(structured=answer)]}))
+    req = seed_chat_with_dataset(worker_dependencies, chat_id="c1", user_id="u1", dataset_id="a2")
+    planned = create_research_plan(create_initial_request_state(req), 0, worker_dependencies)
     assert [t["depends_on"] for t in planned["tasks"]] == [[], [], [], ["t1", "t2", "t3"]]
-    [call] = deps.repos.model_calls.list_by_request(req.message_id)
+    [call] = worker_dependencies.repositories.model_calls.list_by_request(req.message_id)
     assert call.metadata["lenient_fixes"] == ["t4 depends on t1, t2, t3"]
 
     unnamed = {**answer, "tasks": [*tasks[:2], {**tasks[3], "goal": "Combine both."}]}
@@ -242,20 +312,23 @@ def test_resolver_turns_the_named_window_into_dates(text, window) -> None:
 
 
 def test_call_budget_stops_the_planner() -> None:
-    deps = make_deps(
-        ScriptedModel({"plan": [ModelResponse(structured=_plan(["a2"]))]}), call_budget=0
+    worker_dependencies = make_deps(
+        ScriptedModel({"plan": [ModelResponse(structured=_plan_research_tasks(["a2"]))]}),
+        call_budget=0,
     )
-    req = seed_chat_with_dataset(deps, chat_id="c1", user_id="u1", dataset_id="a2")
+    req = seed_chat_with_dataset(worker_dependencies, chat_id="c1", user_id="u1", dataset_id="a2")
     with pytest.raises(PlanFailed) as e:
-        plan_stage(initial_brief(req), 0, deps)
+        create_research_plan(create_initial_request_state(req), 0, worker_dependencies)
     assert "budget" in e.value.reason
 
 
 def test_planner_runs_on_the_briefs_memory_snapshot() -> None:
-    deps = make_deps(ScriptedModel({"plan": [ModelResponse(structured=_plan(["a2"]))]}))
+    worker_dependencies = make_deps(
+        ScriptedModel({"plan": [ModelResponse(structured=_plan_research_tasks(["a2"]))]})
+    )
     seen = []
-    deps.model.on_request = seen.append  # type: ignore[attr-defined]
-    req = seed_chat_with_dataset(deps, chat_id="c1", user_id="u1", dataset_id="a2")
+    worker_dependencies.model.on_request = seen.append  # type: ignore[attr-defined]
+    req = seed_chat_with_dataset(worker_dependencies, chat_id="c1", user_id="u1", dataset_id="a2")
     user = User(
         user_id="u1",
         email="local@example.invalid",
@@ -266,14 +339,14 @@ def test_planner_runs_on_the_briefs_memory_snapshot() -> None:
         updated_at="t",
     )
     memory = memory_snapshot(user)
-    brief = {**initial_brief(req), "memory": memory}
-    plan_stage(brief, 0, deps)
+    request_state = {**create_initial_request_state(req), "memory": memory}
+    create_research_plan(request_state, 0, worker_dependencies)
     assert "Quote every figure in INR." in seen[0].system[0]
     assert (
         "today: " in seen[0].messages[0].content
         and "(Europe/London)" in seen[0].messages[0].content
     )
-    [call] = deps.repos.model_calls.list_by_request(req.message_id)
+    [call] = worker_dependencies.repositories.model_calls.list_by_request(req.message_id)
     assert call.context_version.startswith(f"mem:{memory['version']}|")
 
 
@@ -286,7 +359,7 @@ def test_a_web_question_is_never_asked_about_and_a_follow_up_sees_the_earlier_qu
     from contextforge.worker.stages.plan import NO_MORE_QUESTIONS, NO_PERIOD, NOT_ASKED
 
     web_plan = {
-        **_plan([]),
+        **_plan_research_tasks([]),
         "tasks": [
             {"ref": "t1", "kind": "web_search", "goal": "US", "inputArtifactIds": []},
             {"ref": "t2", "kind": "web_search", "goal": "India", "inputArtifactIds": []},
@@ -302,9 +375,9 @@ def test_a_web_question_is_never_asked_about_and_a_follow_up_sees_the_earlier_qu
     )
     seen: list = []
     model.on_request = seen.append
-    deps = make_deps(model)
+    worker_dependencies = make_deps(model)
     earlier, later = "2026-11-07T10:00:00Z", "2026-11-07T11:00:00Z"
-    deps.repos.chats.save(
+    worker_dependencies.repositories.chats.save(
         Chat(
             chat_id="c1",
             user_id="u1",
@@ -346,13 +419,15 @@ def test_a_web_question_is_never_asked_about_and_a_follow_up_sees_the_earlier_qu
             **fields,
         ),
     ):
-        deps.repos.messages.save(message)
-    brief = initial_brief(deps.repos.messages.get("c1", "r1"))
+        worker_dependencies.repositories.messages.save(message)
+    request_state = create_initial_request_state(
+        worker_dependencies.repositories.messages.get("c1", "r1")
+    )
 
-    planned = plan_stage(brief, 0, deps)
+    planned = create_research_plan(request_state, 0, worker_dependencies)
     assert planned["kind"] == "plan" and planned["pending"] is None
     assert planned["assumption"] == NOT_ASKED.format(question="For which period?")
     first = seen[0].messages[0].content
     assert f"period: {NO_PERIOD}" in first and NO_MORE_QUESTIONS in first
     assert f"request: {question}" in first.split("<prior_context>")[1]
-    assert deps.repos.messages.get("c1", "r1").status == "RUNNING"
+    assert worker_dependencies.repositories.messages.get("c1", "r1").status == "RUNNING"

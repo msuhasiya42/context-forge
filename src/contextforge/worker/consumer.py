@@ -10,7 +10,7 @@ from contextforge.core.entities.message import (
 )
 from contextforge.core.queue import WorkMessage
 from contextforge.core.repositories.base import StaleStatusError
-from contextforge.worker.deps import WorkerDeps
+from contextforge.worker.dependencies import WorkerDependencies
 from contextforge.worker.runner import RequestRunner
 
 logger = logging.getLogger(__name__)
@@ -22,8 +22,8 @@ class QueueConsumer:
     """Runs queued starts and resumes on one background thread; ``start`` after ``stop`` runs a
     new thread."""
 
-    def __init__(self, deps: WorkerDeps, runner: RequestRunner) -> None:
-        self.deps, self.runner = deps, runner
+    def __init__(self, worker_dependencies: WorkerDependencies, runner: RequestRunner) -> None:
+        self.worker_dependencies, self.runner = worker_dependencies, runner
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -43,12 +43,12 @@ class QueueConsumer:
             self._fail_running(work)
         finally:
             self._touch_chat(work)
-        self.deps.queue.ack(work)
+        self.worker_dependencies.queue.ack(work)
 
     def run(self) -> None:
         while not self._stop.is_set():
             try:
-                work = self.deps.queue.receive()
+                work = self.worker_dependencies.queue.receive()
                 if work is not None:
                     self.handle(work)
                 else:
@@ -79,7 +79,7 @@ class QueueConsumer:
             self.runner.start(work.chat_id, work.message_id)
             return
         reply = (
-            self.deps.repos.messages.get(work.chat_id, work.reply_message_id)
+            self.worker_dependencies.repositories.messages.get(work.chat_id, work.reply_message_id)
             if work.reply_message_id
             else None
         )
@@ -94,7 +94,7 @@ class QueueConsumer:
 
     def _unclaimed(self, work: WorkMessage) -> bool:
         """True for a start whose request is still ACCEPTED: the run failed before its claim."""
-        request = self.deps.repos.messages.get(work.chat_id, work.message_id)
+        request = self.worker_dependencies.repositories.messages.get(work.chat_id, work.message_id)
         return (
             work.kind == "start"
             and isinstance(request, RequestMessage)
@@ -102,11 +102,11 @@ class QueueConsumer:
         )
 
     def _fail_running(self, work: WorkMessage) -> None:
-        request = self.deps.repos.messages.get(work.chat_id, work.message_id)
+        request = self.worker_dependencies.repositories.messages.get(work.chat_id, work.message_id)
         if not isinstance(request, RequestMessage) or request.status != RequestStatus.RUNNING:
             return
         try:
-            self.deps.repos.messages.update_request_status(
+            self.worker_dependencies.repositories.messages.update_request_status(
                 work.chat_id,
                 work.message_id,
                 RequestStatus.RUNNING,
@@ -119,6 +119,6 @@ class QueueConsumer:
             )
 
     def _touch_chat(self, work: WorkMessage) -> None:
-        request = self.deps.repos.messages.get(work.chat_id, work.message_id)
+        request = self.worker_dependencies.repositories.messages.get(work.chat_id, work.message_id)
         if isinstance(request, RequestMessage):
-            self.deps.touch_chat(work.chat_id, request.user_id)
+            self.worker_dependencies.touch_chat(work.chat_id, request.user_id)

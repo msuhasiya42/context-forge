@@ -54,7 +54,7 @@ class TaskResult(Entity):
     for (live run 1: ``artifactRefs``), so those default to empty rather than fail the task."""
 
     summary: str
-    # What the request brief accumulates; refs are checked against inputArtifactIds by the caller.
+    # Findings accumulated in request state; the caller checks refs against inputArtifactIds.
     facts: list[Fact] = Field(default=[], max_length=MAX_FACTS_PER_RESULT)
     conclusions: list[Conclusion] = Field(default=[], max_length=MAX_CONCLUSIONS_PER_RESULT)
     structured_data: dict[str, Any] = {}

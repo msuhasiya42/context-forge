@@ -54,8 +54,12 @@ def tool_set_hash(tools: list[ToolSpec]) -> str | None:
     """
     if not tools:
         return None
-    specs = [spec.model_dump(by_alias=True) for spec in sorted(tools, key=lambda s: s.name)]
-    canonical = json.dumps(specs, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    tool_definitions = [
+        spec.model_dump(by_alias=True) for spec in sorted(tools, key=lambda s: s.name)
+    ]
+    canonical = json.dumps(
+        tool_definitions, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    )
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 

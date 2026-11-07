@@ -70,7 +70,7 @@ def test_level1_is_idempotent() -> None:
 
 
 def test_repeated_compaction_keeps_tool_call_result_pairs() -> None:
-    # compaction only receives messages; brief fields are not passed and cannot be lost
+    # compaction only receives messages; request state fields are not passed and cannot be lost
     model = ScriptedModel({"compress": [ModelResponse(text="s")] * 3})
     msgs = _turns(12, big=True)
     for _ in range(3):

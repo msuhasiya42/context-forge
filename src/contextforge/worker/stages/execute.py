@@ -2,13 +2,13 @@
 
 The subgraph is the model/tool loop of one task over ``TaskState``. It is compiled without a
 checkpointer, so its transcript is dropped when the task ends (spec 8.6 level 2): what outlives
-it is the Task record and the outcome the workflow folds into the brief.
+it is the Task record and the outcome the workflow folds into the request state.
 """
 
 import json
 import logging
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import partial
 from typing import Any, NotRequired, TypedDict
 
@@ -60,8 +60,9 @@ from contextforge.core.models.errors import ModelError
 from contextforge.core.repositories.base import StaleStatusError
 from contextforge.core.state import Conclusion, Fact, RequestState, TaskState
 from contextforge.core.tools.base import Tool, ToolContext, ToolResult
-from contextforge.worker.brief import load_request
-from contextforge.worker.deps import WorkerDeps
+from contextforge.core.values import LocatorKind
+from contextforge.worker.dependencies import WorkerDependencies
+from contextforge.worker.request_state import load_request
 from contextforge.worker.stages.errors import one_line
 from contextforge.worker.stages.guards import check_not_cancelled
 from contextforge.worker.stages.sources import available_artifacts, source_line
@@ -97,7 +98,7 @@ _NOT_EXECUTED = ToolResult(status="not_executed", error=TOOL_BUDGET_EXHAUSTED)
 
 
 class TaskOutcome(TypedDict):
-    """What ``execute_stage`` returns: plain JSON values, so the workflow can checkpoint it."""
+    """What ``execute_task`` returns: plain JSON values, so the workflow can checkpoint it."""
 
     task_id: str
     # The part of the request the task was to answer; the report names it when unanswered.
@@ -110,14 +111,15 @@ class TaskOutcome(TypedDict):
     uncertainties: list[str]
     # Why the task was SKIPPED or FAILED; the report lists it under uncertainties.
     failure_reason: str | None
+    coverage: NotRequired[dict[str, Any]]
 
 
 @dataclass(frozen=True)
-class TaskRun:
+class TaskContext:
     """What one subgraph run reads and never changes (its runtime context)."""
 
     task: Task
-    brief: RequestState
+    request_state: RequestState
     sources: list[SourceLine]
     # Artifacts the facts of the task's dependencies cite: a comparison task may cite the
     # evidence it compares (cite still checks every excerpt against its snapshot).
@@ -134,50 +136,59 @@ class _Turn:
     artifact_ids: list[str] = field(default_factory=list)
 
 
-def execute_stage(brief: RequestState, task_id: str, deps: WorkerDeps) -> TaskOutcome:
-    """Run one PLANNED Task to COMPLETED, SKIPPED or FAILED, holding a ``deps.semaphore`` slot.
+def execute_task(
+    request_state: RequestState, task_id: str, worker_dependencies: WorkerDependencies
+) -> TaskOutcome:
+    """Run one PLANNED Task to COMPLETED, SKIPPED or FAILED, holding a
+    ``worker_dependencies.semaphore`` slot.
 
     A re-run that finds the Task already finished (a crash between its write and the checkpoint)
     returns the stored outcome. One that finds it RUNNING runs it again as its next attempt: the
     runner's conditional claim lets one run hold a request, so that attempt died in a crash.
     ``Cancelled`` propagates and leaves the Task RUNNING.
     """
-    request_message_id = brief["request_message_id"]
+    request_message_id = request_state["request_message_id"]
     with (
         request_context(request_message_id, task_id),
-        deps.semaphore,
-        deps.tracer.task(brief, task_id),
+        worker_dependencies.semaphore,
+        worker_dependencies.tracer.task(request_state, task_id),
     ):
         try:
-            task = deps.repos.tasks.update_status(
+            task = worker_dependencies.repositories.tasks.update_status(
                 request_message_id, task_id, TaskStatus.PLANNED, TaskStatus.RUNNING
             )
         except StaleStatusError as exc:
             if exc.actual in _FINISHED:
                 logger.info("task already %s; returning its stored outcome", exc.actual)
-                return _outcome(_get_task(deps, request_message_id, task_id))
+                return _build_task_outcome(
+                    _get_task(worker_dependencies, request_message_id, task_id)
+                )
             if exc.actual != TaskStatus.RUNNING:
                 raise
-            task = _next_attempt(_get_task(deps, request_message_id, task_id), deps)
+            task = _next_attempt(
+                _get_task(worker_dependencies, request_message_id, task_id), worker_dependencies
+            )
         logger.info("%s task started, attempt %d", task.kind, task.attempt)
-        return _outcome(_run_to_end(task, brief, deps))
+        return _build_task_outcome(_execute_task_by_kind(task, request_state, worker_dependencies))
 
 
-def build_task_subgraph(
-    deps: WorkerDeps,
-) -> CompiledStateGraph[TaskState, TaskRun, TaskState, TaskState]:
+def build_task_graph(
+    worker_dependencies: WorkerDependencies,
+) -> CompiledStateGraph[TaskState, TaskContext, TaskState, TaskState]:
     """One task's loop: ``call_model``, then ``run_tools`` for as long as the model calls tools."""
-    graph = StateGraph(TaskState, context_schema=TaskRun)
-    graph.add_node("call_model", partial(call_model, deps=deps))
-    graph.add_node("run_tools", partial(run_tools, deps=deps))
+    graph = StateGraph(TaskState, context_schema=TaskContext)
+    graph.add_node("call_model", partial(call_model, worker_dependencies=worker_dependencies))
+    graph.add_node("run_tools", partial(run_tools, worker_dependencies=worker_dependencies))
     graph.add_edge(START, "call_model")
-    graph.add_conditional_edges("call_model", _after_model, ["run_tools", END])
+    graph.add_conditional_edges("call_model", _next_step_after_model, ["run_tools", END])
     graph.add_edge("run_tools", "call_model")
     # False, not None: None would inherit the workflow's checkpointer and save the transcript.
     return graph.compile(checkpointer=False)
 
 
-def call_model(state: TaskState, runtime: Runtime[TaskRun], *, deps: WorkerDeps) -> dict[str, Any]:
+def call_model(
+    task_state: TaskState, runtime: Runtime[TaskContext], *, worker_dependencies: WorkerDependencies
+) -> dict[str, Any]:
     """One execute call: appends the model's tool calls, or sets ``result``, or sets ``error``.
 
     The loop messages are compacted first when they overrun their budget, and a compacted
@@ -185,28 +196,45 @@ def call_model(state: TaskState, runtime: Runtime[TaskRun], *, deps: WorkerDeps)
     call included), which an exhausted budget or a passed deadline is, ends the run as
     ``error``.
     """
-    check_not_cancelled(deps, state["chat_id"], state["request_message_id"])
-    run = runtime.context
-    stop = _stop_reason(state, deps.budgets)
+    check_not_cancelled(
+        worker_dependencies, task_state["chat_id"], task_state["request_message_id"]
+    )
+    task_context = runtime.context
+    limits = _task_budgets(task_context.task.kind, worker_dependencies)
+    stop = _stop_reason(task_state, limits)
+    if task_context.task.kind == TaskKind.WEB_SEARCH and _web_budget_spent(
+        task_state, worker_dependencies
+    ):
+        stop = "request web-tool budget exhausted"
     try:
-        model = deps.model_for(
-            state["request_message_id"], memory_version=run.brief["memory"]["version"]
+        model = worker_dependencies.model_for(
+            task_state["request_message_id"],
+            memory_version=task_context.request_state["memory"]["version"],
         )
         # F7 ruling 1: the call that ends an attempt offers no tools, so return_result is the
         # only tool left and the adapter forces it; the task returns what it has gathered.
-        tools = {} if stop else _allowed_tools(run.task.kind, deps)
-        specs = [tool.spec for tool in tools.values()]
-        built = build_context(_execute_inputs(state, run, specs, deps), deps.budgets)
-        messages = _compacted_messages(state, built, model, deps)
-        response = model.invoke(_model_request(state, built, messages, specs, deps))
+        tools = {} if stop else _allowed_tools(task_context.task.kind, worker_dependencies)
+        tool_definitions = [tool.spec for tool in tools.values()]
+        model_context = build_context(
+            _execute_inputs(task_state, task_context, tool_definitions, worker_dependencies),
+            worker_dependencies.budgets,
+        )
+        messages = _compacted_messages(task_state, model_context, model, worker_dependencies)
+        response = model.invoke(
+            _build_model_request(
+                task_state, model_context, messages, tool_definitions, worker_dependencies
+            )
+        )
     except ModelError as exc:
         logger.warning("execute call failed: %s", exc)
         return {"error": str(exc)}
-    update = _handle_response(response, state, run, deps.budgets, stop)
-    return _with_transcript(update, before=state["messages"], after=messages)
+    update = _handle_response(response, task_state, task_context, limits, stop)
+    return _with_transcript(update, before=task_state["messages"], after=messages)
 
 
-def run_tools(state: TaskState, runtime: Runtime[TaskRun], *, deps: WorkerDeps) -> dict[str, Any]:
+def run_tools(
+    task_state: TaskState, runtime: Runtime[TaskContext], *, worker_dependencies: WorkerDependencies
+) -> dict[str, Any]:
     """Answer every tool call of the last turn with a ToolMessage, failures included.
 
     A repeated call is answered from its earlier result and spends no slot; a call past the cap
@@ -214,20 +242,23 @@ def run_tools(state: TaskState, runtime: Runtime[TaskRun], *, deps: WorkerDeps) 
     as the cap nears, and when ``budgets.no_progress_turns`` of them in a row are reached; the
     call after the last slot or that limit may only return the result (``_stop_reason``).
     """
-    turn = _Turn(made=state["tool_calls_made"], seen=dict(state["seen_calls"]))
-    for call in _requested_calls(state):
-        turn.messages.append(_run_one_call(call, turn, state, runtime.context.task, deps))
-    progressed = turn.made > state["tool_calls_made"]
-    no_progress = 0 if progressed else state["no_progress_turns"] + 1
-    if no_progress == deps.budgets.no_progress_turns:
+    turn = _Turn(made=task_state["tool_calls_made"], seen=dict(task_state["seen_calls"]))
+    limits = _task_budgets(runtime.context.task.kind, worker_dependencies)
+    for call in _requested_calls(task_state):
+        turn.messages.append(
+            _execute_tool_call(call, turn, task_state, runtime.context.task, worker_dependencies)
+        )
+    progressed = turn.made > task_state["tool_calls_made"]
+    no_progress = 0 if progressed else task_state["no_progress_turns"] + 1
+    if no_progress == worker_dependencies.budgets.no_progress_turns:
         logger.warning("%d turns in a row ran no new tool call", no_progress)
     return {
         "messages": [
             *turn.messages,
-            *_nudges(state["tool_calls_made"], turn.made, no_progress, deps.budgets),
+            *_nudges(task_state["tool_calls_made"], turn.made, no_progress, limits),
         ],
         "evidence_artifact_ids": list(
-            dict.fromkeys([*state.get("evidence_artifact_ids", []), *turn.artifact_ids])
+            dict.fromkeys([*task_state.get("evidence_artifact_ids", []), *turn.artifact_ids])
         ),
         "tool_calls_made": turn.made,
         "seen_calls": turn.seen,
@@ -235,28 +266,43 @@ def run_tools(state: TaskState, runtime: Runtime[TaskRun], *, deps: WorkerDeps) 
     }
 
 
-def _run_to_end(task: Task, brief: RequestState, deps: WorkerDeps) -> Task:
+def _execute_task_by_kind(
+    task: Task, request_state: RequestState, worker_dependencies: WorkerDependencies
+) -> Task:
     """The Task as stored after its final transition: FAILED when it has dependencies and none
     completed, whatever the kind (I-2); otherwise what that is depends on its kind.
 
     F7 ruling 2: a task with at least one completed dependency runs, told which of the others
     did not complete and why, so it states the gap instead of the whole answer being lost.
     """
-    results, gaps = _dependencies(task, deps)
+    results, gaps = _load_dependency_results(task, worker_dependencies)
     if gaps and not results:
-        return _settle(deps, task, TaskStatus.FAILED, failure_reason=DEPENDENCY_FAILED)
+        return _finish_task(
+            worker_dependencies, task, TaskStatus.FAILED, failure_reason=DEPENDENCY_FAILED
+        )
     if task.kind in (TaskKind.SQL_ANALYSIS, TaskKind.WEB_SEARCH):
-        return _run_sql_analysis(task, brief, deps, results, gaps)
+        return _run_model_tool_loop(task, request_state, worker_dependencies, results, gaps)
     if task.kind == TaskKind.RECONCILE:
+        if any(
+            ref.locator.kind == LocatorKind.URL
+            for result in results
+            for fact in result.facts
+            for ref in fact.evidence_refs
+        ):
+            # Public-web comparisons synthesize their dependencies through the same
+            # validated model loop, with no tools granted to the reconcile task.
+            return _run_model_tool_loop(task, request_state, worker_dependencies, results, gaps)
         result = reconcile_stub(task, results, gaps)
-        return _settle(deps, task, TaskStatus.COMPLETED, result=result)
-    return _settle(deps, task, TaskStatus.SKIPPED, failure_reason=skipped_reason(task.kind))
+        return _finish_task(worker_dependencies, task, TaskStatus.COMPLETED, result=result)
+    return _finish_task(
+        worker_dependencies, task, TaskStatus.SKIPPED, failure_reason=skipped_reason(task.kind)
+    )
 
 
-def _run_sql_analysis(
+def _run_model_tool_loop(
     task: Task,
-    brief: RequestState,
-    deps: WorkerDeps,
+    request_state: RequestState,
+    worker_dependencies: WorkerDependencies,
     dependencies: list[TaskResult],
     gaps: list[str],
 ) -> Task:
@@ -265,11 +311,11 @@ def _run_sql_analysis(
     The completed dependencies' summaries and the ``gaps`` left by the others form its
     ``<dependencies>`` block.
     """
-    subgraph = build_task_subgraph(deps)
-    run = TaskRun(
+    subgraph = build_task_graph(worker_dependencies)
+    task_context = TaskContext(
         task=task,
-        brief=brief,
-        sources=_task_sources(task, brief["chat_id"], deps),
+        request_state=request_state,
+        sources=_task_sources(task, request_state["chat_id"], worker_dependencies),
         dependency_evidence=[
             ref.artifact_id
             for result in dependencies
@@ -278,26 +324,28 @@ def _run_sql_analysis(
         ],
     )
     dependency_summaries = [*(result.summary for result in dependencies), *gaps]
-    config: RunnableConfig = {"recursion_limit": _recursion_limit(deps.budgets)}
+    config: RunnableConfig = {
+        "recursion_limit": _recursion_limit(_task_budgets(task.kind, worker_dependencies))
+    }
     error = ""
-    attempts = deps.budgets.task_retries + 1
+    attempts = worker_dependencies.budgets.task_retries + 1
     for attempt in range(1, attempts + 1):
         if attempt > 1:
             # ModelCall has no metadata field, so the retry is on record as activity (L-3).
             retry = f"Task retry {attempt - 1} of {attempts - 1}"
-            deps.activity.emit(task.request_message_id, task.task_id, retry)
-        state = _fresh_state(task, brief, dependency_summaries)
-        final = subgraph.invoke(state, config, context=run)
+            worker_dependencies.activity.emit(task.request_message_id, task.task_id, retry)
+        task_state = _create_initial_task_state(task, request_state, dependency_summaries)
+        final = subgraph.invoke(task_state, config, context=task_context)
         if final["result"] is not None:
             result = TaskResult.model_validate(final["result"])
-            return _settle(deps, task, TaskStatus.COMPLETED, result=result)
+            return _finish_task(worker_dependencies, task, TaskStatus.COMPLETED, result=result)
         error = final["error"] or "the task ended without a result"
         logger.warning("attempt %d ended: %s", attempt, error)
-    return _settle(deps, task, TaskStatus.FAILED, failure_reason=error)
+    return _finish_task(worker_dependencies, task, TaskStatus.FAILED, failure_reason=error)
 
 
-def _settle(
-    deps: WorkerDeps,
+def _finish_task(
+    worker_dependencies: WorkerDependencies,
     task: Task,
     status: TaskStatus,
     *,
@@ -306,7 +354,7 @@ def _settle(
 ) -> Task:
     """RUNNING -> ``status``: the Task's final transition."""
     logger.info("task %s %s", status.value, failure_reason or "")
-    return deps.repos.tasks.update_status(
+    return worker_dependencies.repositories.tasks.update_status(
         task.request_message_id,
         task.task_id,
         TaskStatus.RUNNING,
@@ -316,28 +364,32 @@ def _settle(
     )
 
 
-def _next_attempt(task: Task, deps: WorkerDeps) -> Task:
+def _next_attempt(task: Task, worker_dependencies: WorkerDependencies) -> Task:
     """The RUNNING ``task`` saved with ``attempt`` counted up, so the retry is on record."""
     logger.warning("task found RUNNING after attempt %d died; running it again", task.attempt)
     retried = task.model_copy(update={"attempt": task.attempt + 1, "updated_at": now_iso()})
-    deps.repos.tasks.save(retried)
+    worker_dependencies.repositories.tasks.save(retried)
     return retried
 
 
-def _get_task(deps: WorkerDeps, request_message_id: str, task_id: str) -> Task:
-    task = deps.repos.tasks.get(request_message_id, task_id)
+def _get_task(
+    worker_dependencies: WorkerDependencies, request_message_id: str, task_id: str
+) -> Task:
+    task = worker_dependencies.repositories.tasks.get(request_message_id, task_id)
     if task is None:
         raise LookupError(f"no task {task_id} in request {request_message_id}")
     return task
 
 
-def _dependencies(task: Task, deps: WorkerDeps) -> tuple[list[TaskResult], list[str]]:
+def _load_dependency_results(
+    task: Task, worker_dependencies: WorkerDependencies
+) -> tuple[list[TaskResult], list[str]]:
     """The results of the task's completed dependencies, and a gap line for each one that did
     not complete (FAILED, SKIPPED or CANCELLED), both in ``depends_on`` order."""
     results: list[TaskResult] = []
     gaps: list[str] = []
     for task_id in task.depends_on_task_ids:
-        dependency = _get_task(deps, task.request_message_id, task_id)
+        dependency = _get_task(worker_dependencies, task.request_message_id, task_id)
         if dependency.status == TaskStatus.COMPLETED and dependency.result is not None:
             results.append(dependency.result)
         else:
@@ -346,28 +398,33 @@ def _dependencies(task: Task, deps: WorkerDeps) -> tuple[list[TaskResult], list[
 
 
 def _gap(dependency: Task) -> str:
-    """What a dependency that did not complete leaves out, and why, for the dependent's brief.
+    """What a dependency that did not complete leaves out, and why, for the dependent's request
+    state.
     Named by its goal, not its id: the dependent states the gap in words the user reads."""
     reason = dependency.failure_reason or dependency.status.value.lower()
     return f"A dependency did not complete ({reason}); not covered: {dependency.goal}"
 
 
-def _task_sources(task: Task, chat_id: str, deps: WorkerDeps) -> list[SourceLine]:
+def _task_sources(
+    task: Task, chat_id: str, worker_dependencies: WorkerDependencies
+) -> list[SourceLine]:
     """The ``<sources>`` lines of the task's input Artifacts, with each dataset's columns."""
     return [
-        source_line(artifact, deps.blobs)
-        for artifact in available_artifacts(deps.repos.artifacts, chat_id)
+        source_line(artifact, worker_dependencies.blobs)
+        for artifact in available_artifacts(worker_dependencies.repositories.artifacts, chat_id)
         if artifact.artifact_id in task.input_artifact_ids
     ]
 
 
-def _fresh_state(task: Task, brief: RequestState, dependency_summaries: list[str]) -> TaskState:
+def _create_initial_task_state(
+    task: Task, request_state: RequestState, dependency_summaries: list[str]
+) -> TaskState:
     return TaskState(
         task_id=task.task_id,
         request_message_id=task.request_message_id,
-        chat_id=brief["chat_id"],
-        user_id=brief["user_id"],
-        constraints=list(brief["constraints"]),
+        chat_id=request_state["chat_id"],
+        user_id=request_state["user_id"],
+        constraints=list(request_state["constraints"]),
         dependency_summaries=dependency_summaries,
         messages=[],
         result=None,
@@ -389,7 +446,7 @@ def _recursion_limit(budgets: Budgets) -> int:
     return 2 * turns + 1
 
 
-def _outcome(task: Task) -> TaskOutcome:
+def _build_task_outcome(task: Task) -> TaskOutcome:
     """The outcome of a finished Task, read from its stored record."""
     result = task.result
     return TaskOutcome(
@@ -401,6 +458,7 @@ def _outcome(task: Task) -> TaskOutcome:
         conclusions=_brief_conclusions(result) if result else [],
         uncertainties=list(result.uncertainties) if result else [],
         failure_reason=task.failure_reason,
+        coverage=result.coverage if result else {},
     )
 
 
@@ -423,30 +481,33 @@ def _brief_conclusions(result: TaskResult) -> list[Conclusion]:
     ]
 
 
-def _after_model(state: TaskState) -> str:
+def _next_step_after_model(task_state: TaskState) -> str:
     """To ``run_tools`` when the model asked for tools; END once a result or an error is set."""
-    finished = state["result"] is not None or state["error"] is not None
+    finished = task_state["result"] is not None or task_state["error"] is not None
     return END if finished else "run_tools"
 
 
 def _compacted_messages(
-    state: TaskState, built: BuiltContext, model: ModelClient, deps: WorkerDeps
+    task_state: TaskState,
+    model_context: BuiltContext,
+    model: ModelClient,
+    worker_dependencies: WorkerDependencies,
 ) -> list[AnyMessage]:
     """Section 8 fitted into the window that sections 1 to 7 leave (spec 8.6).
 
-    Only the loop messages are passed, so brief fields cannot be lost to compaction. The
+    Only the loop messages are passed, so request state fields cannot be lost to compaction. The
     summary call goes through the request's recording client: it is saved as a ``compress``
     ModelCall and counts against the call budget.
     """
-    budgets = deps.budgets
+    budgets = worker_dependencies.budgets
     return compact(
-        state["messages"],
-        budget_tokens=budgets.messages_budget(built.fixed_tokens),
+        task_state["messages"],
+        budget_tokens=budgets.messages_budget(model_context.fixed_tokens),
         keep_last=budgets.keep_last_messages,
         model=model,
-        memory=built.system[0],  # the builder's first system block is the memory file
-        model_id=deps.model_id(Stage.COMPRESS),
-        task_id=state["task_id"],
+        memory=model_context.system[0],  # the builder's first system block is the memory file
+        model_id=worker_dependencies.model_id(Stage.COMPRESS),
+        task_id=task_state["task_id"],
     )
 
 
@@ -465,53 +526,62 @@ def _with_transcript(
     return {**update, "messages": [RemoveMessage(id=REMOVE_ALL_MESSAGES), *after, *added]}
 
 
-def _model_request(
-    state: TaskState,
-    built: BuiltContext,
+def _build_model_request(
+    task_state: TaskState,
+    model_context: BuiltContext,
     messages: list[AnyMessage],
-    specs: list[ToolSpec],
-    deps: WorkerDeps,
+    tool_definitions: list[ToolSpec],
+    worker_dependencies: WorkerDependencies,
 ) -> ModelRequest:
-    """The execute call: the task brief as the first user turn, then the (compacted) loop."""
+    """The execute call: the task request state as the first user turn, then the (compacted)
+    loop."""
     return ModelRequest(
         stage=Stage.EXECUTE,
-        model=deps.model_id(Stage.EXECUTE),
-        system=built.system,
-        messages=[HumanMessage(built.user_text), *messages],
-        tools=specs,
+        model=worker_dependencies.model_id(Stage.EXECUTE),
+        system=model_context.system,
+        messages=[HumanMessage(model_context.user_text), *messages],
+        tools=tool_definitions,
         output_schema=TaskResult,
-        task_id=state["task_id"],
+        task_id=task_state["task_id"],
     )
 
 
 def _execute_inputs(
-    state: TaskState, run: TaskRun, specs: list[ToolSpec], deps: WorkerDeps
+    task_state: TaskState,
+    task_context: TaskContext,
+    tool_definitions: list[ToolSpec],
+    worker_dependencies: WorkerDependencies,
 ) -> ContextInputs:
-    """Section 8.2 for an execute call: the brief, the task goal, its sources and its tools."""
-    brief = run.brief
+    """Section 8.2 for an execute call: the request state, the task goal, its sources and its
+    tools."""
+    request_state = task_context.request_state
     return ContextInputs(
-        memory=brief["memory"]["text"],
+        memory=request_state["memory"]["text"],
         stage_prompt=load_prompt(prompt_version(Stage.EXECUTE)),
-        chat_id=state["chat_id"],
-        request=load_request(deps.repos.messages, brief["chat_id"], brief["request_message_id"]),
-        preferences=brief["memory"]["preferences"],
-        constraints=[*state["constraints"], f"Task goal: {run.task.goal}"],
-        facts=brief["facts"],
-        open_questions=brief["open_questions"],
-        next_action=brief["next_action"],
-        dependency_summaries=state["dependency_summaries"],
+        chat_id=task_state["chat_id"],
+        request=load_request(
+            worker_dependencies.repositories.messages,
+            request_state["chat_id"],
+            request_state["request_message_id"],
+        ),
+        preferences=request_state["memory"]["preferences"],
+        constraints=[*task_state["constraints"], f"Task goal: {task_context.task.goal}"],
+        facts=request_state["facts"],
+        open_questions=request_state["open_questions"],
+        next_action=request_state["next_action"],
+        dependency_summaries=task_state["dependency_summaries"],
         evidence_slices=[],
-        tools=specs,
-        sources=run.sources,
+        tools=tool_definitions,
+        sources=task_context.sources,
         prior_messages=[],
-        loop_messages=state["messages"],
+        loop_messages=task_state["messages"],
     )
 
 
 def _handle_response(
     response: ModelResponse,
-    state: TaskState,
-    run: TaskRun,
+    task_state: TaskState,
+    task_context: TaskContext,
     budgets: Budgets,
     stop: str | None,
 ) -> dict[str, Any]:
@@ -534,52 +604,56 @@ def _handle_response(
         logger.info("model replied in text, not a result; reminded to call return_result")
         reply = AIMessage(content=response.text or "(empty reply)")
         return {"messages": [reply, HumanMessage(TEXT_IS_NOT_A_RESULT)]}
-    citable = [*state.get("evidence_artifact_ids", []), *run.dependency_evidence]
+    citable = [*task_state.get("evidence_artifact_ids", []), *task_context.dependency_evidence]
     try:
-        result = _parse_result(response, run.task, citable)
+        result = _parse_result(response, task_context.task, citable)
     except ValueError as exc:  # ValidationError is a ValueError
         reason = one_line(exc) if isinstance(exc, ValidationError) else str(exc)
         logger.warning("invalid result: %s", reason)
         return {"error": f"invalid result: {reason}"}
-    if not result.facts and state.get("evidence_artifact_ids") and not _reminded(state):
+    if not result.facts and task_state.get("evidence_artifact_ids") and not _reminded(task_state):
         # Live run 3: the US task read pages, summarised their figures and cited none. One
         # reminder; a second result without facts is accepted as it is.
         logger.info("result has no facts though tools saved evidence; reminded once")
         reply = AIMessage(content=response.text or "(result without facts)")
         return {"messages": [reply, HumanMessage(NO_FACTS)]}
     if stop is not None:
-        note = _stop_note(stop, state, budgets)
+        note = _stop_note(stop, task_state, budgets)
         result = result.model_copy(update={"uncertainties": [*result.uncertainties, note]})
     return {"result": result.model_dump(mode="json")}
 
 
-def _stop_reason(state: TaskState, budgets: Budgets) -> str | None:
+def _stop_reason(task_state: TaskState, budgets: Budgets) -> str | None:
     """Why the attempt's next call may only return its result: every tool call is spent, or
     ``budgets.no_progress_turns`` turns in a row ran none. None while it may still call tools.
 
     The handoff's "seven responses per attempt" is the cap of tool calls plus this last one.
     """
-    if state["tool_calls_made"] >= budgets.tool_calls_per_task:
+    if task_state["tool_calls_made"] >= budgets.tool_calls_per_task:
         return TOOL_BUDGET_EXHAUSTED
-    if state["no_progress_turns"] >= budgets.no_progress_turns:
+    if task_state["no_progress_turns"] >= budgets.no_progress_turns:
         return NO_PROGRESS
     return None
 
 
-def _stop_note(stop: str, state: TaskState, budgets: Budgets) -> str:
+def _stop_note(stop: str, task_state: TaskState, budgets: Budgets) -> str:
     """The uncertainty a result returned at the end of its attempt carries: why it stopped and
     how much it read. A page is any distinct tool result that came back: a search's hits, a
     fetched page, a query's rows."""
-    pages = len(state["seen_calls"])
+    pages = len(task_state["seen_calls"])
     read = f"{pages} page{'' if pages == 1 else 's'} read"
+    if stop == "request web-tool budget exhausted":
+        return f"stopped at the shared request web-tool budget; {read}"
     if stop == TOOL_BUDGET_EXHAUSTED:
         return f"stopped at the tool-call budget; {read}"
     return f"stopped after {budgets.no_progress_turns} turns without progress; {read}"
 
 
-def _reminded(state: TaskState) -> bool:
+def _reminded(task_state: TaskState) -> bool:
     """Whether this attempt already got the no-facts reminder."""
-    return any(isinstance(m, HumanMessage) and m.content == NO_FACTS for m in state["messages"])
+    return any(
+        isinstance(m, HumanMessage) and m.content == NO_FACTS for m in task_state["messages"]
+    )
 
 
 def _ai_message(response: ModelResponse) -> AIMessage:
@@ -605,21 +679,25 @@ def _parse_result(response: ModelResponse, task: Task, produced: list[str]) -> T
 
 
 def _keeping_facts(result: TaskResult, kept: list[int]) -> TaskResult:
-    """``result`` with only its facts at the positions ``kept``; each conclusion points at the
-    facts it rested on in their new positions, and no longer at a dropped one."""
+    """Remap retained facts; withhold conclusions that lose any declared prerequisite."""
     position = {old: new for new, old in enumerate(kept)}
-    conclusions = [
-        conclusion.model_copy(
-            update={
-                "supporting_facts": [
-                    position[i] for i in conclusion.supporting_facts if i in position
-                ]
-            }
-        )
-        for conclusion in result.conclusions
-    ]
+    conclusions = []
+    gaps = list(result.uncertainties)
+    for conclusion in result.conclusions:
+        supporting = [position[i] for i in conclusion.supporting_facts if i in position]
+        if len(supporting) != len(conclusion.supporting_facts):
+            reason = (
+                "required supporting findings did not all pass"
+                if supporting
+                else "no finding it rests on held"
+            )
+            gaps.append(f"unsupported conclusion, {reason}: {conclusion.text[:80]}")
+            continue
+        conclusions.append(conclusion.model_copy(update={"supporting_facts": supporting}))
     facts = [result.facts[i] for i in kept]
-    return result.model_copy(update={"facts": facts, "conclusions": conclusions})
+    return result.model_copy(
+        update={"facts": facts, "conclusions": conclusions, "uncertainties": gaps}
+    )
 
 
 def _is_grounded(fact: ResultFact, input_artifact_ids: list[str]) -> bool:
@@ -628,9 +706,9 @@ def _is_grounded(fact: ResultFact, input_artifact_ids: list[str]) -> bool:
     return bool(refs) and all(ref.artifact_id in input_artifact_ids for ref in refs)
 
 
-def _requested_calls(state: TaskState) -> list[ToolCall]:
+def _requested_calls(task_state: TaskState) -> list[ToolCall]:
     """The tool calls of the turn's AIMessage, back in the model boundary's form."""
-    last = state["messages"][-1] if state["messages"] else None
+    last = task_state["messages"][-1] if task_state["messages"] else None
     if not isinstance(last, AIMessage):
         return []
     return [
@@ -639,8 +717,12 @@ def _requested_calls(state: TaskState) -> list[ToolCall]:
     ]
 
 
-def _run_one_call(
-    call: ToolCall, turn: _Turn, state: TaskState, task: Task, deps: WorkerDeps
+def _execute_tool_call(
+    call: ToolCall,
+    turn: _Turn,
+    task_state: TaskState,
+    task: Task,
+    worker_dependencies: WorkerDependencies,
 ) -> ToolMessage:
     """Answer one call: from an earlier identical ok call, as not run past the cap, or by
     running it. Only a run spends a slot. A failed run is never replayed, so the model can
@@ -649,19 +731,21 @@ def _run_one_call(
     earlier = turn.seen.get(key)
     if earlier is not None:
         logger.info("tool %s repeated; answered from the earlier result", call.name)
-        return _replay(call, key, earlier, [*state["messages"], *turn.messages])
-    if turn.made >= deps.budgets.tool_calls_per_task:
-        return _result_message(call, _NOT_EXECUTED, state, deps)
+        return _replay(call, key, earlier, [*task_state["messages"], *turn.messages])
+    if turn.made >= _task_budgets(task.kind, worker_dependencies).tool_calls_per_task:
+        return _result_message(call, _NOT_EXECUTED, task_state, worker_dependencies)
     turn.made += 1
-    deps.activity.emit(state["request_message_id"], state["task_id"], f"Calling {call.name}")
-    result = _invoke_tool(call, state, task.kind, deps)
-    deps.activity.emit(
-        state["request_message_id"], state["task_id"], f"{call.name}: {result.status}"
+    worker_dependencies.activity.emit(
+        task_state["request_message_id"], task_state["task_id"], f"Calling {call.name}"
+    )
+    result = _invoke_tool(call, task_state, task.kind, worker_dependencies)
+    worker_dependencies.activity.emit(
+        task_state["request_message_id"], task_state["task_id"], f"{call.name}: {result.status}"
     )
     if result.status == "ok":
         turn.artifact_ids.extend(result.artifact_ids)
     logger.info("tool %s returned %s", call.name, result.status)
-    message = _result_message(call, result, state, deps)
+    message = _result_message(call, result, task_state, worker_dependencies)
     if result.status == "ok":
         turn.seen[key] = str(message.content)
     return message
@@ -696,42 +780,78 @@ def _answers(message: BaseMessage, key: str) -> bool:
     return meta.get("status") == "ok" and called == key
 
 
-def _invoke_tool(call: ToolCall, state: TaskState, kind: TaskKind, deps: WorkerDeps) -> ToolResult:
+def _invoke_tool(
+    call: ToolCall, task_state: TaskState, kind: TaskKind, worker_dependencies: WorkerDependencies
+) -> ToolResult:
     """The tool's result; an unknown tool and a tool that raises become error results."""
-    tools = _allowed_tools(kind, deps)
+    tools = _allowed_tools(kind, worker_dependencies)
     tool = tools.get(call.name)
     if tool is None:
         error = f"unknown tool {call.name}; this task may call: {', '.join(tools) or 'none'}"
         return ToolResult(status="error", error=error, error_class="code")
     context = ToolContext(
-        chat_id=state["chat_id"],
-        user_id=state["user_id"],
-        request_message_id=state["request_message_id"],
-        task_id=state["task_id"],
+        chat_id=task_state["chat_id"],
+        user_id=task_state["user_id"],
+        request_message_id=task_state["request_message_id"],
+        task_id=task_state["task_id"],
         tool_call_id=call.id,
     )
     try:
+        if call.name in {"web_search", "fetch_url"}:
+            count = worker_dependencies.repositories.messages.reserve_web_tool_call(
+                task_state["chat_id"],
+                task_state["request_message_id"],
+                worker_dependencies.budgets.web_tool_call_budget,
+            )
+            if count is None:
+                return ToolResult(
+                    status="not_executed",
+                    error="Request web-tool budget exhausted; return the evidence gathered so far.",
+                )
         return tool.run(call.arguments, context)
     except Exception as exc:  # a failing tool is a result the model sees, not a crashed task
         logger.warning("tool %s raised: %s", call.name, exc)
         return ToolResult(status="error", error=str(exc), error_class="system", retryable=True)
 
 
-def _allowed_tools(kind: TaskKind, deps: WorkerDeps) -> dict[str, Tool]:
+def _web_budget_spent(task_state: TaskState, worker_dependencies: WorkerDependencies) -> bool:
+    request = load_request(
+        worker_dependencies.repositories.messages,
+        task_state["chat_id"],
+        task_state["request_message_id"],
+    )
+    return request.web_tool_calls >= worker_dependencies.budgets.web_tool_call_budget
+
+
+def _task_budgets(kind: TaskKind, worker_dependencies: WorkerDependencies) -> Budgets:
+    if kind == TaskKind.WEB_SEARCH and worker_dependencies.settings is not None:
+        return replace(
+            worker_dependencies.budgets,
+            tool_calls_per_task=worker_dependencies.settings.web_tool_calls_per_task,
+        )
+    return worker_dependencies.budgets
+
+
+def _allowed_tools(kind: TaskKind, worker_dependencies: WorkerDependencies) -> dict[str, Tool]:
     return {
-        name: deps.tools[name] for name in TOOL_NAMES_BY_KIND.get(kind, ()) if name in deps.tools
+        name: worker_dependencies.tools[name]
+        for name in TOOL_NAMES_BY_KIND.get(kind, ())
+        if name in worker_dependencies.tools
     }
 
 
 def _result_message(
-    call: ToolCall, result: ToolResult, state: TaskState, deps: WorkerDeps
+    call: ToolCall,
+    result: ToolResult,
+    task_state: TaskState,
+    worker_dependencies: WorkerDependencies,
 ) -> ToolMessage:
     """Rows as the shaping stub plus the kept rows as JSON; a failure as its JSON envelope."""
     if result.status != "ok":
         return _tool_message(call, _error_content(result), status=result.status)
     if result.rows is None:
         return _tool_message(call, result.text or "", status="ok", artifact_id=_saved(result))
-    shaped = _shape_rows(call, result.rows, state, deps)
+    shaped = _shape_rows(call, result.rows, task_state, worker_dependencies)
     content = f"{shaped.text}\n{json.dumps(shaped.rows, sort_keys=True)}"
     return _tool_message(
         call,
@@ -749,19 +869,22 @@ def _saved(result: ToolResult) -> str | None:
 
 
 def _shape_rows(
-    call: ToolCall, rows: list[dict[str, Any]], state: TaskState, deps: WorkerDeps
+    call: ToolCall,
+    rows: list[dict[str, Any]],
+    task_state: TaskState,
+    worker_dependencies: WorkerDependencies,
 ) -> ProcessedRows:
     """Cap and shape ``rows``; all of them go to a raw_result Artifact when any are cut."""
-    budgets = deps.budgets
+    budgets = worker_dependencies.budgets
     return process_rows(
         rows,
         cap=budgets.tool_result_row_cap,
-        artifacts=deps.repos.artifacts,
-        blobs=deps.blobs,
-        chat_id=state["chat_id"],
-        user_id=state["user_id"],
+        artifacts=worker_dependencies.repositories.artifacts,
+        blobs=worker_dependencies.blobs,
+        chat_id=task_state["chat_id"],
+        user_id=task_state["user_id"],
         name=f"{call.name} result {call.id}",
-        artifact_id=raw_result_id(state["task_id"], call.id),
+        artifact_id=raw_result_id(task_state["task_id"], call.id),
         column_cap=budgets.column_cap,
         cell_char_cap=budgets.cell_char_cap,
     )

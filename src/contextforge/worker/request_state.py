@@ -1,4 +1,4 @@
-"""The request working brief at the start of a run, and the request Message it starts from."""
+"""The request state at the start of a run, and the request Message it starts from."""
 
 from contextforge.core.entities.message import RequestMessage
 from contextforge.core.repositories.base import MessageRepository
@@ -14,8 +14,8 @@ def load_request(messages: MessageRepository, chat_id: str, message_id: str) -> 
     return message
 
 
-def initial_brief(request: RequestMessage, memory: MemorySnapshot) -> RequestState:
-    """Identity from ``request`` and the user's ``memory`` snapshot; every other brief field
+def create_initial_request_state(request: RequestMessage, memory: MemorySnapshot) -> RequestState:
+    """Identity from ``request`` and the user's ``memory`` snapshot; every other request state field
     empty until the plan stage fills it."""
     return RequestState(
         request_message_id=request.message_id,

@@ -24,8 +24,8 @@ from contextforge.core.settings import Settings
 from contextforge.infra.bedrock import BedrockModel, converse_payload, nova_schema, parse_response
 from contextforge.infra.runtime import build_worker
 from contextforge.worker import calls
-from contextforge.worker.stages.plan import plan_stage
-from contextforge.worker.workflow import initial_brief_from_repo
+from contextforge.worker.stages.plan import create_research_plan
+from contextforge.worker.workflow import load_initial_request_state
 from tests.helpers import make_deps, seed_chat_with_dataset, six_task_plan
 
 
@@ -224,15 +224,15 @@ def test_a_timeout_is_retried_once_and_each_attempt_recorded(
                 raise failure(endpoint_url="https://bedrock-runtime.example")
             return client.converse(**payload)
 
-    deps = make_deps(BedrockModel(TimesOutOnce()))
-    deps.settings = Settings(_env_file=None, model_retries=1)
+    worker_dependencies = make_deps(BedrockModel(TimesOutOnce()))
+    worker_dependencies.settings = Settings(_env_file=None, model_retries=1)
     monkeypatch.setattr(calls.time, "sleep", lambda seconds: None)
     plain = _execute_request().model_copy(update={"output_schema": None})
     with stubber:
-        assert deps.model_for("r1").invoke(plain).text == "done"
-    failed, completed = deps.repos.model_calls.list_by_request("r1")
+        assert worker_dependencies.model_for("r1").invoke(plain).text == "done"
+    failed, completed = worker_dependencies.repositories.model_calls.list_by_request("r1")
     assert (failed.outcome, completed.outcome) == (outcome, "COMPLETED")
-    reserve = deps.settings.call_reserve_usd
+    reserve = worker_dependencies.settings.call_reserve_usd
     assert failed.estimated_cost_usd == (reserve if charged_the_reserve else 0.0)
 
 
@@ -265,15 +265,24 @@ def test_a_malformed_planner_stop_is_retried_once_and_the_plan_completes(monkeyp
     plan = {"toolUse": {"toolUseId": "r", "name": "return_result", "input": six_task_plan()}}
     stubber.add_response("converse", _reply([], "malformed_tool_use"))
     stubber.add_response("converse", _reply([plan], "tool_use"))
-    deps = make_deps(BedrockModel(client))
-    deps.settings = Settings(_env_file=None, model_retries=1)
+    worker_dependencies = make_deps(BedrockModel(client))
+    worker_dependencies.settings = Settings(_env_file=None, model_retries=1)
     monkeypatch.setattr(calls.time, "sleep", lambda seconds: None)
-    request = seed_chat_with_dataset(deps, chat_id="c1", user_id="u1", dataset_id="a2")
+    request = seed_chat_with_dataset(
+        worker_dependencies, chat_id="c1", user_id="u1", dataset_id="a2"
+    )
     with stubber:
-        planned = plan_stage(initial_brief_from_repo(deps, "c1", request.message_id), 0, deps)
+        planned = create_research_plan(
+            load_initial_request_state(worker_dependencies, "c1", request.message_id),
+            0,
+            worker_dependencies,
+        )
     assert planned["kind"] == "plan" and len(planned["tasks"]) == 6
-    outcomes = [c.outcome for c in deps.repos.model_calls.list_by_request(request.message_id)]
-    assert sorted(outcomes) == ["COMPLETED", "ERROR"]
+    task_outcomes = [
+        c.outcome
+        for c in worker_dependencies.repositories.model_calls.list_by_request(request.message_id)
+    ]
+    assert sorted(task_outcomes) == ["COMPLETED", "ERROR"]
 
 
 def test_unusual_responses_and_schemas_become_model_errors_not_raw_exceptions() -> None:
@@ -381,7 +390,7 @@ def test_a_reasoning_block_before_the_answer_is_counted_and_the_output_path_reco
     as_tool = {"toolUse": {"toolUseId": "r", "name": "return_result", "input": six_task_plan()}}
     as_text = {"text": "Here is the plan:\n" + json.dumps(six_task_plan())}
     runtime = _canned_runtime(_reply([thinking, as_tool], "tool_use"), _reply([thinking, as_text]))
-    deps = make_deps(BedrockModel(runtime))
+    worker_dependencies = make_deps(BedrockModel(runtime))
     request = ModelRequest(
         stage="plan",
         model="openai.gpt-oss-120b-1:0",
@@ -389,9 +398,9 @@ def test_a_reasoning_block_before_the_answer_is_counted_and_the_output_path_reco
         messages=[HumanMessage("Compare")],
         output_schema=PlannerOutput,
     )
-    model = deps.model_for("r1")
+    model = worker_dependencies.model_for("r1")
     assert model.invoke(request).structured == six_task_plan()
     assert model.invoke(request).structured == six_task_plan()
-    by_tool, by_text = deps.repos.model_calls.list_by_request("r1")
+    by_tool, by_text = worker_dependencies.repositories.model_calls.list_by_request("r1")
     assert by_tool.metadata == {"output_path": "tool", "reasoning_blocks": 1}
     assert by_text.metadata == {"output_path": "text", "reasoning_blocks": 1}

@@ -28,6 +28,14 @@ class StaleStatusError(Exception):
 
 
 class MessageRepository(Protocol):
+    def reserve_web_tool_call(self, chat_id: str, message_id: str, limit: int) -> int | None:
+        """Atomically consume one web slot. Return the new count, or None at the limit.
+
+        Admissions are never refunded: even a failed or ambiguously dispatched tool spends
+        its slot. A missing request raises LookupError. No limit is stored on the entity.
+        """
+        ...
+
     def save(self, message: Message) -> None: ...
 
     def get(self, chat_id: str, message_id: str) -> Message | None: ...

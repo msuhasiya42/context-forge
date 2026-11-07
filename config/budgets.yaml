@@ -12,6 +12,8 @@ cellCharCap: 200
 
 # Run limits.
 callBudget: 50
+# Search and fetch combined across the request, including failed attempts and resumes.
+webToolCallBudget: 50
 tasksInFlight: 5
 toolCallsPerTask: 6
 taskRetries: 1

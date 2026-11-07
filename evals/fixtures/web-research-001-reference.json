@@ -1,0 +1,123 @@
+{
+  "caseId": "web-research-001",
+  "referenceStatus": "manually_adjudicated_selected_claims",
+  "cutoff": "2026-11-07",
+  "completeHttpReplayFixture": false,
+  "engineRunStatus": "not_run",
+  "maxCombinedWebToolCalls": 50,
+  "baseline": {
+    "url": "https://account.box.com/notes/2572723427786",
+    "fileId": "2572723427786",
+    "fileVersionId": "2855611403786",
+    "sha1": "482ad5416f427565a7d5ba604db93ed733c9e8f2",
+    "originalPromptAvailable": false
+  },
+  "facts": [
+    {
+      "id": "uber-unit-cost",
+      "url": "https://www.uber.com/us/en/blog/efficient-software-factory/",
+      "publicationDate": "2026-08-27",
+      "values": {"costPerSessionReductionPercent": 52, "costPer1000RequestsReductionPercentApprox": 34},
+      "qualifiers": ["company_reported", "model_held_constant", "different_peak_baselines", "endpoint_wording_ambiguous"],
+      "forbiddenInterpretations": ["52_percent_lower_total_company_spend", "52_percent_lower_cost_per_success_proven"]
+    },
+    {
+      "id": "manus-cache-price",
+      "url": "https://manus.im/blog/Context-Engineering-for-AI-Agents-Lessons-from-Building-Manus",
+      "publicationDate": "2025-07-18",
+      "values": {"inputOutputTokenRatioApprox": 100, "historicalInputPriceRatio": 10},
+      "qualifiers": ["historical_example", "cached_input_unit_price"],
+      "forbiddenInterpretations": ["10_times_lower_total_agent_cost_measured", "current_model_price_verified"]
+    },
+    {
+      "id": "cursor-speed",
+      "url": "https://fireworks.ai/customers/cursor-fast-apply-speculative-decoding",
+      "publicationDate": "2024-06-23",
+      "values": {"tokensPerSecondApprox": 1000, "speedVsVanillaLlamaApprox": 13, "speedVsPriorGpt4DeploymentApprox": 9},
+      "qualifiers": ["participant_report", "edit_application_throughput"],
+      "forbiddenInterpretations": ["13_times_lower_total_cost", "9_times_faster_entire_development_workflow"]
+    },
+    {
+      "id": "intercom-model-eval",
+      "url": "https://openai.com/index/intercom/",
+      "publicationDate": "2025-07-30",
+      "values": {"evaluationCostReductionPercent": 20},
+      "qualifiers": ["provider_customer_case_study", "gpt_4_1_vs_gpt_4o", "evaluation_specific"],
+      "forbiddenInterpretations": ["20_percent_lower_all_fin_production_cost_proven"]
+    },
+    {
+      "id": "tool-loading-and-ptc",
+      "url": "https://www.anthropic.com/research/advanced-tool-use",
+      "publicationDate": "2025-11-24",
+      "values": {"publisherToolSearchReductionPercent": 85, "toolContextBeforeApprox": 77000, "toolContextAfterApprox": 8700, "ptcBeforeTokens": 43588, "ptcAfterTokens": 27297, "publisherPtcReductionPercent": 37},
+      "qualifiers": ["internal_examples", "tool_search_label_and_rounded_counts_not_exactly_consistent"],
+      "forbiddenInterpretations": ["85_percent_is_exact_reduction_from_77000_to_8700", "37_percent_total_company_spend_reduction"]
+    },
+    {
+      "id": "code-execution-example",
+      "url": "https://www.anthropic.com/research/code-execution-with-mcp",
+      "publicationDate": "2025-11-04",
+      "values": {"beforeTokens": 150000, "afterTokens": 2000, "reductionPercentApprox": 98.7},
+      "qualifiers": ["illustrative_tool_discovery_loading_example"],
+      "forbiddenInterpretations": ["98_7_percent_saving_for_every_mcp_workflow"]
+    },
+    {
+      "id": "context-editing",
+      "url": "https://claude.com/resources/articles/context-management",
+      "values": {"evaluationTurns": 100, "tokenReductionPercent": 84},
+      "qualifiers": ["vendor_internal_web_search_evaluation"],
+      "forbiddenInterpretations": ["84_percent_lower_cost_for_all_agent_tasks"]
+    },
+    {
+      "id": "retrieval-failures",
+      "url": "https://www.anthropic.com/research/contextual-retrieval",
+      "publicationDate": "2024-09-19",
+      "values": {"beforeFailurePercent": 5.7, "afterFailurePercent": 1.9, "relativeFailureReductionPercentApprox": 67, "finalTopK": 20},
+      "qualifiers": ["contextual_embeddings_and_bm25_and_reranking", "retrieval_metric"],
+      "forbiddenInterpretations": ["67_percent_fewer_hallucinations", "same_result_proven_at_top_5"]
+    },
+    {
+      "id": "multi-agent-evaluation",
+      "url": "https://www.anthropic.com/research/multi-agent-research-system",
+      "publicationDate": "2025-06-13",
+      "values": {"internalPerformanceUpliftPercent": 90.2, "multiAgentTokensVsChatApprox": 15, "singleAgentTokensVsChatApprox": 4},
+      "qualifiers": ["vendor_internal_research_evaluation", "opus_4_lead_sonnet_4_workers"],
+      "forbiddenInterpretations": ["90_2_percent_absolute_accuracy", "15_times_single_agent_token_use"]
+    },
+    {
+      "id": "plan-cache-paper",
+      "url": "https://arxiv.org/html/2506.14852v2",
+      "publicationDate": "2026-01-26",
+      "values": {"averageCostReductionPercent": 50.31, "averageLatencyReductionPercent": 27.28, "retainedRelativePerformancePercent": 96.61},
+      "qualifiers": ["paper_benchmark", "relative_to_accuracy_optimal_baseline"],
+      "forbiddenInterpretations": ["96_61_percent_absolute_answer_accuracy", "same_savings_guaranteed_in_production"]
+    },
+    {
+      "id": "current-prompt-cache-capability",
+      "url": "https://developers.openai.com/api/docs/guides/prompt-caching",
+      "values": {"advertisedMaxCachedInputDiscountPercent": 95},
+      "qualifiers": ["rolling_documentation", "model_dependent", "accessed_2026_11_07"],
+      "forbiddenInterpretations": ["95_percent_whole_task_savings_guaranteed", "older_90_percent_guidance_proven_fabricated"]
+    },
+    {
+      "id": "batch-capability",
+      "url": "https://developers.openai.com/api/docs/guides/batch",
+      "values": {"discountPercent": 50, "completionWindowHours": 24},
+      "qualifiers": ["supported_api_workloads", "asynchronous_service_capability"],
+      "forbiddenInterpretations": ["immediate_interactive_response_guaranteed"]
+    }
+  ],
+  "illustrativeArithmetic": {
+    "measuredProductionResult": false,
+    "cacheReadFraction": 0.8,
+    "cachedToUncachedUnitPriceRatio": 0.1,
+    "relativeInputCost": 0.28,
+    "inputCostReductionPercent": 72
+  },
+  "gradingNotes": [
+    "Material claims require entailment review; numeric matching alone is insufficient.",
+    "Equivalent valid source-backed findings are acceptable; reference wording is not required.",
+    "Reconstructed prompt and reference answer stay outside the agent context during evaluation.",
+    "These selected claims are not an exhaustive audit of the Box report."
+  ]
+}

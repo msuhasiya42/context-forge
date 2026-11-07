@@ -5,9 +5,13 @@ from pydantic import ValidationError
 from contextforge.core.planner import PlannedTask, PlannerOutput
 
 
-def _task(ref: str, deps: list[str] | None = None) -> PlannedTask:
+def _task(ref: str, worker_dependencies: list[str] | None = None) -> PlannedTask:
     return PlannedTask(
-        ref=ref, kind="sql_analysis", goal="g", input_artifact_ids=["a2"], depends_on=deps or []
+        ref=ref,
+        kind="sql_analysis",
+        goal="g",
+        input_artifact_ids=["a2"],
+        depends_on=worker_dependencies or [],
     )
 
 

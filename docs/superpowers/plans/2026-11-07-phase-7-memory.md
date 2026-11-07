@@ -25,7 +25,7 @@
 - Concurrent updates need revision checks: a preferences or instructions update is one atomic merge; record writes are conditional on `revision` (system-design 5).
 - The planner's prior context is the claims of the chat's last two reports, plus the constraints carried from the newest with source and date; the planner may drop one only with a stated reason (implementation-plan 8.2 row 8; system-design 5, "Constraints outlive a request").
 - No network, AWS or paid model call in tests. The DynamoDB adapters for `users` and `memories` are phase 10's.
-- Shared files touched additively: `core/repositories/memory.py` (`Repositories.users`, `Repositories.memories`), `worker/deps.py` (`memory_policy`; `model_for` gains a required `memory_version`), `tests/helpers.py`. New limits go in a new `config/memory.yaml`; `config/budgets.yaml` is not touched.
+- Shared files touched additively: `core/repositories/memory.py` (`Repositories.users`, `Repositories.memories`), `worker/dependencies.py` (`memory_policy`; `model_for` gains a required `memory_version`), `tests/helpers.py`. New limits go in a new `config/memory.yaml`; `config/budgets.yaml` is not touched.
 - Phases 2, 3 and 4 changed files this plan names (model wiring, the cite stage, scripted test scripts, the API). Read each file before editing it. Workflow tests below use the phase-1 script shape; after phase 3 they also script the cite responses, the way phase 3's own workflow tests do.
 
 ## Review Focus
@@ -59,17 +59,17 @@ src/contextforge/core/planner.py                + ConstraintDrop, PlannerOutput.
 src/contextforge/core/context/builder.py        + ContextInputs.carried_constraints, rendered in prior_context (Task 5)
 src/contextforge/core/context/prompts.py        plan stage -> plan.2 (Task 5)
 src/contextforge/core/ids.py                    + plus_days (Task 6)
-src/contextforge/worker/deps.py                 + memory_policy; model_for(..., *, memory_version) (Task 4)
-src/contextforge/worker/brief.py                + load_memory; initial_brief(request, memory) (Tasks 4, 5)
+src/contextforge/worker/dependencies.py                 + memory_policy; model_for(..., *, memory_version) (Task 4)
+src/contextforge/worker/request_state.py                + load_memory; create_initial_request_state(request, memory) (Tasks 4, 5)
 src/contextforge/worker/workflow.py             load_brief reads memory; answers and carried constraints keep their origin (Tasks 4, 5)
 src/contextforge/worker/stages/plan.py          memory, preferences, timezone from the brief; prior reports; carried and dropped (Tasks 4, 5)
 src/contextforge/worker/stages/prior.py         prior_reports, carried_constraints, apply_drops (Task 5)
 src/contextforge/worker/stages/execute.py       memory, preferences and memory version from the brief (Task 4)
-src/contextforge/worker/stages/cite.py          phase 3's cite call: memory and version from the brief (Task 4)
+src/contextforge/worker/stages/citation_checks.py          phase 3's cite call: memory and version from the brief (Task 4)
 src/contextforge/worker/stages/report.py        report date in the user's timezone (Task 4); constraint origins and drops (Task 5); promotion (Task 6)
 src/contextforge/worker/stages/promote.py       promote_completed_request (Task 6)
 src/contextforge/api/…                          phase 4's E14 handlers call get_me / patch_me (Task 1)
-tests/helpers.py                                + seed_user, memory_record, initial_brief(memory=None), sqlite_saver, reply_to, claim, seed_report, make_deps(auto_promote=)
+tests/helpers.py                                + seed_user, memory_record, create_initial_request_state(memory=None), sqlite_saver, reply_to, claim, seed_report, make_deps(auto_promote=)
 tests/test_me.py, test_agent_memory.py, test_memory_section.py, test_memory_in_calls.py,
 tests/test_constraints_across_requests.py, test_promotion_gate.py
 ```
@@ -93,7 +93,7 @@ tests/test_constraints_across_requests.py, test_promotion_gate.py
   - `users.MePatch(Entity)`: `preferences: PreferencesPatch | None = None`, `instructions: str | None = Field(None, max_length=INSTRUCTIONS_MAX_CHARS)`. A `mode="before"` validator normalises instructions (`\r\n` to `\n`, then strip); an after-validator refuses text where `contains_credential` is true; a model validator requires at least one field. It is both the route's body type and the service's input, so the rules live in `core` and FastAPI enforces them at the edge.
   - `users.patch_me(repos: Repositories, *, user_id: str, patch: MePatch) -> User`: `get_user` (so an unknown user is `NotFound`), then one `update_preferences_and_instructions` with `patch.preferences.model_dump(exclude_none=True)` (None when absent) and `patch.instructions`. The read side of E14 stays phase 4's `get_user`; there is no second getter.
   - `routes/me.py`: `PATCH /me` with body `MePatch`, the user from `UserIdDep` (never the body), returns 200 `User`.
-  - `tests/helpers.seed_user(deps: WorkerDeps, *, user_id: str, instructions: str | None = None, preferences: dict[str, str] | None = None) -> User`: saves through `deps.repos.users.save`, bypassing `MePatch`, so a test can store a value validation would refuse.
+  - `tests/helpers.seed_user(deps: WorkerDependencies, *, user_id: str, instructions: str | None = None, preferences: dict[str, str] | None = None) -> User`: saves through `deps.repos.users.save`, bypassing `MePatch`, so a test can store a value validation would refuse.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -113,18 +113,18 @@ from tests.api_support import api_client
 INSTRUCTION = "Always exclude transfers unless I say otherwise"
 
 
-def _patch(repos: Repositories, body: dict) -> User:
-    return patch_me(repos, user_id="u1", patch=MePatch.model_validate(body))
+def _patch(repositories: Repositories, body: dict) -> User:
+    return patch_me(repositories, user_id="u1", patch=MePatch.model_validate(body))
 
 
 def test_patch_merges_preferences_and_replaces_instructions() -> None:
-    repos = Repositories.in_memory()
-    ensure_user(repos, user_id="u1", email="u1@example.com")
-    _patch(repos, {"preferences": {"currency": "INR", "timezone": "Asia/Kolkata"}})
-    user = _patch(repos, {"preferences": {"currency": "USD"}, "instructions": f"  {INSTRUCTION}\r\n"})
+    repositories = Repositories.in_memory()
+    ensure_user(repositories, user_id="u1", email="u1@example.com")
+    _patch(repositories, {"preferences": {"currency": "INR", "timezone": "Asia/Kolkata"}})
+    user = _patch(repositories, {"preferences": {"currency": "USD"}, "instructions": f"  {INSTRUCTION}\r\n"})
     assert user.preferences == {"currency": "USD", "timezone": "Asia/Kolkata"}
     assert user.instructions == INSTRUCTION
-    cleared = _patch(repos, {"instructions": ""})
+    cleared = _patch(repositories, {"instructions": ""})
     assert cleared.instructions is None and cleared.preferences == user.preferences
 
 
@@ -393,19 +393,19 @@ git commit -m "feat: memory section with instructions, capped learned records an
 ### Task 4: Memory in every call: the request-start snapshot, preferences and timezone
 
 **Files:**
-- Modify: `src/contextforge/core/state.py` (`RequestState.memory`), `src/contextforge/worker/deps.py`, `src/contextforge/worker/brief.py`, `src/contextforge/worker/workflow.py` (`initial_brief_from_repo`), `src/contextforge/worker/stages/plan.py`, `src/contextforge/worker/stages/execute.py`, `src/contextforge/worker/stages/cite.py` (phase 3's model call), `src/contextforge/worker/stages/report.py` (`_constraints` date), `tests/helpers.py` (`initial_brief`, `sqlite_saver`, `reply_to`), `tests/test_runner.py` (use `sqlite_saver` and `reply_to` instead of its private `_saver` and `_reply`)
+- Modify: `src/contextforge/core/state.py` (`RequestState.memory`), `src/contextforge/worker/dependencies.py`, `src/contextforge/worker/request_state.py`, `src/contextforge/worker/workflow.py` (`load_initial_request_state`), `src/contextforge/worker/stages/plan.py`, `src/contextforge/worker/stages/execute.py`, `src/contextforge/worker/stages/citation_checks.py` (phase 3's model call), `src/contextforge/worker/stages/report.py` (`_constraints` date), `tests/helpers.py` (`create_initial_request_state`, `sqlite_saver`, `reply_to`), `tests/test_runner.py` (use `sqlite_saver` and `reply_to` instead of its private `_saver` and `_reply`)
 - Test: `tests/test_memory_in_calls.py`
 
 **Interfaces:**
 - Consumes: Task 1 `UserRepository`, `user_timezone`; Task 2 `AgentMemoryRepository`, `MemoryPolicy`, `load_memory_policy`; Task 3 `build_memory_snapshot`, `MemorySnapshot`; `load_prompt`.
 - Produces:
   - `RequestState.memory: MemorySnapshot`. Read once, at request start, inside the `load_brief` task, and checkpointed with its result: a resumed request runs under the memory it started with, and an edit applies from the next request.
-  - `WorkerDeps.memory_policy: MemoryPolicy = field(default_factory=load_memory_policy)` (after the defaulted fields, so existing constructors keep working); `WorkerDeps.model_for(request_message_id: str, *, memory_version: str) -> ModelClient`, no default, so every caller passes `brief["memory"]["version"]` (if phase 2 reshaped `model_for`, keep its shape and add the keyword).
+  - `WorkerDependencies.memory_policy: MemoryPolicy = field(default_factory=load_memory_policy)` (after the defaulted fields, so existing constructors keep working); `WorkerDependencies.model_for(request_message_id: str, *, memory_version: str) -> ModelClient`, no default, so every caller passes `brief["memory"]["version"]` (if phase 2 reshaped `model_for`, keep its shape and add the keyword).
   - `brief.load_memory(repos: Repositories, user_id: str, policy: MemoryPolicy, *, now: str) -> MemorySnapshot` = `build_memory_snapshot(load_prompt("agent-memory"), user_id=user_id, user=repos.users.get(user_id), records=repos.memories.list_by_user(user_id), now=now, policy=policy)`. After this task it is the only caller of `load_prompt("agent-memory")`.
-  - `brief.initial_brief(request: RequestMessage, memory: MemorySnapshot) -> RequestState`; `workflow.initial_brief_from_repo` passes `load_memory(deps.repos, request.user_id, deps.memory_policy, now=now_iso())` (a clock read inside a task, which the workflow allows).
+  - `brief.create_initial_request_state(request: RequestMessage, memory: MemorySnapshot) -> RequestState`; `workflow.load_initial_request_state` passes `load_memory(deps.repos, request.user_id, deps.memory_policy, now=now_iso())` (a clock read inside a task, which the workflow allows).
   - `plan.local_today(timezone: str) -> date`; `USER_TIMEZONE` is deleted. The resolver, the planner's `<context>` block and the report's constraint dates use `user_timezone(brief["memory"]["preferences"])`.
-  - Every `ContextInputs` a stage builds (plan, execute, and phase 3's cite) takes `memory=brief["memory"]["text"]` and `preferences=brief["memory"]["preferences"]`; every `model_for` call passes `memory_version=brief["memory"]["version"]` (execute reads the brief from `TaskRun.brief`). Compaction already reuses `built.system[0]`, so compress calls inherit the same block.
-  - `tests/helpers.initial_brief(request: RequestMessage, memory: MemorySnapshot | None = None) -> RequestState` (None: `load_memory` over `Repositories.in_memory()`, which is `agent-memory.md` alone); `tests/helpers.sqlite_saver(path: Path | str) -> SqliteSaver`; `tests/helpers.reply_to(request: RequestMessage, target: str, content: str = "ACC-SAV-1 and ACC-CUR-2", message_id: str = "m3") -> ClarificationResponseMessage`.
+  - Every `ContextInputs` a stage builds (plan, execute, and phase 3's cite) takes `memory=brief["memory"]["text"]` and `preferences=brief["memory"]["preferences"]`; every `model_for` call passes `memory_version=brief["memory"]["version"]` (execute reads the brief from `TaskContext.brief`). Compaction already reuses `built.system[0]`, so compress calls inherit the same block.
+  - `tests/helpers.create_initial_request_state(request: RequestMessage, memory: MemorySnapshot | None = None) -> RequestState` (None: `load_memory` over `Repositories.in_memory()`, which is `agent-memory.md` alone); `tests/helpers.sqlite_saver(path: Path | str) -> SqliteSaver`; `tests/helpers.reply_to(request: RequestMessage, target: str, content: str = "ACC-SAV-1 and ACC-CUR-2", message_id: str = "m3") -> ClarificationResponseMessage`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -418,8 +418,8 @@ from contextforge.core.models.base import ModelRequest, ModelResponse
 from contextforge.core.models.scripted import ScriptedModel
 from contextforge.core.services.submit import submit_request
 from contextforge.worker.runner import RequestRunner
-from contextforge.worker.stages.plan import plan_stage
-from contextforge.worker.workflow import initial_brief_from_repo
+from contextforge.worker.stages.plan import create_research_plan
+from contextforge.worker.workflow import load_initial_request_state
 from tests.helpers import (
     clarification, make_deps, reply_to, seed_chat_with_dataset, seed_user, six_task_plan,
     sqlite_saver, t1_result,
@@ -439,14 +439,14 @@ def _recording(script: dict) -> tuple[ScriptedModel, list[ModelRequest]]:
 def test_every_call_of_a_request_shares_one_memory_snapshot() -> None:
     model, seen = _recording({"plan": [ModelResponse(structured=six_task_plan())],
                               "execute": [ModelResponse(structured=t1_result())] * 3})
-    deps = make_deps(model, tasks_in_flight=1)
-    seed_user(deps, user_id="u1", instructions=OLD,
+    worker_dependencies = make_deps(model, tasks_in_flight=1)
+    seed_user(worker_dependencies, user_id="u1", instructions=OLD,
               preferences={"timezone": "America/New_York", "currency": "USD"})
-    req = seed_chat_with_dataset(deps, chat_id="c1", user_id="u1", dataset_id="a2")
-    assert RequestRunner(deps, sqlite_saver(":memory:")).start("c1", req.message_id).status == "COMPLETED"
+    req = seed_chat_with_dataset(worker_dependencies, chat_id="c1", user_id="u1", dataset_id="a2")
+    assert RequestRunner(worker_dependencies, sqlite_saver(":memory:")).start("c1", req.message_id).status == "COMPLETED"
     assert {r.stage for r in seen} >= {"plan", "execute"}
     assert len({r.system[0] for r in seen}) == 1 and OLD in seen[0].system[0]
-    calls = deps.repos.model_calls.list_by_request(req.message_id)
+    calls = worker_dependencies.repositories.model_calls.list_by_request(req.message_id)
     memory_parts = {c.context_version.split("|")[0] for c in calls}
     assert len(memory_parts) == 1 and memory_parts.pop().startswith("mem:1+")
     plan_turn = next(r for r in seen if r.stage == "plan").messages[0].content
@@ -459,18 +459,18 @@ def test_memory_edited_while_waiting_applies_from_the_next_request(tmp_path) -> 
                                        ModelResponse(structured=six_task_plan()),
                                        ModelResponse(structured=six_task_plan())],
                               "execute": [ModelResponse(structured=t1_result())] * 6})
-    deps = make_deps(model, tasks_in_flight=1)
-    seed_user(deps, user_id="u1", instructions=OLD)
-    req = seed_chat_with_dataset(deps, chat_id="c1", user_id="u1", dataset_id="a2")
+    worker_dependencies = make_deps(model, tasks_in_flight=1)
+    seed_user(worker_dependencies, user_id="u1", instructions=OLD)
+    req = seed_chat_with_dataset(worker_dependencies, chat_id="c1", user_id="u1", dataset_id="a2")
     db = tmp_path / "ckpt.sqlite"
-    RequestRunner(deps, sqlite_saver(db)).start("c1", req.message_id)
-    deps.repos.users.update_preferences_and_instructions("u1", instructions=NEW)
-    pending = deps.repos.messages.pending_for_request("c1", req.message_id)[0]
-    RequestRunner(deps, sqlite_saver(db)).resume("c1", req.message_id, reply_to(req, pending.message_id))
+    RequestRunner(worker_dependencies, sqlite_saver(db)).start("c1", req.message_id)
+    worker_dependencies.repositories.users.update_preferences_and_instructions("u1", instructions=NEW)
+    pending = worker_dependencies.repositories.messages.pending_for_request("c1", req.message_id)[0]
+    RequestRunner(worker_dependencies, sqlite_saver(db)).resume("c1", req.message_id, reply_to(req, pending.message_id))
     assert seen and all(OLD in r.system[0] and NEW not in r.system[0] for r in seen)
     seen.clear()
-    later = submit_request(deps.repos, client_key="k2", chat_id="c1", user_id="u1", content="And November?")
-    RequestRunner(deps, sqlite_saver(db)).start("c1", later.message_id)
+    later = submit_request(worker_dependencies.repositories, client_key="k2", chat_id="c1", user_id="u1", content="And November?")
+    RequestRunner(worker_dependencies, sqlite_saver(db)).start("c1", later.message_id)
     assert seen and all(NEW in r.system[0] and OLD not in r.system[0] for r in seen)
 
 
@@ -479,11 +479,11 @@ def test_a_stored_timezone_that_does_not_load_falls_back() -> None:
     assert user_timezone({"timezone": "Europe/London"}) == "Europe/London"
     assert user_timezone({"timezone": "Mars/Olympus"}) == DEFAULT_TIMEZONE
     model, seen = _recording({"plan": [ModelResponse(structured=six_task_plan())]})
-    deps = make_deps(model)
-    seed_user(deps, user_id="u1", preferences={"timezone": "Mars/Olympus"})  # stored past validation
-    req = seed_chat_with_dataset(deps, chat_id="c1", user_id="u1", dataset_id="a2")
-    brief = initial_brief_from_repo(deps, "c1", req.message_id)
-    assert plan_stage(brief, 0, deps, today=date(2026, 11, 7))["kind"] == "plan"
+    worker_dependencies = make_deps(model)
+    seed_user(worker_dependencies, user_id="u1", preferences={"timezone": "Mars/Olympus"})  # stored past validation
+    req = seed_chat_with_dataset(worker_dependencies, chat_id="c1", user_id="u1", dataset_id="a2")
+    request_state = load_initial_request_state(worker_dependencies, "c1", req.message_id)
+    assert create_research_plan(request_state, 0, worker_dependencies, today=date(2026, 11, 7))["kind"] == "plan"
     assert "today: 2026-11-07 (Asia/Kolkata)" in seen[0].messages[0].content
 ```
 
@@ -499,7 +499,7 @@ Afterwards `grep -rn 'agent-memory\|model_for(' src` shows `brief.load_memory` a
 - [ ] **Step 4: Run the whole suite**
 
 Run: `uv run pytest -v && uv run mypy src && uv run ruff check . && uv run ruff format --check .`
-Expected: every test passes (the phase 1 plan-stage tests get the default snapshot through `tests.helpers.initial_brief`); clean.
+Expected: every test passes (the phase 1 plan-stage tests get the default snapshot through `tests.helpers.create_initial_request_state`); clean.
 
 - [ ] **Step 5: Commit**
 
@@ -514,14 +514,14 @@ git commit -m "feat: memory snapshot read at request start and sent with every c
 
 **Files:**
 - Create: `src/contextforge/worker/stages/prior.py`, `prompts/plan.2.md`
-- Modify: `src/contextforge/core/state.py`, `src/contextforge/core/planner.py`, `src/contextforge/core/context/builder.py`, `src/contextforge/core/context/prompts.py`, `src/contextforge/worker/brief.py`, `src/contextforge/worker/stages/plan.py`, `src/contextforge/worker/workflow.py`, `src/contextforge/worker/stages/report.py`, `tests/helpers.py` (`claim`, `seed_report`), `tests/test_models.py` (its expected `context_version` becomes `mem:1|prompt:plan.2`)
+- Modify: `src/contextforge/core/state.py`, `src/contextforge/core/planner.py`, `src/contextforge/core/context/builder.py`, `src/contextforge/core/context/prompts.py`, `src/contextforge/worker/request_state.py`, `src/contextforge/worker/stages/plan.py`, `src/contextforge/worker/workflow.py`, `src/contextforge/worker/stages/report.py`, `tests/helpers.py` (`claim`, `seed_report`), `tests/test_models.py` (its expected `context_version` becomes `mem:1|prompt:plan.2`)
 - Test: `tests/test_constraints_across_requests.py`
 
 **Interfaces:**
 - Consumes: Task 4 `brief["memory"]`, `user_timezone`, `local_today`; Task 2 `MemoryPolicy.carried_constraints_cap`; Task 1 `contains_credential`; `ReportConstraint`, `ReportMessage`, `MessageRepository`, `derived_id`.
 - Produces:
   - `state.ConstraintOrigin(TypedDict)`: `source: str` (`"request"`, or the clarification_response message id), `date: str | None` (ISO date first stated; None until the report stamps it). `state.DroppedConstraint(TypedDict)`: `text: str`, `reason: str`.
-  - `RequestState.constraint_origins: dict[str, ConstraintOrigin]` (keyed by constraint text; a constraint with no entry came from this request) and `RequestState.dropped_constraints: list[DroppedConstraint]`; `initial_brief` sets `{}` and `[]`.
+  - `RequestState.constraint_origins: dict[str, ConstraintOrigin]` (keyed by constraint text; a constraint with no entry came from this request) and `RequestState.dropped_constraints: list[DroppedConstraint]`; `create_initial_request_state` sets `{}` and `[]`.
   - `planner.ConstraintDrop(Entity)`: `text: str`, `reason: str = Field(min_length=1)`; `PlannerOutput.dropped_constraints: list[ConstraintDrop] = []` (wire `droppedConstraints`; an empty reason fails the schema and takes the existing one-retry path).
   - `builder.ContextInputs.carried_constraints: Sequence[ReportConstraint] = ()`, rendered at the end of `<prior_context>` after the reports' claims: the line `constraints in force from earlier requests:`, then one line per constraint, `f"- {text}  (source: {label}, {date})"`, where `label` is `request` or `f"clarification answer {source}"`. Nothing is rendered when empty.
   - `prior.PRIOR_REPORTS = 2`; `prior.prior_reports(messages: MessageRepository, request: RequestMessage, limit: int = PRIOR_REPORTS) -> list[ReportMessage]`: the reports in the request's chat whose `request_message_id` sorts before `request.message_id` (ULIDs, so earlier requests), ordered by it, the last `limit`.
@@ -530,7 +530,7 @@ git commit -m "feat: memory snapshot read at request start and sent with every c
   - `PlanResult.carried: dict[str, ConstraintOrigin]` (in force, in order) and `PlanResult.dropped: list[DroppedConstraint]` (cap and credential drops, then the planner's). The planner's `ContextInputs` get `prior_messages=prior_reports(...)` (claims only, through the existing `_prior`) and `carried_constraints=` the capped list; the old "every other message" selection is deleted.
   - Workflow: each clarification answer adds `f"User answered '{question}': {content}"` with origin `{"source": answer["message_id"], "date": None}`; `_with_plan` sets constraints to the unique union of carried, the brief's (answers) and the planner's, in that order; origins to `{**brief["constraint_origins"], **planned["carried"]}` (a constraint keeps the origin it was first stated with); `dropped_constraints` to `planned["dropped"]`.
   - Report: each `report.constraints` entry takes its origin's source and date (None becomes the report date in the user's timezone); without an origin, `source="request"` and that date. `coverage["droppedConstraints"]` is the brief's list when non-empty.
-  - `tests/helpers.claim(claim_id: str, text: str, *, status: str = "CONFIRMED", refs: list[EvidenceRef] | None = None) -> Claim` (None gives one ref, `a2` row `12,13`; `[]` stays empty); `tests/helpers.seed_report(deps: WorkerDeps, *, chat_id: str, user_id: str, claims: list[Claim], constraints: list[ReportConstraint] | None = None, uncertainties: list[str] | None = None, request_status: RequestStatus = RequestStatus.COMPLETED) -> tuple[RequestMessage, ReportMessage]`: saves an earlier request (content `"Earlier request."`, new ULID) and its report with id `derived_id(f"{request_id}:report")`.
+  - `tests/helpers.claim(claim_id: str, text: str, *, status: str = "CONFIRMED", refs: list[EvidenceRef] | None = None) -> Claim` (None gives one ref, `a2` row `12,13`; `[]` stays empty); `tests/helpers.seed_report(deps: WorkerDependencies, *, chat_id: str, user_id: str, claims: list[Claim], constraints: list[ReportConstraint] | None = None, uncertainties: list[str] | None = None, request_status: RequestStatus = RequestStatus.COMPLETED) -> tuple[RequestMessage, ReportMessage]`: saves an earlier request (content `"Earlier request."`, new ULID) and its report with id `derived_id(f"{request_id}:report")`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -541,9 +541,9 @@ from contextforge.core.models.base import ModelRequest, ModelResponse
 from contextforge.core.models.scripted import ScriptedModel
 from contextforge.core.planner import ConstraintDrop
 from contextforge.worker.runner import RequestRunner
-from contextforge.worker.stages.plan import plan_stage
+from contextforge.worker.stages.plan import create_research_plan
 from contextforge.worker.stages.prior import apply_drops, carried_constraints
-from contextforge.worker.workflow import initial_brief_from_repo
+from contextforge.worker.workflow import load_initial_request_state
 from tests.helpers import (
     claim, clarification, make_deps, reply_to, seed_chat_with_dataset, seed_report, six_task_plan,
     sqlite_saver, t1_result,
@@ -558,11 +558,11 @@ def test_planner_sees_the_last_two_reports_and_what_they_carry() -> None:
     seen: list[ModelRequest] = []
     model = ScriptedModel({"plan": [ModelResponse(structured=six_task_plan())]})
     model.on_request = seen.append
-    deps = make_deps(model)
+    worker_dependencies = make_deps(model)
     for text, constraints in [("R1 claim.", []), ("R2 claim.", []), ("R3 claim.", [TEST_ACCOUNTS])]:
-        seed_report(deps, chat_id="c1", user_id="u1", claims=[claim("k1", text)], constraints=constraints)
-    req = seed_chat_with_dataset(deps, chat_id="c1", user_id="u1", dataset_id="a2")
-    planned = plan_stage(initial_brief_from_repo(deps, "c1", req.message_id), 0, deps)
+        seed_report(worker_dependencies, chat_id="c1", user_id="u1", claims=[claim("k1", text)], constraints=constraints)
+    req = seed_chat_with_dataset(worker_dependencies, chat_id="c1", user_id="u1", dataset_id="a2")
+    planned = create_research_plan(load_initial_request_state(worker_dependencies, "c1", req.message_id), 0, worker_dependencies)
     turn = seen[0].messages[0].content
     assert "R2 claim." in turn and "R3 claim." in turn and "R1 claim." not in turn
     assert ("constraints in force from earlier requests:\n"
@@ -579,15 +579,15 @@ def test_constraints_carry_into_the_next_report_with_their_origin(tmp_path) -> N
                                     ModelResponse(structured=plan)],
                            "execute": [ModelResponse(structured=t1_result())] * 3})
     model.on_request = seen.append
-    deps = make_deps(model, tasks_in_flight=1)
-    seed_report(deps, chat_id="c1", user_id="u1", claims=[claim("k1", "R claim.")],
+    worker_dependencies = make_deps(model, tasks_in_flight=1)
+    seed_report(worker_dependencies, chat_id="c1", user_id="u1", claims=[claim("k1", "R claim.")],
                 constraints=[TEST_ACCOUNTS, OLD_PERIOD])
-    req = seed_chat_with_dataset(deps, chat_id="c1", user_id="u1", dataset_id="a2")
+    req = seed_chat_with_dataset(worker_dependencies, chat_id="c1", user_id="u1", dataset_id="a2")
     db = tmp_path / "ckpt.sqlite"
-    RequestRunner(deps, sqlite_saver(db)).start("c1", req.message_id)
-    pending = deps.repos.messages.pending_for_request("c1", req.message_id)[0]
-    RequestRunner(deps, sqlite_saver(db)).resume("c1", req.message_id, reply_to(req, pending.message_id))
-    report = next(m for m in deps.repos.messages.list_by_chat("c1")
+    RequestRunner(worker_dependencies, sqlite_saver(db)).start("c1", req.message_id)
+    pending = worker_dependencies.repositories.messages.pending_for_request("c1", req.message_id)[0]
+    RequestRunner(worker_dependencies, sqlite_saver(db)).resume("c1", req.message_id, reply_to(req, pending.message_id))
+    report = next(m for m in worker_dependencies.repositories.messages.list_by_chat("c1")
                   if m.kind == "report" and m.request_message_id == req.message_id)
     by_text = {c.text: c for c in report.report.constraints}
     assert (by_text[TEST_ACCOUNTS.text].source, by_text[TEST_ACCOUNTS.text].date) == ("request", EARLIER)
@@ -669,7 +669,7 @@ git commit -m "feat: constraints carry across requests with provenance; planner 
   - `gate.episode_refusal(report: ReportMessage, request: RequestMessage) -> str | None`: `"owner mismatch"`, `"request is not COMPLETED"`, `"report has no claims"`, `"report has uncertainties"`, `"not every claim is CONFIRMED"`, in that order.
   - `gate.episode_content(request_text: str, claims: Sequence[Claim], max_chars: int) -> str`: `f"Asked: {request} Verified: {'; '.join(claim texts)}"` with runs of whitespace collapsed to one space; when longer than `max_chars`, cut to `max_chars - 1` characters, right-stripped, plus `…`.
   - `gate.promote_report(memories: AgentMemoryRepository, report: ReportMessage, request: RequestMessage, *, now: str, policy: MemoryPolicy) -> list[PromotionDecision]`: one decision per claim in claim order, then one for the episode. A passing candidate is written by these rules: no stored record, `put(expected_revision=None)`, reason `"promoted"`; a stored `active` record, refreshed (`last_verified_at = now`, `expires_at = plus_days(now, ttl)`, `source_refs` = the stored refs then the new ones not already present, `updated_at = now`) with `expected_revision=stored.revision`, reason `"refreshed"`; any other stored status, not written, reason `f"record is {status}"`; on `StaleRevisionError`, re-read and apply the same rules once more, then reason `"concurrent update"`. A new record has `status=active`, `created_at = updated_at = last_verified_at = now`, `expires_at = plus_days(now, policy.ttl_days(kind))`, and `source_refs` = the claim's refs (for the episode, every claim's refs, without repeats, in order). It never raises for a refusal or a lost race. The module docstring names the reader: `build_memory_snapshot` (Task 3), the memory section of the user's later requests.
-  - `promote.promote_completed_request(brief: RequestState, deps: WorkerDeps) -> list[PromotionDecision]`: `[]` when `deps.memory_policy.auto_promote` is false; otherwise loads the request and its report (`derived_id(f"{request_message_id}:report")`, `LookupError` if missing), calls `promote_report` with `now_iso()` and logs each decision. `write_report` calls it only after the request moved to COMPLETED; it runs inside the report task, so a re-run repeats it and the content-derived ids keep it to one record per fact.
+  - `promote.promote_completed_request(brief: RequestState, deps: WorkerDependencies) -> list[PromotionDecision]`: `[]` when `deps.memory_policy.auto_promote` is false; otherwise loads the request and its report (`derived_id(f"{request_message_id}:report")`, `LookupError` if missing), calls `promote_report` with `now_iso()` and logs each decision. `write_report` calls it only after the request moved to COMPLETED; it runs inside the report task, so a re-run repeats it and the content-derived ids keep it to one record per fact.
   - `tests/helpers.make_deps(..., auto_promote: bool | None = None)`: when given, `memory_policy = load_memory_policy().model_copy(update={"auto_promote": auto_promote})`.
 
 - [ ] **Step 1: Write the failing tests**
@@ -686,7 +686,7 @@ from contextforge.core.repositories.base import StaleRevisionError
 from contextforge.core.repositories.memory import InMemoryAgentMemory
 from contextforge.core.values import EvidenceRef, Locator
 from contextforge.worker.stages.promote import promote_completed_request
-from tests.helpers import claim, initial_brief, make_deps, seed_report
+from tests.helpers import claim, create_initial_request_state, make_deps, seed_report
 
 NOW = "2026-11-07T10:00:00Z"
 LATER = "2026-12-01T10:00:00Z"
@@ -697,8 +697,8 @@ OWN = "ACC-SAV-1 and ACC-CUR-2 are the user's own accounts."
 
 
 def test_only_verified_claims_without_uncertainty_are_promoted() -> None:
-    deps = make_deps(ScriptedModel({}))
-    request, report = seed_report(deps, chat_id="c1", user_id="u1", claims=[
+    worker_dependencies = make_deps(ScriptedModel({}))
+    request, report = seed_report(worker_dependencies, chat_id="c1", user_id="u1", claims=[
         claim("k1", OWN, refs=[ROW_12]),
         claim("k2", "ICICI bill unpaid.", status="UNKNOWN"),
         claim("k3", "HDFC bill paid.", refs=[]),
@@ -706,41 +706,41 @@ def test_only_verified_claims_without_uncertainty_are_promoted() -> None:
         claim("k5", "Card token=ghp_" + "a" * 36),
         claim("k6", "x" * 301),
     ], uncertainties=["Claim k4 relies on an email that may be superseded."])
-    decisions = promote_report(deps.repos.memories, report, request, now=NOW, policy=POLICY)
+    decisions = promote_report(worker_dependencies.repositories.memories, report, request, now=NOW, policy=POLICY)
     assert {d.claim_id: d.reason for d in decisions} == {
         "k1": "promoted", "k2": "claim is UNKNOWN, not CONFIRMED", "k3": "claim has no evidence",
         "k4": "claim is named in the report's uncertainties", "k5": "claim looks like a credential",
         "k6": "claim is longer than 300 characters", None: "report has uncertainties"}
-    [record] = deps.repos.memories.list_by_user("u1")
+    [record] = worker_dependencies.repositories.memories.list_by_user("u1")
     assert (record.kind, record.status, record.revision, record.content) == ("semantic", "active", 1, OWN)
     assert record.source_refs == [ROW_12] and record.expires_at == "2027-02-05T10:00:00Z"
-    running, unfinished = seed_report(deps, chat_id="c1", user_id="u1", claims=[claim("k1", "Another fact.")],
+    running, unfinished = seed_report(worker_dependencies, chat_id="c1", user_id="u1", claims=[claim("k1", "Another fact.")],
                                       request_status=RequestStatus.RUNNING)
-    later = promote_report(deps.repos.memories, unfinished, running, now=NOW, policy=POLICY)
+    later = promote_report(worker_dependencies.repositories.memories, unfinished, running, now=NOW, policy=POLICY)
     assert {d.reason for d in later} == {"request is not COMPLETED"}
 
 
 def test_a_fact_confirmed_again_refreshes_one_record_and_a_replay_adds_none() -> None:
-    deps = make_deps(ScriptedModel({}))
-    first_request, first = seed_report(deps, chat_id="c1", user_id="u1", claims=[claim("k1", OWN, refs=[ROW_12])])
-    promote_report(deps.repos.memories, first, first_request, now=NOW, policy=POLICY)
-    promote_report(deps.repos.memories, first, first_request, now=NOW, policy=POLICY)  # report task re-ran
-    second_request, second = seed_report(deps, chat_id="c2", user_id="u1",
+    worker_dependencies = make_deps(ScriptedModel({}))
+    first_request, first = seed_report(worker_dependencies, chat_id="c1", user_id="u1", claims=[claim("k1", OWN, refs=[ROW_12])])
+    promote_report(worker_dependencies.repositories.memories, first, first_request, now=NOW, policy=POLICY)
+    promote_report(worker_dependencies.repositories.memories, first, first_request, now=NOW, policy=POLICY)  # report task re-ran
+    second_request, second = seed_report(worker_dependencies, chat_id="c2", user_id="u1",
                                          claims=[claim("k9", f"  {OWN.upper()} ", refs=[PAGE_2])])
-    decisions = promote_report(deps.repos.memories, second, second_request, now=LATER, policy=POLICY)
-    [fact] = [r for r in deps.repos.memories.list_by_user("u1") if r.kind == MemoryKind.SEMANTIC]
+    decisions = promote_report(worker_dependencies.repositories.memories, second, second_request, now=LATER, policy=POLICY)
+    [fact] = [r for r in worker_dependencies.repositories.memories.list_by_user("u1") if r.kind == MemoryKind.SEMANTIC]
     assert decisions[0].reason == "refreshed" and fact.content == OWN
     assert fact.source_refs == [ROW_12, PAGE_2] and fact.last_verified_at == LATER
     assert fact.expires_at == "2027-03-01T10:00:00Z"
 
 
 def test_a_clean_report_becomes_an_episode_read_as_history() -> None:
-    deps = make_deps(ScriptedModel({}))
-    request, report = seed_report(deps, chat_id="c1", user_id="u1",
+    worker_dependencies = make_deps(ScriptedModel({}))
+    request, report = seed_report(worker_dependencies, chat_id="c1", user_id="u1",
                                   claims=[claim("k1", OWN), claim("k2", "Netflix rose from 649 to 799.")])
-    decisions = promote_report(deps.repos.memories, report, request, now=NOW, policy=POLICY)
+    decisions = promote_report(worker_dependencies.repositories.memories, report, request, now=NOW, policy=POLICY)
     assert [d.reason for d in decisions] == ["promoted", "promoted", "promoted"]
-    records = deps.repos.memories.list_by_user("u1")
+    records = worker_dependencies.repositories.memories.list_by_user("u1")
     episode = next(r for r in records if r.kind == MemoryKind.EPISODIC)
     assert episode.content.startswith("Asked: Earlier request. Verified: ACC-SAV-1") and len(episode.content) <= 300
     assert episode.source_refs == [ROW_12] and episode.expires_at == "2027-11-07T10:00:00Z"
@@ -760,8 +760,8 @@ def test_a_lost_race_is_retried_once_and_never_raises() -> None:
                 raise StaleRevisionError(expected_revision, 7)
             return super().put(record, expected_revision=expected_revision)
 
-    deps = make_deps(ScriptedModel({}))
-    request, report = seed_report(deps, chat_id="c1", user_id="u1", claims=[claim("k1", OWN)],
+    worker_dependencies = make_deps(ScriptedModel({}))
+    request, report = seed_report(worker_dependencies, chat_id="c1", user_id="u1", claims=[claim("k1", OWN)],
                                   uncertainties=["Unrelated."])
     assert promote_report(Racing(1), report, request, now=NOW, policy=POLICY)[0].reason == "promoted"
     assert promote_report(Racing(2), report, request, now=NOW, policy=POLICY)[0].reason == "concurrent update"
@@ -769,10 +769,10 @@ def test_a_lost_race_is_retried_once_and_never_raises() -> None:
 
 def test_the_report_stage_promotes_only_when_enabled() -> None:
     for enabled, expected in [(False, 0), (True, 2)]:  # 2 = the fact and the episode
-        deps = make_deps(ScriptedModel({}), auto_promote=enabled)
-        request, _ = seed_report(deps, chat_id="c1", user_id="u1", claims=[claim("k1", OWN)])
-        promote_completed_request(initial_brief(request), deps)
-        assert len(deps.repos.memories.list_by_user("u1")) == expected
+        worker_dependencies = make_deps(ScriptedModel({}), auto_promote=enabled)
+        request, _ = seed_report(worker_dependencies, chat_id="c1", user_id="u1", claims=[claim("k1", OWN)])
+        promote_completed_request(create_initial_request_state(request), worker_dependencies)
+        assert len(worker_dependencies.repositories.memories.list_by_user("u1")) == expected
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -804,7 +804,7 @@ git commit -m "feat: promotion gate writes verified facts and episodes with prov
 - Test: phase 2's harness test module
 
 **Interfaces:**
-- Consumes: Task 1 `patch_me`, `MePatch`; phase 2's harness (how it builds `WorkerDeps`, seeds a case and scores it).
+- Consumes: Task 1 `patch_me`, `MePatch`; phase 2's harness (how it builds `WorkerDependencies`, seeds a case and scores it).
 - Produces: a case variant that seeds `User.instructions` through `patch_me` before the request is submitted, and leaves the request text without the instruction.
 
 - [ ] **Step 1: Write the case file**

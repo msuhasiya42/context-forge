@@ -46,11 +46,12 @@ stages:
     fallbacks: ["openai.gpt-oss-120b-1:0", "apac.amazon.nova-pro-v1:0"]
     effort: medium
     maxTokens: 4000
-  # Makes no model call yet; served by the planner's read timeout.
+  # Conservative claim-support review, after deterministic snapshot/quote checks.
   cite:
-    model: "openai.gpt-oss-120b-1:0"
-    effort: high
-    maxTokens: 4000
+    model: "global.amazon.nova-2-lite-v1:0"
+    fallbacks: ["qwen.qwen3-235b-a22b-2507-v1:0"]
+    effort: low
+    maxTokens: 2000
   compress:
     model: "global.amazon.nova-2-lite-v1:0"
     fallbacks: ["apac.amazon.nova-lite-v1:0"]
@@ -62,3 +63,8 @@ stages:
     fallbacks: ["apac.amazon.nova-lite-v1:0"]
     effort: low
     maxTokens: 400
+  report:
+    model: "qwen.qwen3-235b-a22b-2507-v1:0"
+    fallbacks: ["global.amazon.nova-2-lite-v1:0"]
+    effort: medium
+    maxTokens: 4000

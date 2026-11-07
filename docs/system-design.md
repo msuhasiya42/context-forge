@@ -6,6 +6,8 @@ Updated: 4 November 2026, Asia/Kolkata. This is the high-level design: what the 
 
 ## 1. Goal and first example
 
+**Current milestone (7 November 2026): public-web deep research first.** Mayur prioritized a research agent with evidence-supported long reports and at most 50 combined search/fetch tool invocations per request. Uploads, PDF ingestion, private MCP and write tools follow. See [research-first-plan.md](research-first-plan.md) for the report contract, implementation gaps and acceptance criteria, and [the web research benchmark](../evals/cases/web-research-suite.md) for the immediate test set. The mixed private-document example below remains the longer-term scope.
+
 Build a private assistant for spreadsheet analysis, PDF questions, and later Gmail/Drive research. The learning priorities are context engineering, Python, LangGraph, AWS, NoSQL modeling, MCP, observability, and evaluations, with very low initial spend.
 
 The headline example, `golden-001` (recorded 6 November 2026, full fixtures and checks in `evals/cases/golden-001.md`): "Review my September and October spending. Explain every category that went up and name the transactions behind it. Find subscriptions I am paying twice or whose price went up, and confirm the current price from the provider's website. Check whether both October card bills were paid. Check whether the refund Decathlon promised in September has arrived. Cite evidence for every claim. If anyone still owes me a refund, draft an email asking for it." It needs SQL over the dataset, PDF retrieval with page citations, a public web search over MCP, cross-source reconciliation, a clarification (the request never says which accounts are the user's), a plan that must merge tasks to fit the cap, and one gated write. Every fact it needs is planted in synthetic fixtures, so the answer is scored, not admired; from phase 2 on, each phase ends by running it.
@@ -62,13 +64,13 @@ Agreed names. "Avoid" lists names that were considered and rejected.
 | Integration | A supported external provider and how to reach and authenticate with it. Developer configuration | A user's account connection |
 | IntegrationConnection | A user's authorized account at a provider, with a credential reference | Plaintext tokens anywhere |
 | IntegrationTool | One operation a provider offers, with schema and permission classification | A tool index as an entity |
-| Working brief | The typed LangGraph state for one Request: goal, constraints, plan, facts, open questions, next action, pending interrupt, messages | A stored entity; a global scratchpad shared by requests |
+| Request state | The typed LangGraph state for one Request: goal, constraints, plan, facts, open questions, next action, pending interrupt, messages | A stored entity; a global scratchpad shared by requests |
 | Agent memory | The default agent's versioned procedural instructions, `agent-memory.md`; later, learned records | MemoryEntry as an initial entity |
 | User memory | The small preferences profile on User now; later, user-scoped learned records | Shared facts across users |
 | Context snapshot | The instructions, evidence, messages and tools presented to one ModelCall; observed in LangSmith | A stored record in early phases |
 | Evidence reference | A link to an Artifact plus a locator (page, row, cell, range, message, section) supporting a claim | An unrelated attachment as proof |
 | KnowledgeBase | Not an entity. Searchable sources are Artifacts with an index status; embedding settings are application config | A collection record before a requirement exists |
-| Fact | A statement a Task established, returned by the model in the task result with its own evidence references; at most six per task, at most thirty on the working brief, oldest dropped by code | A sentence split from a summary; a fact without evidence |
+| Fact | A statement a Task established, returned by the model in the task result with its own evidence references; at most six per task, at most thirty on the request state, oldest dropped by code | A sentence split from a summary; a fact without evidence |
 | Prior context | The claims of the last two reports in the same Chat, shown to the planner for follow-up requests | Transcripts or earlier clarifications |
 | Call budget | The maximum number of model calls one Request may make (50); checked before every call | A retry counter as the spend guard |
 | Deadline | Time limits: per model call (60 s Haiku, 120 s Opus) and per Request (15 minutes from RUNNING) | An open-ended run |
@@ -149,7 +151,7 @@ Short-term and long-term describe where recall applies. Semantic, episodic and p
 | Layer | Example | Storage and retrieval |
 |---|---|---|
 | Procedural, developer rules | Cite sources; preserve uncertainty; accounting conventions | One versioned `agent-memory.md`, loaded by the Context Builder on every call, never model-writable. ModelCall records its version |
-| Working brief | Current goal, constraints, plan, facts, gaps, next action | Typed LangGraph state per request, checkpointed. Not an entity |
+| Request state | Current goal, constraints, plan, facts, gaps, next action | Typed LangGraph state per request, checkpointed. Not an entity |
 | Chat continuity | "Exclude the laptop purchase" in a follow-up | Relevant prior Messages and Task results, selected explicitly. A Chat summary only when measurably needed |
 | Semantic, user facts | Preferred currency, timezone | Small preferences profile on User now. A user-scoped collection later when facts grow, because a profile becomes error-prone as it grows |
 | Episodic | A dated, verified reconciliation and what resolved it | Later: curated records from completed requests, retrieved as examples only, never as current status |
@@ -176,7 +178,7 @@ Vocabulary: write, select, compress, isolate. Save originals externally; bring r
 ```text
  Tier               Lives in            Size per request   Lifetime      Reaches the model by
  Context window     one ModelCall       ≤ 40k tokens       one call      it is the call
- Working brief      LangGraph state     ≤ 3k tokens        one request   selected fields, every call
+ Request state      LangGraph state     ≤ 3k tokens        one request   selected fields, every call
  Durable records    DynamoDB            small              forever       Task.result and prior Messages, selected
  Artifacts          S3                  unbounded          forever       tools, just in time, bounded slices
 ```
@@ -320,7 +322,7 @@ Primary sources: Anthropic engineering posts on context engineering, long-runnin
 |---|---|---|
 | Context curation | Smallest set of high-signal tokens; recall degrades as context grows; curate before every call | Context Builder order; token budget; compaction levels |
 | Tool interface quality | The agent-computer interface deserves as much design as a human interface; few non-overlapping tools; pagination and truncation defaults; actionable errors | IntegrationTool description is the main lever; Tool Result Processor caps output |
-| Structured notes outside the window | Plans and progress persist as structured state, not transcript; models overwrite free-form notes; compaction alone is not enough | Typed working brief with pinned fields |
+| Structured notes outside the window | Plans and progress persist as structured state, not transcript; models overwrite free-form notes; compaction alone is not enough | Typed request state with pinned fields |
 | Isolation with condensed hand-backs | Sub-agents return 1,000 to 2,000 token summaries and store large output externally | Task subgraphs; Task.result envelope; raw_result Artifacts |
 | Resume from checkpoints | Stateful errors compound; resume rather than restart | DynamoDBSaver; conditional status transitions |
 | Risk-classified tools and approval gates | Classify by risk; approve destructive operations; bound iterations | IntegrationTool.permission; proposed_action Messages; step and spend limits |
@@ -348,7 +350,7 @@ Dated decisions that later work must not silently reverse.
 | 4 Nov 2026 | Artifact: no contentHash, no supersedesArtifactId, no requestMessageId until needed; datasets are separate records linked by `derivedFromArtifactId` | No current requirement; forward references already exist |
 | 4 Nov 2026 | Stay with DynamoDB over RDS | Relations are all parent-child; nine access patterns are all single-partition reads; idle cost is zero; NoSQL modeling is a learning goal. Repository layer is the hedge |
 | 4 Nov 2026 | One table, one sparse GSI, on-demand, Streams on, PITR on; request URLs chat-scoped; `integrationToolId` derived from `integrationId:name`; `Artifact.chatId` required | Access-pattern-first design |
-| 4 Nov 2026 | Working brief is typed LangGraph state, not an entity; no budget counter in state | Budget from ModelCall records |
+| 4 Nov 2026 | Request state is typed LangGraph state, not an entity; no budget counter in state | Budget from ModelCall records |
 | 4 Nov 2026 | Integration rules adopted from a reviewed production design: pre-flight schema validation before a proposed_action; approval identity is the argument hash; failed writes become UNCERTAIN; missing tools after re-sync are disabled, not deleted | Proven in production |
 | 4 Nov 2026 | Understand and plan are one model call; it returns a plan or a clarification | Fewer calls; the planner sees the sources |
 | 4 Nov 2026 | API: plural resources, sixteen endpoints, one `replies` endpoint for both clarification answers and approval decisions, `artifactIds` on submit validated not stored, `/me` singular | Collections take ids; both replies are "answer the pending interrupt and resume" |
@@ -378,7 +380,7 @@ Revised 4 November 2026, re-split into eleven phases on 6 November 2026 (public 
 | Phase | Build | Concepts you can then explain | Interview questions it answers | Expectations and endpoints |
 |---|---|---|---|---|
 | 0 Design | Done | | | |
-| 1 Engine, local | LangGraph Functional API workflow (entrypoint plus tasks), typed working brief, SQLite checkpoints, interrupt and resume, crash restart, structured planner output, idempotent dispatch, dependency-driven task waves, the execute loop written by hand as a small Graph API subgraph (model, tool, model), the grill limits as config | Agent versus workflow, state versus transcript, human in the loop, resume, at-least-once versus exactly-once, structured output | F3, P1, P5 (structured output half), P6 | 10, 13; no endpoints |
+| 1 Engine, local | LangGraph Functional API workflow (entrypoint plus tasks), typed request state, SQLite checkpoints, interrupt and resume, crash restart, structured planner output, idempotent dispatch, dependency-driven task waves, the execute loop written by hand as a small Graph API subgraph (model, tool, model), the grill limits as config | Agent versus workflow, state versus transcript, human in the loop, resume, at-least-once versus exactly-once, structured output | F3, P1, P5 (structured output half), P6 | 10, 13; no endpoints |
 | 2 Real model, tracing, first eval | Model adapter with bounded retries, backoff with jitter and timeouts; LangSmith; ModelCall usage; model split; a ten-request eval harness: deterministic checks first, LLM judge with a rubric for fuzzy qualities, judge checked against your own labels, run before every prompt or model change | Observability, token accounting, retries, model routing, golden sets, judge bias, regression gates | P2, P3, P10 (the habit) | 16; no endpoints |
 | 3 Spreadsheet slice | DuckDB `sql_query` tool, tool result processor, evidence refs, abstention through `uncertainties`, cite stage as a verifier pass, compaction on real data, deliverables | Tool design, result truncation and offload, grounding, citations, confident-wrong mitigation, compaction policy, tool output as untrusted data | P4, P5 (injection half), A5 (compaction) | no endpoints |
 | 4 Thin API and UI | E1 to E8 and SSE, timeline, inline replies, cancel, in-process worker, dev login; minimal React, no polish | Streaming to a client, the interrupt round trip through an API, idempotent submit, what happens between prompt and streamed output | F2 (application side), P6 | 1, 2, 4, 7, 9, 11, 12, 14, 15, 23 (dev) |
@@ -401,7 +403,7 @@ Rules that hold across phases:
 
 ## 15. Mental model
 
-Default instructions are the operating handbook; the working brief is the current notebook; user memory is a scoped set of reusable notes; Artifacts preserve evidence. The Context Builder selects what goes on the desk for the next decision.
+Default instructions are the operating handbook; the request state is the current notebook; user memory is a scoped set of reusable notes; Artifacts preserve evidence. The Context Builder selects what goes on the desk for the next decision.
 
 One line: LangGraph runs the work, our context and memory policies choose the information, AWS stores it, and LangSmith makes behavior measurable.
 

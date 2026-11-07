@@ -45,7 +45,7 @@ def _reply(
 
 
 def test_duplicate_start_runs_once() -> None:
-    deps = make_deps(
+    worker_dependencies = make_deps(
         ScriptedModel(
             {
                 "plan": [ModelResponse(structured=six_task_plan())],
@@ -53,14 +53,20 @@ def test_duplicate_start_runs_once() -> None:
             }
         )
     )
-    req = seed_chat_with_dataset(deps, chat_id="c1", user_id="u1", dataset_id="a2")
-    runner = RequestRunner(deps, _saver(":memory:"))
+    req = seed_chat_with_dataset(worker_dependencies, chat_id="c1", user_id="u1", dataset_id="a2")
+    runner = RequestRunner(worker_dependencies, _saver(":memory:"))
     first = runner.start("c1", req.message_id)
     second = runner.start("c1", req.message_id)
     assert first.started and first.status == "COMPLETED" and not second.started
     assert (
         len(
-            [c for c in deps.repos.model_calls.list_by_request(req.message_id) if c.stage == "plan"]
+            [
+                c
+                for c in worker_dependencies.repositories.model_calls.list_by_request(
+                    req.message_id
+                )
+                if c.stage == "plan"
+            ]
         )
         == 1
     )
@@ -75,21 +81,31 @@ def test_clarification_interrupt_then_resume_completes(tmp_path) -> None:
         ],
         "execute": [ModelResponse(structured=t1_result())] * 3,
     }
-    deps = make_deps(ScriptedModel(script))
+    worker_dependencies = make_deps(ScriptedModel(script))
     requests = []
-    deps.model.on_request = requests.append
-    req = seed_chat_with_dataset(deps, chat_id="c1", user_id="u1", dataset_id="a2")
-    RequestRunner(deps, _saver(db)).start("c1", req.message_id)
-    assert deps.repos.messages.get("c1", req.message_id).status == "WAITING_USER"
-    pending = deps.repos.messages.pending_for_request("c1", req.message_id)
+    worker_dependencies.model.on_request = requests.append
+    req = seed_chat_with_dataset(worker_dependencies, chat_id="c1", user_id="u1", dataset_id="a2")
+    RequestRunner(worker_dependencies, _saver(db)).start("c1", req.message_id)
+    assert (
+        worker_dependencies.repositories.messages.get("c1", req.message_id).status == "WAITING_USER"
+    )
+    pending = worker_dependencies.repositories.messages.pending_for_request("c1", req.message_id)
     assert len(pending) == 1 and pending[0].kind == "clarification"
     # new runner instance = process restart; same sqlite file = same checkpoint
-    out = RequestRunner(deps, _saver(db)).resume(
+    out = RequestRunner(worker_dependencies, _saver(db)).resume(
         "c1", req.message_id, _reply(req, pending[0].message_id)
     )
-    assert out.started and deps.repos.messages.get("c1", req.message_id).status == "COMPLETED"
-    assert len(deps.repos.tasks.list_by_request(req.message_id)) == 6
-    plans = [c for c in deps.repos.model_calls.list_by_request(req.message_id) if c.stage == "plan"]
+    assert (
+        out.started
+        and worker_dependencies.repositories.messages.get("c1", req.message_id).status
+        == "COMPLETED"
+    )
+    assert len(worker_dependencies.repositories.tasks.list_by_request(req.message_id)) == 6
+    plans = [
+        c
+        for c in worker_dependencies.repositories.model_calls.list_by_request(req.message_id)
+        if c.stage == "plan"
+    ]
     assert len(plans) == 2  # the first planner call was restored, not re-paid
 
 
@@ -106,20 +122,20 @@ def test_a_repeated_question_is_never_asked_again(tmp_path) -> None:
         ],
         "execute": [ModelResponse(structured=t1_result())] * 3,
     }
-    deps = make_deps(ScriptedModel(script))
+    worker_dependencies = make_deps(ScriptedModel(script))
     requests = []
-    deps.model.on_request = requests.append
-    req = seed_chat_with_dataset(deps, chat_id="c1", user_id="u1", dataset_id="a2")
-    RequestRunner(deps, _saver(db)).start("c1", req.message_id)
-    [pending] = deps.repos.messages.pending_for_request("c1", req.message_id)
-    out = RequestRunner(deps, _saver(db)).resume(
+    worker_dependencies.model.on_request = requests.append
+    req = seed_chat_with_dataset(worker_dependencies, chat_id="c1", user_id="u1", dataset_id="a2")
+    RequestRunner(worker_dependencies, _saver(db)).start("c1", req.message_id)
+    [pending] = worker_dependencies.repositories.messages.pending_for_request("c1", req.message_id)
+    out = RequestRunner(worker_dependencies, _saver(db)).resume(
         "c1", req.message_id, _reply(req, pending.message_id, "answer 0", message_id="m3")
     )
     assert out.started and out.status == "COMPLETED"
     planner_calls = [r for r in requests if r.stage == "plan"]
     assert "answer 0" in planner_calls[1].messages[0].content
     assert FORCED_PLAN.format(question="Which months?") in planner_calls[2].messages[0].content
-    chat = deps.repos.messages.list_by_chat("c1")
+    chat = worker_dependencies.repositories.messages.list_by_chat("c1")
     assert len([m for m in chat if m.kind == "clarification"]) == 1
     [report] = [m for m in chat if m.kind == "report"]
     assert NOT_ASKED.format(question="Which months?") in report.report.uncertainties
@@ -127,21 +143,31 @@ def test_a_repeated_question_is_never_asked_again(tmp_path) -> None:
 
 def test_resume_with_wrong_target_is_refused(tmp_path) -> None:
     db = tmp_path / "ckpt.sqlite"
-    deps = make_deps(ScriptedModel({"plan": [ModelResponse(structured=clarification("Which?"))]}))
-    req = seed_chat_with_dataset(deps, chat_id="c1", user_id="u1", dataset_id="a2")
-    RequestRunner(deps, _saver(db)).start("c1", req.message_id)
-    runner = RequestRunner(deps, _saver(db))
+    worker_dependencies = make_deps(
+        ScriptedModel({"plan": [ModelResponse(structured=clarification("Which?"))]})
+    )
+    req = seed_chat_with_dataset(worker_dependencies, chat_id="c1", user_id="u1", dataset_id="a2")
+    RequestRunner(worker_dependencies, _saver(db)).start("c1", req.message_id)
+    runner = RequestRunner(worker_dependencies, _saver(db))
     out = runner.resume("c1", req.message_id, _reply(req, "not-the-pending-one"))
     assert (
-        not out.started and deps.repos.messages.get("c1", req.message_id).status == "WAITING_USER"
+        not out.started
+        and worker_dependencies.repositories.messages.get("c1", req.message_id).status
+        == "WAITING_USER"
     )
     assert not [
-        m for m in deps.repos.messages.list_by_chat("c1") if m.kind == "clarification_response"
+        m
+        for m in worker_dependencies.repositories.messages.list_by_chat("c1")
+        if m.kind == "clarification_response"
     ]
     # The API's path: the right target before the API's claim, then a wrong one after it.
-    (question,) = deps.repos.messages.pending_for_request("c1", req.message_id)
+    (question,) = worker_dependencies.repositories.messages.pending_for_request(
+        "c1", req.message_id
+    )
     unclaimed = runner.resume_claimed("c1", req.message_id, _reply(req, question.message_id))
-    deps.repos.messages.update_request_status("c1", req.message_id, "WAITING_USER", "RUNNING")
+    worker_dependencies.repositories.messages.update_request_status(
+        "c1", req.message_id, "WAITING_USER", "RUNNING"
+    )
     wrong = runner.resume_claimed("c1", req.message_id, _reply(req, "not-the-pending-one"))
     assert not unclaimed.started and not wrong.started
 
@@ -152,8 +178,8 @@ def test_restart_after_crash_does_not_replay_finished_tasks(tmp_path) -> None:
         "plan": [ModelResponse(structured=six_task_plan())],
         "execute": [ModelResponse(structured=t1_result())] * 3,
     }
-    deps = make_deps(ScriptedModel(script), tasks_in_flight=1)
-    req = seed_chat_with_dataset(deps, chat_id="c1", user_id="u1", dataset_id="a2")
+    worker_dependencies = make_deps(ScriptedModel(script), tasks_in_flight=1)
+    req = seed_chat_with_dataset(worker_dependencies, chat_id="c1", user_id="u1", dataset_id="a2")
     completed = []
 
     def crash_after_second_completed(t):
@@ -162,26 +188,44 @@ def test_restart_after_crash_does_not_replay_finished_tasks(tmp_path) -> None:
             if len(completed) == 2:
                 raise RuntimeError("crash")
 
-    deps.repos.tasks.on_save = crash_after_second_completed  # type: ignore[attr-defined]
+    worker_dependencies.repositories.tasks.on_save = crash_after_second_completed  # type: ignore[attr-defined]
     try:
-        RequestRunner(deps, _saver(db)).start("c1", req.message_id)
+        RequestRunner(worker_dependencies, _saver(db)).start("c1", req.message_id)
     except RuntimeError:
         pass
-    deps.repos.tasks.on_save = None  # type: ignore[attr-defined]
-    calls_before = len(deps.repos.model_calls.list_by_request(req.message_id))
+    worker_dependencies.repositories.tasks.on_save = None  # type: ignore[attr-defined]
+    calls_before = len(worker_dependencies.repositories.model_calls.list_by_request(req.message_id))
     # operator requeue
-    deps.repos.messages.update_request_status("c1", req.message_id, "RUNNING", "ACCEPTED")
-    out = RequestRunner(deps, _saver(db)).start("c1", req.message_id)
-    assert out.started and deps.repos.messages.get("c1", req.message_id).status == "COMPLETED"
+    worker_dependencies.repositories.messages.update_request_status(
+        "c1", req.message_id, "RUNNING", "ACCEPTED"
+    )
+    out = RequestRunner(worker_dependencies, _saver(db)).start("c1", req.message_id)
+    assert (
+        out.started
+        and worker_dependencies.repositories.messages.get("c1", req.message_id).status
+        == "COMPLETED"
+    )
     executes_after = [
-        c for c in deps.repos.model_calls.list_by_request(req.message_id) if c.stage == "execute"
+        c
+        for c in worker_dependencies.repositories.model_calls.list_by_request(req.message_id)
+        if c.stage == "execute"
     ]
     # The one task left to run, then the report's summary call.
     assert (
         len(executes_after) == 3
-        and len(deps.repos.model_calls.list_by_request(req.message_id)) == calls_before + 2
+        and len(worker_dependencies.repositories.model_calls.list_by_request(req.message_id))
+        == calls_before + 2
     )
-    assert len([m for m in deps.repos.messages.list_by_chat("c1") if m.kind == "report"]) == 1
+    assert (
+        len(
+            [
+                m
+                for m in worker_dependencies.repositories.messages.list_by_chat("c1")
+                if m.kind == "report"
+            ]
+        )
+        == 1
+    )
 
 
 def test_restart_after_crash_mid_task_completes(tmp_path) -> None:
@@ -190,8 +234,8 @@ def test_restart_after_crash_mid_task_completes(tmp_path) -> None:
         "plan": [ModelResponse(structured=six_task_plan())],
         "execute": [ModelResponse(structured=t1_result())] * 3,
     }
-    deps = make_deps(ScriptedModel(script), tasks_in_flight=1)
-    req = seed_chat_with_dataset(deps, chat_id="c1", user_id="u1", dataset_id="a2")
+    worker_dependencies = make_deps(ScriptedModel(script), tasks_in_flight=1)
+    req = seed_chat_with_dataset(worker_dependencies, chat_id="c1", user_id="u1", dataset_id="a2")
     executes = []
 
     def crash_in_second_execute_call(request):
@@ -200,29 +244,37 @@ def test_restart_after_crash_mid_task_completes(tmp_path) -> None:
             if len(executes) == 2:  # the process dies while t2 is RUNNING
                 raise RuntimeError("crash")
 
-    deps.model.on_request = crash_in_second_execute_call  # type: ignore[attr-defined]
+    worker_dependencies.model.on_request = crash_in_second_execute_call  # type: ignore[attr-defined]
     try:
-        RequestRunner(deps, _saver(db)).start("c1", req.message_id)
+        RequestRunner(worker_dependencies, _saver(db)).start("c1", req.message_id)
     except RuntimeError:
         pass
-    deps.model.on_request = None  # type: ignore[attr-defined]
-    interrupted = deps.repos.tasks.get(req.message_id, executes[1])
+    worker_dependencies.model.on_request = None  # type: ignore[attr-defined]
+    interrupted = worker_dependencies.repositories.tasks.get(req.message_id, executes[1])
     assert interrupted.status == "RUNNING" and interrupted.attempt == 1
     # operator requeue
-    deps.repos.messages.update_request_status("c1", req.message_id, "RUNNING", "ACCEPTED")
-    out = RequestRunner(deps, _saver(db)).start("c1", req.message_id)
-    assert out.started and deps.repos.messages.get("c1", req.message_id).status == "COMPLETED"
-    retried = deps.repos.tasks.get(req.message_id, executes[1])
+    worker_dependencies.repositories.messages.update_request_status(
+        "c1", req.message_id, "RUNNING", "ACCEPTED"
+    )
+    out = RequestRunner(worker_dependencies, _saver(db)).start("c1", req.message_id)
+    assert (
+        out.started
+        and worker_dependencies.repositories.messages.get("c1", req.message_id).status
+        == "COMPLETED"
+    )
+    retried = worker_dependencies.repositories.tasks.get(req.message_id, executes[1])
     assert retried.status == "COMPLETED" and retried.attempt == 2
-    assert deps.repos.tasks.get(req.message_id, executes[0]).attempt == 1
+    assert worker_dependencies.repositories.tasks.get(req.message_id, executes[0]).attempt == 1
 
 
 def test_pending_interrupt_carries_next_action(tmp_path) -> None:
     db = tmp_path / "ckpt.sqlite"
-    deps = make_deps(ScriptedModel({"plan": [ModelResponse(structured=clarification("Which?"))]}))
-    req = seed_chat_with_dataset(deps, chat_id="c1", user_id="u1", dataset_id="a2")
-    RequestRunner(deps, _saver(db)).start("c1", req.message_id)
-    pending = RequestRunner(deps, _saver(db)).pending_interrupt(req.message_id)
+    worker_dependencies = make_deps(
+        ScriptedModel({"plan": [ModelResponse(structured=clarification("Which?"))]})
+    )
+    req = seed_chat_with_dataset(worker_dependencies, chat_id="c1", user_id="u1", dataset_id="a2")
+    RequestRunner(worker_dependencies, _saver(db)).start("c1", req.message_id)
+    pending = RequestRunner(worker_dependencies, _saver(db)).pending_interrupt(req.message_id)
     assert pending is not None and pending["kind"] == "clarification" and pending["next_action"]
 
 
@@ -237,19 +289,19 @@ def test_deadline_counts_per_segment_so_a_late_request_still_gets_model_calls(tm
         "execute": [ModelResponse(structured=t1_result())] * 3,
         "summary": [ModelResponse(text="Rows 12/13 are transfers.")],
     }
-    deps = make_deps(ScriptedModel(script))
-    deps.settings = Settings(_env_file=None, request_deadline_seconds=900)
-    req = seed_chat_with_dataset(deps, chat_id="c1", user_id="u1", dataset_id="a2")
+    worker_dependencies = make_deps(ScriptedModel(script))
+    worker_dependencies.settings = Settings(_env_file=None, request_deadline_seconds=900)
+    req = seed_chat_with_dataset(worker_dependencies, chat_id="c1", user_id="u1", dataset_id="a2")
     created = (datetime.now(UTC) - timedelta(minutes=20)).isoformat()
-    deps.repos.messages.save(req.model_copy(update={"created_at": created}))
-    runner = RequestRunner(deps, _saver(tmp_path / "ckpt.sqlite"))
+    worker_dependencies.repositories.messages.save(req.model_copy(update={"created_at": created}))
+    runner = RequestRunner(worker_dependencies, _saver(tmp_path / "ckpt.sqlite"))
     runner.start("c1", req.message_id)
-    pending = deps.repos.messages.pending_for_request("c1", req.message_id)
+    pending = worker_dependencies.repositories.messages.pending_for_request("c1", req.message_id)
     out = runner.resume("c1", req.message_id, _reply(req, pending[0].message_id))
     assert out.status == "COMPLETED"
-    calls = deps.repos.model_calls.list_by_request(req.message_id)
+    calls = worker_dependencies.repositories.model_calls.list_by_request(req.message_id)
     assert [c.stage for c in calls].count("plan") == 2
-    assert all(c.outcome == "COMPLETED" for c in calls) and not deps.segment_started
+    assert all(c.outcome == "COMPLETED" for c in calls) and not worker_dependencies.segment_started
 
 
 def test_a_request_completes_on_the_fallbacks_while_every_stage_model_is_down() -> None:
@@ -267,15 +319,18 @@ def test_a_request_completes_on_the_fallbacks_while_every_stage_model_is_down() 
             "scripted": [down],
         }
     )
-    deps = make_deps(model, tasks_in_flight=1)
-    deps.routes = {
+    worker_dependencies = make_deps(model, tasks_in_flight=1)
+    worker_dependencies.routes = {
         Stage.PLAN: ModelRoute("planner", ("planner-2",)),
         Stage.EXECUTE: ModelRoute("executor", ("executor-2",)),
     }
-    req = seed_chat_with_dataset(deps, chat_id="c1", user_id="u1", dataset_id="a2")
-    assert RequestRunner(deps, _saver(":memory:")).start("c1", req.message_id).status == "COMPLETED"
+    req = seed_chat_with_dataset(worker_dependencies, chat_id="c1", user_id="u1", dataset_id="a2")
+    assert (
+        RequestRunner(worker_dependencies, _saver(":memory:")).start("c1", req.message_id).status
+        == "COMPLETED"
+    )
     assert model.sent == ["planner", "planner-2", "executor", *["executor-2"] * 3, "scripted"]
-    calls = deps.repos.model_calls.list_by_request(req.message_id)
+    calls = worker_dependencies.repositories.model_calls.list_by_request(req.message_id)
     answered = [c for c in calls if c.outcome == "COMPLETED"]
     assert {(c.model, c.metadata["requested_model"]) for c in answered} == {
         ("bedrock/planner-2", "planner"),

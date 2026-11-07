@@ -1,6 +1,6 @@
 # ContextForge: implementation plan
 
-Updated: 4 November 2026. This is the low-level plan: the entity model with every field, the Message shapes, the working brief, the DynamoDB physical design, the context flow and compaction policy, the model split with worked prompt examples, the stage prompts, the repository layout, and the phase 1 task list. The reasoning behind the choices is in [system-design.md](system-design.md). Status is in [progress.md](progress.md).
+Updated: 4 November 2026. This is the low-level plan: the entity model with every field, the Message shapes, the request state, the DynamoDB physical design, the context flow and compaction policy, the model split with worked prompt examples, the stage prompts, the repository layout, and the phase 1 task list. The reasoning behind the choices is in [system-design.md](system-design.md). Status is in [progress.md](progress.md).
 
 Every field cites a current requirement. Fields removed during review are listed under each entity so they are not re-added without a new reason.
 
@@ -248,7 +248,7 @@ Uniqueness: integrationId, name. Tool search ranks on name and description only.
 - The planner may only name Artifacts in `inputArtifactIds` that belong to the request's chat; the plan gate enforces this in code.
 - Missing tools after re-sync are disabled, not deleted.
 
-## 5. Working brief: the LangGraph state for one request
+## 5. Request state: the LangGraph state for one request
 
 Not an entity and not a table. It is the state class the graph declares; the checkpointer saves it after each node into storage the library manages. Read only by graph nodes.
 
@@ -267,7 +267,7 @@ Not an entity and not a table. It is the state class the graph declares; the che
 Rules: compaction keeps every field except `messages`; `plan` and `facts` are derivable and can be rebuilt; nothing in state is shown to the user; per-request budget limits come from summing ModelCall records, not a state counter.
 
 ```text
-Our code:        class RequestState(TypedDict)    the working brief fields
+Our code:        class RequestState(TypedDict)    the request state fields
 LangGraph:       checkpointer.put(state)          after every node, automatically
 Storage:         DynamoDBSaver's own tables       managed by the library (SQLite locally)
 Our entities:    Message, Task, ModelCall, …      our table, written by our code
@@ -525,7 +525,7 @@ Recorded 4 November 2026. Every path to bytes goes through a tool with a cap or 
 | Email, Drive file | not stored | the provider, through the MCP server with the user's OAuth connection | the integration's own tool, chosen by lexical tool search over the catalog; results bounded by the tool |
 | Query output over 50 rows | JSON lines, full result | S3; Artifact `kind=raw_result` | row slice on demand via `read_artifact(id, rows)`; the stub in context names the artifact and the omitted count |
 | Generated file (xlsx, csv) | bytes | S3; Artifact `kind=deliverable`, linked from the report | download via signed URL; not read back by the model |
-| Working brief | LangGraph state, JSON | checkpointer tables: SQLite locally, DynamoDB from phase 10 | loaded whole into every call; `messages` compacted when over budget; nothing searched |
+| Request state | LangGraph state, JSON | checkpointer tables: SQLite locally, DynamoDB from phase 10 | loaded whole into every call; `messages` compacted when over budget; nothing searched |
 | Task results | structured JSON, no row sets | DynamoDB `REQ#<id> / TASK#<id>` | by dependency only: a task gets its dependencies' summaries, about 400 tokens each |
 | Messages and reports | JSON records | DynamoDB `CHAT#<id> / MSG#<id>` | listed by chat in ULID order; prior reports go into the planner's prior-context section |
 | Standing instructions, preferences | text and small JSON on the User record | DynamoDB `USER#<id> / PROFILE` | always loaded, memory section of every call |
@@ -1163,7 +1163,7 @@ context-forge/
     core/
       ids.py  values.py  settings.py  logging.py          ULIDs, value types, typed settings, request/task context vars
       entities/                                           one file per entity; lifecycles.py holds the transition tables
-      planner.py  state.py                                PlannerOutput; RequestState and TaskState (the working brief)
+      planner.py  state.py                                PlannerOutput; RequestState and TaskState (the request state)
       repositories/base.py  memory.py                     Protocols; in-memory implementations
       storage.py  queue.py                                BlobStore and Queue Protocols with in-process implementations
       models/base.py  scripted.py  recording.py           ModelRequest/Response, ModelClient; scripted fake; ModelCall recorder
@@ -1174,7 +1174,7 @@ context-forge/
       services/submit.py  replies.py  artifacts.py  usage.py   idempotent submit; interrupt verification; upload and delete rules; usage sums
     worker/
       deps.py  workflow.py  runner.py  consumer.py        wiring; the @entrypoint: plan -> interrupt -> gate -> task waves -> cite -> report; start/resume/restart; queue loop
-      stages/plan.py  execute.py  cite.py  report.py  stubs.py  guards.py   plain stage functions, wrapped as @tasks by workflow.py; execute.py holds the Graph API loop for one task
+      stages/plan.py  execute.py  citation_checks.py  report.py  stubs.py  guards.py   plain stage functions, wrapped as @tasks by workflow.py; execute.py holds the Graph API loop for one task
       tools/sql_query.py  read_artifact.py  search_chunks.py  mcp.py  registry.py
     api/
       app.py  deps.py  auth.py  errors.py                 app factory, dependency wiring, session, one error shape

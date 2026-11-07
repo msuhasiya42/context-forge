@@ -111,7 +111,8 @@ def read_plan_leniently(
     fix: ``tasks`` sent as a JSON string is decoded (DeepSeek v3.2); a missing ``kind`` is
     ``plan`` when tasks and no question are given (Mistral Large 3, Nemotron); a task without a
     ``kind`` is a web_search when it reads no artifact and a sql_analysis when it reads datasets
-    only. Anything else is left for validation to reject."""
+    only; a plan's empty ``question`` array is omitted (GPT-OSS). Anything else is left for
+    validation to reject."""
     if not isinstance(answer, dict):
         return answer, []
     fixed, fixes = dict(answer), []
@@ -124,6 +125,9 @@ def read_plan_leniently(
     if "kind" not in fixed and tasks and not fixed.get("question"):
         fixed["kind"] = "plan"
         fixes.append("kind missing: plan")
+    if fixed.get("kind") == "plan" and fixed.get("question") == []:
+        del fixed["question"]
+        fixes.append("plan question sent as an empty array")
     fixed["tasks"] = []
     for task in tasks:
         kind = _missing_kind(task, dataset_ids)

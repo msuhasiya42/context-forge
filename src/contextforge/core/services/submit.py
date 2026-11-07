@@ -11,7 +11,7 @@ from contextforge.core.repositories.memory import Repositories
 
 
 def submit_request(
-    repos: Repositories, *, client_key: str, chat_id: str, user_id: str, content: str
+    repositories: Repositories, *, client_key: str, chat_id: str, user_id: str, content: str
 ) -> RequestMessage:
     """Create the request Message at ACCEPTED; a replayed ``client_key`` returns the first one."""
     now = now_iso()
@@ -26,4 +26,4 @@ def submit_request(
         created_at=now,
         updated_at=now,
     )
-    return repos.messages.create_request(client_key, message)
+    return repositories.messages.create_request(client_key, message)

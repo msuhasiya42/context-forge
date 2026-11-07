@@ -122,10 +122,12 @@ class RequestTracer:
                 self._stages.pop(request_message_id, None)
 
     @contextmanager
-    def task(self, brief: RequestState, task_id: str) -> Iterator[None]:
+    def task(self, request_state: RequestState, task_id: str) -> Iterator[None]:
         """The run of one task, ``task:<kind>:<taskId>``, under the request's root."""
-        request_id = brief["request_message_id"]
-        kind = next((e["kind"] for e in brief["plan"] if e["task_id"] == task_id), "unknown")
+        request_id = request_state["request_message_id"]
+        kind = next(
+            (e["kind"] for e in request_state["plan"] if e["task_id"] == task_id), "unknown"
+        )
         metadata = {"taskId": task_id, "taskKind": kind}
         parent = self._roots.get(request_id)
         with self._span(self.start(parent, f"task:{kind}:{task_id}", "chain", metadata)) as run:
@@ -298,17 +300,21 @@ class _TracedTool:
         self.spec = inner.spec
         self.permission: ToolPermission = inner.permission
 
-    def run(self, arguments: dict[str, Any], ctx: ToolContext) -> ToolResult:
+    def run(self, arguments: dict[str, Any], tool_context: ToolContext) -> ToolResult:
         tracer = self._tracer
         run = tracer.start(
-            tracer.parent_of(ctx.request_message_id, ctx.task_id),
+            tracer.parent_of(tool_context.request_message_id, tool_context.task_id),
             f"tool:{self.spec.name}",
             "tool",
-            {"tool": self.spec.name, "taskId": ctx.task_id, "toolCallId": ctx.tool_call_id},
+            {
+                "tool": self.spec.name,
+                "taskId": tool_context.task_id,
+                "toolCallId": tool_context.tool_call_id,
+            },
             arguments if tracer.include_content else None,
         )
         try:
-            result = self._inner.run(arguments, ctx)
+            result = self._inner.run(arguments, tool_context)
         except Exception as exc:
             tracer.end(run, error=exc)
             raise
@@ -318,7 +324,14 @@ class _TracedTool:
             "artifactIds": result.artifact_ids,
             "errorClass": result.error_class,
         }
-        tracer.end(run, metadata=metadata, outputs=result.model_dump(mode="json", by_alias=True))
+        tracer.end(
+            run,
+            error=RuntimeError(result.error or f"Tool returned {result.status}")
+            if result.status != "ok"
+            else None,
+            metadata=metadata,
+            outputs=result.model_dump(mode="json", by_alias=True),
+        )
         return result
 
 

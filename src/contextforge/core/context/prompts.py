@@ -13,10 +13,12 @@ MEMORY_VERSION = "2"
 
 # The stage prompt file each stage uses; its name is the version written to context_version.
 _STAGE_PROMPTS: dict[Stage, str] = {
-    Stage.PLAN: "plan.4",
-    Stage.EXECUTE: "execute.7",
+    Stage.PLAN: "plan.5",
+    Stage.EXECUTE: "execute.8",
     Stage.COMPRESS: "compress.2",
     Stage.SUMMARY: "summary.1",
+    Stage.CITE: "cite.1",
+    Stage.REPORT: "report.1",
 }
 
 

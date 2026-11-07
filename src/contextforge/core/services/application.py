@@ -51,9 +51,9 @@ logger = logging.getLogger(__name__)
 
 class ServiceDeps(Protocol):
     """What the application needs from the worker's dependency bundle. A Protocol, so ``core``
-    imports nothing from ``worker`` (spec 12); ``WorkerDeps`` satisfies it."""
+    imports nothing from ``worker`` (spec 12); ``WorkerDependencies`` satisfies it."""
 
-    repos: Repositories
+    repositories: Repositories
     blobs: BlobStore
     queue: Queue
     activity: ActivityBus
@@ -80,14 +80,14 @@ class RequestView:
 
 
 class Application:
-    def __init__(self, deps: ServiceDeps, user_id: str) -> None:
-        self.deps, self.user_id = deps, user_id
+    def __init__(self, worker_dependencies: ServiceDeps, user_id: str) -> None:
+        self.worker_dependencies, self.user_id = worker_dependencies, user_id
         # The API's own status moves, cancel and reply, run one at a time, so a cancel cannot
         # land between a reply's claim and the save of its answer.
         self.reply_lock = threading.Lock()
 
     def me(self) -> User:
-        user = self.deps.repos.users.get(self.user_id)
+        user = self.worker_dependencies.repositories.users.get(self.user_id)
         if user is None:
             now = now_iso()
             user = User(
@@ -97,7 +97,7 @@ class Application:
                 created_at=now,
                 updated_at=now,
             )
-            self.deps.repos.users.save(user)
+            self.worker_dependencies.repositories.users.save(user)
         return user
 
     def update_me(self, changes: Mapping[str, Any]) -> User:
@@ -120,19 +120,19 @@ class Application:
             raise ServiceError(
                 400, "validation", "Invalid preferences or instructions."
             ) from invalid
-        self.deps.repos.users.save(updated)
+        self.worker_dependencies.repositories.users.save(updated)
         return updated
 
     def chats(self) -> list[Chat]:
         """The user's chats, most recently updated first; archived chats are hidden (E16)."""
         return [
             chat
-            for chat in self.deps.repos.chats.list_by_user(self.user_id)
+            for chat in self.worker_dependencies.repositories.chats.list_by_user(self.user_id)
             if chat.status == ChatStatus.ACTIVE
         ]
 
     def chat(self, chat_id: str) -> Chat:
-        chat = self.deps.repos.chats.get(self.user_id, chat_id)
+        chat = self.worker_dependencies.repositories.chats.get(self.user_id, chat_id)
         if chat is None or chat.status != ChatStatus.ACTIVE:
             raise ServiceError(404, "not_found", "Chat not found.")
         return chat
@@ -148,14 +148,14 @@ class Application:
             created_at=now,
             updated_at=now,
         )
-        self.deps.repos.chats.save(chat)
+        self.worker_dependencies.repositories.chats.save(chat)
         return chat
 
     def update_chat(self, chat_id: str, *, title: str | None = None, archive: bool = False) -> Chat:
         chat = self.chat(chat_id)
         if archive and any(
             isinstance(m, RequestMessage) and m.status not in TERMINAL
-            for m in self.deps.repos.messages.list_by_chat(chat_id)
+            for m in self.worker_dependencies.repositories.messages.list_by_chat(chat_id)
         ):
             raise ServiceError(
                 409, "invalid_state", "Cancel active requests before archiving this Chat."
@@ -167,25 +167,25 @@ class Application:
                 "updated_at": now_iso(),
             }
         )
-        self.deps.repos.chats.save(updated)
+        self.worker_dependencies.repositories.chats.save(updated)
         return updated
 
     def messages(self, chat_id: str) -> list[Message]:
         self.chat(chat_id)
         return sorted(
-            self.deps.repos.messages.list_by_chat(chat_id),
+            self.worker_dependencies.repositories.messages.list_by_chat(chat_id),
             key=lambda m: (m.created_at, m.message_id),
         )
 
     def artifacts(self, chat_id: str) -> list[Artifact]:
         self.chat(chat_id)
-        return self.deps.repos.artifacts.list_by_chat(chat_id)
+        return self.worker_dependencies.repositories.artifacts.list_by_chat(chat_id)
 
     def artifact_content(self, chat_id: str, artifact_id: str) -> tuple[Artifact, bytes]:
         """The Artifact and its stored bytes; 404 unless it is an AVAILABLE deliverable or
         raw_result of this user's chat whose bytes are still stored (a raw result expires)."""
         self.chat(chat_id)
-        artifact = self.deps.repos.artifacts.get(chat_id, artifact_id)
+        artifact = self.worker_dependencies.repositories.artifacts.get(chat_id, artifact_id)
         if (
             artifact is None
             or artifact.user_id != self.user_id
@@ -194,13 +194,13 @@ class Application:
         ):
             raise ServiceError(404, "not_found", "Artifact not found.")
         try:
-            return artifact, self.deps.blobs.get(artifact.storage_ref)
+            return artifact, self.worker_dependencies.blobs.get(artifact.storage_ref)
         except LookupError as gone:
             raise ServiceError(404, "not_found", "Artifact content is no longer stored.") from gone
 
     def request(self, chat_id: str, message_id: str) -> RequestMessage:
         self.chat(chat_id)
-        message = self.deps.repos.messages.get(chat_id, message_id)
+        message = self.worker_dependencies.repositories.messages.get(chat_id, message_id)
         if not isinstance(message, RequestMessage) or message.user_id != self.user_id:
             raise ServiceError(404, "not_found", "Request not found.")
         return message
@@ -210,7 +210,7 @@ class Application:
             raise ServiceError(400, "validation", "Question cannot be blank.")
         chat = self.chat(chat_id)
         message = submit_request(
-            self.deps.repos,
+            self.worker_dependencies.repositories,
             client_key=f"{self.user_id}:{chat_id}:{key}",
             chat_id=chat_id,
             user_id=self.user_id,
@@ -222,24 +222,27 @@ class Application:
             )
         if not chat.title:
             self.update_chat(chat_id, title=title_from(content))
-        self.deps.queue.send(
+        self.worker_dependencies.queue.send(
             WorkMessage(kind="start", chat_id=chat_id, message_id=message.message_id)
         )
-        self.deps.touch_chat(chat_id, self.user_id)
+        self.worker_dependencies.touch_chat(chat_id, self.user_id)
         return message
 
     def detail(self, chat_id: str, message_id: str) -> dict[str, Any]:
         request = self.request(chat_id, message_id)
-        calls = self.deps.repos.model_calls.list_by_request(message_id)
+        calls = self.worker_dependencies.repositories.model_calls.list_by_request(message_id)
         return {
             "request": wire(request),
-            "tasks": [wire(t) for t in self.deps.repos.tasks.list_by_request(message_id)],
+            "tasks": [
+                wire(t)
+                for t in self.worker_dependencies.repositories.tasks.list_by_request(message_id)
+            ],
             "usage": self._usage(message_id, calls),
         }
 
     def _usage(self, message_id: str, calls: list[ModelCall]) -> dict[str, Any]:
         """The request's summed usage and estimated cost over its recorded ``calls``."""
-        usage = self.deps.repos.model_calls.sum_usage(message_id)
+        usage = self.worker_dependencies.repositories.model_calls.sum_usage(message_id)
         return {
             **(wire(usage) if usage else {}),
             "modelCalls": len(calls),
@@ -262,7 +265,7 @@ class Application:
         """
         request = self.request(chat_id, message_id)
         calls = sorted(
-            self.deps.repos.model_calls.list_by_request(message_id),
+            self.worker_dependencies.repositories.model_calls.list_by_request(message_id),
             key=lambda c: (c.started_at, c.model_call_id),
         )
         transcripts = {
@@ -272,14 +275,14 @@ class Application:
         }
         entries = [
             m
-            for m in self.deps.repos.messages.list_by_chat(chat_id)
+            for m in self.worker_dependencies.repositories.messages.list_by_chat(chat_id)
             if getattr(m, "request_message_id", None) == message_id
         ]
         return build_trace(
             TraceRecords(
                 request=request,
                 usage=self._usage(message_id, calls),
-                tasks=self.deps.repos.tasks.list_by_request(message_id),
+                tasks=self.worker_dependencies.repositories.tasks.list_by_request(message_id),
                 calls=calls,
                 entries=entries,
                 transcripts=transcripts,
@@ -290,11 +293,11 @@ class Application:
         """The stored transcript JSON of one ModelCall of this user's request; 404 when the
         call is not the request's, recorded none, or its blob is gone."""
         self.request(chat_id, message_id)
-        call = self.deps.repos.model_calls.get(message_id, model_call_id)
+        call = self.worker_dependencies.repositories.model_calls.get(message_id, model_call_id)
         if call is None or call.transcript_ref is None:
             raise ServiceError(404, "not_found", "No transcript was recorded for that call.")
         try:
-            return self.deps.blobs.get(call.transcript_ref)
+            return self.worker_dependencies.blobs.get(call.transcript_ref)
         except LookupError as gone:
             raise ServiceError(404, "not_found", "That transcript is no longer stored.") from gone
 
@@ -304,7 +307,7 @@ class Application:
         if call.transcript_ref is None:
             return None
         try:
-            record: Transcript = json.loads(self.deps.blobs.get(call.transcript_ref))
+            record: Transcript = json.loads(self.worker_dependencies.blobs.get(call.transcript_ref))
         except (LookupError, ValueError):
             logger.warning(
                 "transcript of model call %s could not be read", call.model_call_id, exc_info=True
@@ -320,14 +323,18 @@ class Application:
         writes WAITING_USER before the question, so the status alone cannot close the stream.
         """
         request = self.request(chat_id, message_id)
-        tasks = self.deps.repos.tasks.list_by_request(message_id)
+        tasks = self.worker_dependencies.repositories.tasks.list_by_request(message_id)
         closed = request.status in TERMINAL or (
             request.status == RequestStatus.WAITING_USER
-            and bool(self.deps.repos.messages.pending_for_request(chat_id, message_id))
+            and bool(
+                self.worker_dependencies.repositories.messages.pending_for_request(
+                    chat_id, message_id
+                )
+            )
         )
         messages = [
             m
-            for m in self.deps.repos.messages.list_by_chat(chat_id)
+            for m in self.worker_dependencies.repositories.messages.list_by_chat(chat_id)
             if m.sender != Sender.USER and getattr(m, "request_message_id", None) == message_id
         ]
         return RequestView(
@@ -339,7 +346,7 @@ class Application:
 
     def activity_since(self, message_id: str, after: int) -> list[tuple[int, dict[str, str]]]:
         """Transient tool activity of the request after sequence ``after``; never persisted."""
-        return self.deps.activity.since(message_id, after)
+        return self.worker_dependencies.activity.since(message_id, after)
 
     def cancel(self, chat_id: str, message_id: str) -> RequestMessage:
         with self.reply_lock:
@@ -347,12 +354,12 @@ class Application:
             if request.status in TERMINAL:
                 raise ServiceError(409, "invalid_state", f"Request is {request.status}.")
             try:
-                updated = self.deps.repos.messages.update_request_status(
+                updated = self.worker_dependencies.repositories.messages.update_request_status(
                     chat_id, message_id, request.status, RequestStatus.CANCELLED
                 )
             except StaleStatusError as stale:  # the worker moved it first
                 raise ServiceError(409, "invalid_state", f"Request is {stale.actual}.") from stale
-        self.deps.touch_chat(chat_id, self.user_id)
+        self.worker_dependencies.touch_chat(chat_id, self.user_id)
         return updated
 
     def reply(
@@ -370,13 +377,15 @@ class Application:
         with self.reply_lock:
             self.request(chat_id, message_id)
             question = self._entry(chat_id, message_id, target)
-            pending = self.deps.repos.messages.pending_for_request(chat_id, message_id)
+            pending = self.worker_dependencies.repositories.messages.pending_for_request(
+                chat_id, message_id
+            )
             if not isinstance(question, ClarificationMessage) or question not in pending:
                 raise ServiceError(409, "not_pending", NOT_PENDING)
             self._claim(chat_id, message_id)
             reply = self._save_answer(question, content)
-        self.deps.touch_chat(chat_id, self.user_id)
-        self.deps.queue.send(
+        self.worker_dependencies.touch_chat(chat_id, self.user_id)
+        self.worker_dependencies.queue.send(
             WorkMessage(
                 kind="resume",
                 chat_id=chat_id,
@@ -389,7 +398,7 @@ class Application:
     def _entry(self, chat_id: str, message_id: str, entry_id: str) -> Message:
         """Message ``entry_id``; 404 unless it is this user's and an entry of request
         ``message_id`` (the request Message itself is not one of its entries)."""
-        entry = self.deps.repos.messages.get(chat_id, entry_id)
+        entry = self.worker_dependencies.repositories.messages.get(chat_id, entry_id)
         if (
             entry is None
             or isinstance(entry, RequestMessage)
@@ -402,7 +411,7 @@ class Application:
     def _claim(self, chat_id: str, message_id: str) -> None:
         """WAITING_USER -> RUNNING; a request something else moved first is not pending."""
         try:
-            self.deps.repos.messages.update_request_status(
+            self.worker_dependencies.repositories.messages.update_request_status(
                 chat_id, message_id, RequestStatus.WAITING_USER, RequestStatus.RUNNING
             )
         except StaleStatusError as stale:
@@ -426,11 +435,11 @@ class Application:
             updated_at=now,
         )
         try:
-            self.deps.repos.messages.save(reply)
+            self.worker_dependencies.repositories.messages.save(reply)
         except Exception:
             # Hand the question back rather than leave the request RUNNING with no answer and
             # no resume queued; the user can answer again.
-            self.deps.repos.messages.update_request_status(
+            self.worker_dependencies.repositories.messages.update_request_status(
                 question.chat_id,
                 question.request_message_id,
                 RequestStatus.RUNNING,

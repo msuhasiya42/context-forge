@@ -21,34 +21,34 @@ from contextforge.core.values import Usage
 
 
 def test_submit_is_idempotent_on_client_key() -> None:
-    repos = Repositories.in_memory()
-    a = submit_request(repos, client_key="k1", chat_id="c1", user_id="u1", content="x")
-    b = submit_request(repos, client_key="k1", chat_id="c1", user_id="u1", content="x")
+    repositories = Repositories.in_memory()
+    a = submit_request(repositories, client_key="k1", chat_id="c1", user_id="u1", content="x")
+    b = submit_request(repositories, client_key="k1", chat_id="c1", user_id="u1", content="x")
     assert a.message_id == b.message_id
-    assert len(repos.messages.list_by_chat("c1")) == 1
+    assert len(repositories.messages.list_by_chat("c1")) == 1
 
 
 def test_conditional_transition_rejects_stale_expected() -> None:
-    repos = Repositories.in_memory()
-    m = submit_request(repos, client_key="k", chat_id="c1", user_id="u1", content="x")
-    repos.messages.update_request_status(
+    repositories = Repositories.in_memory()
+    m = submit_request(repositories, client_key="k", chat_id="c1", user_id="u1", content="x")
+    repositories.messages.update_request_status(
         "c1", m.message_id, RequestStatus.ACCEPTED, RequestStatus.RUNNING
     )
     with pytest.raises(StaleStatusError):
-        repos.messages.update_request_status(
+        repositories.messages.update_request_status(
             "c1", m.message_id, RequestStatus.ACCEPTED, RequestStatus.RUNNING
         )
 
 
 def test_lists_are_in_ulid_order() -> None:
-    repos = Repositories.in_memory()
+    repositories = Repositories.in_memory()
     ids = [
         submit_request(
-            repos, client_key=f"k{i}", chat_id="c1", user_id="u1", content="x"
+            repositories, client_key=f"k{i}", chat_id="c1", user_id="u1", content="x"
         ).message_id
         for i in range(3)
     ]
-    assert [m.message_id for m in repos.messages.list_by_chat("c1")] == sorted(ids)
+    assert [m.message_id for m in repositories.messages.list_by_chat("c1")] == sorted(ids)
 
 
 def test_queue_round_trip_and_empty() -> None:
@@ -61,8 +61,8 @@ def test_queue_round_trip_and_empty() -> None:
 
 
 def test_sum_usage_is_none_when_unknown() -> None:
-    repos = Repositories.in_memory()
-    repos.model_calls.save(
+    repositories = Repositories.in_memory()
+    repositories.model_calls.save(
         ModelCall(
             model_call_id="k1",
             request_message_id="m1",
@@ -75,8 +75,8 @@ def test_sum_usage_is_none_when_unknown() -> None:
             started_at="t",
         )
     )
-    assert repos.model_calls.sum_usage("m1") is None
-    repos.model_calls.save(
+    assert repositories.model_calls.sum_usage("m1") is None
+    repositories.model_calls.save(
         ModelCall(
             model_call_id="k2",
             request_message_id="m1",
@@ -89,11 +89,11 @@ def test_sum_usage_is_none_when_unknown() -> None:
             started_at="t",
         )
     )
-    assert repos.model_calls.sum_usage("m1") == Usage(input_tokens=10, output_tokens=5)
+    assert repositories.model_calls.sum_usage("m1") == Usage(input_tokens=10, output_tokens=5)
 
 
 def test_a_model_call_is_got_only_under_its_own_request() -> None:
-    repos = Repositories.in_memory()
+    repositories = Repositories.in_memory()
     call = ModelCall(
         model_call_id="k1",
         request_message_id="m1",
@@ -105,9 +105,12 @@ def test_a_model_call_is_got_only_under_its_own_request() -> None:
         outcome="COMPLETED",
         started_at="t",
     )
-    repos.model_calls.save(call)
-    assert repos.model_calls.get("m1", "k1") == call
-    assert repos.model_calls.get("m2", "k1") is None and repos.model_calls.get("m1", "k2") is None
+    repositories.model_calls.save(call)
+    assert repositories.model_calls.get("m1", "k1") == call
+    assert (
+        repositories.model_calls.get("m2", "k1") is None
+        and repositories.model_calls.get("m1", "k2") is None
+    )
 
 
 def _clarification(request_message_id: str, content: str) -> ClarificationMessage:
@@ -125,8 +128,8 @@ def _clarification(request_message_id: str, content: str) -> ClarificationMessag
 
 
 def test_pending_for_request_excludes_answered() -> None:
-    repos = Repositories.in_memory()
-    req = submit_request(repos, client_key="k", chat_id="c1", user_id="u1", content="x")
+    repositories = Repositories.in_memory()
+    req = submit_request(repositories, client_key="k", chat_id="c1", user_id="u1", content="x")
     answered = _clarification(req.message_id, "Which month?")
     still_open = _clarification(req.message_id, "Which account?")
     reply = ClarificationResponseMessage(
@@ -142,9 +145,9 @@ def test_pending_for_request_excludes_answered() -> None:
         updated_at="t",
     )
     for message in (answered, still_open, reply):
-        repos.messages.save(message)
+        repositories.messages.save(message)
 
-    pending = repos.messages.pending_for_request("c1", req.message_id)
+    pending = repositories.messages.pending_for_request("c1", req.message_id)
 
     assert [m.message_id for m in pending] == [still_open.message_id]
 

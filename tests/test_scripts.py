@@ -57,7 +57,7 @@ def test_dry_run_writes_a_report_comparing_two_models(tmp_path: Path) -> None:
         ["--models", models, "--query-file", str(query_file), "--dry-run", "--out", str(out)]
     )
     report = out.read_text(encoding="utf-8")
-    assert "- Mode: dry run" in report and "prompt plan.4" in report and f"> {QUERY}" in report
+    assert "- Mode: dry run" in report and "prompt plan.5" in report and f"> {QUERY}" in report
     assert "- Expected cost, stated before the run: $0." in report and "Cap: $0.50" in report
     for model in models.split(","):
         assert f"| `{model}` | plan | yes | forced tool → tool call | 3 | 2 | 1 |" in report

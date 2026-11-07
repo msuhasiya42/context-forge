@@ -77,7 +77,7 @@ def build_context(inputs: ContextInputs, budgets: Budgets) -> BuiltContext:
     # cached prefix on every call.
     system = [inputs.memory, inputs.stage_prompt]
     user_sections = {
-        "brief": _render_brief(inputs),
+        "brief": _render_request_context(inputs),
         "facts": _block(
             "facts", [_fact_line(f) for f in newest_facts(inputs.facts, budgets.facts_cap)]
         ),
@@ -105,7 +105,7 @@ def build_context(inputs: ContextInputs, budgets: Budgets) -> BuiltContext:
     )
 
 
-def _render_brief(inputs: ContextInputs) -> str:
+def _render_request_context(inputs: ContextInputs) -> str:
     """Section 2 in the spec 9.1 tag order.
 
     Request, context, preferences, constraints, next action, sources, prior context.
@@ -132,14 +132,15 @@ def _render_brief(inputs: ContextInputs) -> str:
 
 # Longest name or detail a ``<sources>`` line shows, in characters, "…" included.
 _SOURCE_FIELD_CAP = 120
-# Longest piece of untrusted text elsewhere in the brief (about 500 tokens): a fact, its
+# Longest piece of untrusted text elsewhere in the request state (about 500 tokens): a fact, its
 # evidence, a summary or a prior claim fits; a page pasted into a summary does not.
 _TEXT_CAP = 2000
 
 
 def _untrusted(text: str, cap: int = _TEXT_CAP) -> str:
     """``text`` that may hold page or upload text, directly or quoted by a model, made safe for
-    a brief block: on one line, cut to ``cap`` characters ("…" included), with ``<`` and ``>``
+    a request state block: on one line, cut to ``cap`` characters ("…" included), with ``<`` and
+    ``>``
     escaped, so it cannot close the block it sits in or forge a tag. ``&`` is left alone: the
     model copies this text into facts and excerpts, and "S&amp;P 500" would reach the report
     and fail cite (nothing downstream decodes entities)."""
@@ -175,7 +176,7 @@ def _join(blocks: Iterable[str]) -> str:
 
 
 def newest_facts(facts: list[Fact], cap: int) -> list[Fact]:
-    """The last ``cap`` facts: the brief keeps and shows only the newest."""
+    """The last ``cap`` facts: the request state keeps and shows only the newest."""
     # Not ``facts[-cap:]``: with a cap of 0 that slice keeps every fact.
     return facts[max(0, len(facts) - cap) :]
 
@@ -198,6 +199,11 @@ def _prior(message: Message) -> list[str]:
         return [
             "report:",
             *(f"- {_untrusted(claim.text)}" for claim in message.report.claims),
+            *(
+                f"Prior assessment ({c.confidence} confidence): {_untrusted(c.text)}"
+                for c in message.report.conclusions
+            ),
+            *(f"Prior gap: {_untrusted(gap)}" for gap in message.report.uncertainties),
             *(
                 f"Prior constraint ({c.source}, {c.date}): {_untrusted(c.text)}"
                 for c in message.report.constraints

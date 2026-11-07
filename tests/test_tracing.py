@@ -11,15 +11,36 @@ from contextforge.core.models.config import ModelRoute, load_models_config
 from contextforge.core.models.errors import ModelTimeout, ModelUnavailable
 from contextforge.core.models.scripted import ScriptedModel
 from contextforge.core.settings import Settings
+from contextforge.core.tools.base import ToolContext
 from contextforge.core.values import Usage
 from contextforge.infra import tracing
 from contextforge.infra.runtime import build_worker
 from contextforge.infra.tracing import RequestTracer
-from contextforge.worker.deps import WorkerDeps
+from contextforge.worker.dependencies import WorkerDependencies
 from contextforge.worker.runner import RequestRunner
 from tests.helpers import ByModel, make_deps, seed_chat_with_dataset, t1_result
 
 SQL = "SELECT count(*) AS n FROM t"
+
+
+def test_a_returned_tool_error_is_a_failed_trace_not_a_success() -> None:
+    worker_dependencies = make_deps(ScriptedModel({}))
+    req = seed_chat_with_dataset(worker_dependencies, chat_id="c1", user_id="u1", dataset_id="a2")
+    client = FakeLangSmith()
+    _traced(worker_dependencies, client)
+    with worker_dependencies.tracer.request(req.message_id, "c1", lambda: {"status": "RUNNING"}):
+        result = worker_dependencies.tools["sql_query"].run(
+            {"dataset_id": "a2", "sql": "DROP TABLE t"},
+            ToolContext(
+                chat_id="c1",
+                user_id="u1",
+                request_message_id=req.message_id,
+                task_id="t1",
+                tool_call_id="bad",
+            ),
+        )
+    assert result.status == "error"
+    assert client.ended("tool:sql_query")["error"] is not None
 
 
 class FakeLangSmith:
@@ -50,13 +71,17 @@ class FakeLangSmith:
         return next(run for run in self.updated if run["name"] == name)
 
 
-def _traced(deps: WorkerDeps, client: FakeLangSmith, *, content: bool = False) -> WorkerDeps:
-    """``deps`` wired the way the runtime wires a tracing tracer."""
+def _traced(
+    worker_dependencies: WorkerDependencies, client: FakeLangSmith, *, content: bool = False
+) -> WorkerDependencies:
+    """``worker_dependencies`` wired the way the runtime wires a tracing tracer."""
     prices = load_models_config().prices
-    deps.tracer = RequestTracer(client, "test", include_content=content, prices=prices)
-    deps.model = deps.tracer.model(deps.model)
-    deps.tools = deps.tracer.tools(deps.tools)
-    return deps
+    worker_dependencies.tracer = RequestTracer(
+        client, "test", include_content=content, prices=prices
+    )
+    worker_dependencies.model = worker_dependencies.tracer.model(worker_dependencies.model)
+    worker_dependencies.tools = worker_dependencies.tracer.tools(worker_dependencies.tools)
+    return worker_dependencies
 
 
 def _two_task_script() -> dict[str, list[ModelResponse]]:
@@ -90,12 +115,14 @@ def _two_task_script() -> dict[str, list[ModelResponse]]:
 @pytest.mark.parametrize("content", [False, True])
 def test_trace_tree_of_a_two_task_run_is_metadata_only_unless_content_is_on(content) -> None:
     client = FakeLangSmith()
-    deps = _traced(
+    worker_dependencies = _traced(
         make_deps(ScriptedModel(_two_task_script()), tasks_in_flight=1), client, content=content
     )
-    req = seed_chat_with_dataset(deps, chat_id="c1", user_id="u1", dataset_id="a2")
+    req = seed_chat_with_dataset(worker_dependencies, chat_id="c1", user_id="u1", dataset_id="a2")
     saver = SqliteSaver(sqlite3.connect(":memory:", check_same_thread=False))
-    assert RequestRunner(deps, saver).start("c1", req.message_id).status == "COMPLETED"
+    assert (
+        RequestRunner(worker_dependencies, saver).start("c1", req.message_id).status == "COMPLETED"
+    )
 
     tree = client.children()
     tasks = [name for name in tree["request"] if name.startswith("task:sql_analysis:")]
@@ -111,10 +138,13 @@ def test_trace_tree_of_a_two_task_run_is_metadata_only_unless_content_is_on(cont
     # The executor, Qwen3-235B, at its Sydney price (F9)
     total = (1_000 * 0.2266 + 100 * 0.9064) / 1e6
     assert call["usage_metadata"]["total_cost"] == pytest.approx(total)
-    assert call["model"] == deps.model_id(Stage.EXECUTE) and call["stopReason"] == "tool_use"
+    assert (
+        call["model"] == worker_dependencies.model_id(Stage.EXECUTE)
+        and call["stopReason"] == "tool_use"
+    )
     tool = client.ended("tool:sql_query")["extra"]["metadata"]
     assert tool["status"] == "ok" and tool["rowCount"] == 1
-    recorded = deps.repos.model_calls.list_by_request(req.message_id)
+    recorded = worker_dependencies.repositories.model_calls.list_by_request(req.message_id)
     traced = {str(run["id"]) for run in client.created}
     assert all(c.langsmith_run_id in traced for c in recorded)
 
@@ -140,9 +170,9 @@ def test_runtime_traces_only_with_its_own_switch_and_hides_content_by_default(
         settings = Settings(
             **common, model_tracing=True, trace_content=content, LANGSMITH_API_KEY="test-key"
         )
-        deps = build_worker(settings)
-        assert deps.tracer.include_content is content
-        assert not isinstance(deps.model, ScriptedModel)
+        worker_dependencies = build_worker(settings)
+        assert worker_dependencies.tracer.include_content is content
+        assert not isinstance(worker_dependencies.model, ScriptedModel)
     assert [(m["hide_inputs"], m["hide_outputs"]) for m in made] == [(True, True), (False, False)]
 
 
@@ -152,12 +182,14 @@ def test_failed_call_keeps_its_run_id_and_a_broken_tracer_never_blocks_a_call() 
             raise ModelTimeout("slow")
 
     client = FakeLangSmith()
-    deps = _traced(make_deps(TimesOut()), client)
+    worker_dependencies = _traced(make_deps(TimesOut()), client)
     request = ModelRequest(stage="plan", model="m", system=[], messages=[])
-    with deps.segment("c1", "r1"), pytest.raises(ModelTimeout):
-        deps.model_for("r1").invoke(request)
+    with worker_dependencies.segment("c1", "r1"), pytest.raises(ModelTimeout):
+        worker_dependencies.model_for("r1").invoke(request)
     failed = client.ended("model:plan")
-    assert deps.repos.model_calls.list_by_request("r1")[0].langsmith_run_id == str(failed["run_id"])
+    assert worker_dependencies.repositories.model_calls.list_by_request("r1")[
+        0
+    ].langsmith_run_id == str(failed["run_id"])
     assert failed["error"] == "ModelTimeout"  # the type only: messages can quote content
 
     calls: list[ModelRequest] = []
@@ -176,10 +208,12 @@ def test_failed_call_keeps_its_run_id_and_a_broken_tracer_never_blocks_a_call() 
 def test_a_fallback_call_is_traced_with_the_stage_model_and_the_model_that_answered() -> None:
     client = FakeLangSmith()
     down = ModelUnavailable("ServiceUnavailableException")
-    deps = _traced(make_deps(ByModel({"p": [down], "f": [ModelResponse(text="ok")]})), client)
-    deps.routes = {Stage.PLAN: ModelRoute("p", ("f",))}
+    worker_dependencies = _traced(
+        make_deps(ByModel({"p": [down], "f": [ModelResponse(text="ok")]})), client
+    )
+    worker_dependencies.routes = {Stage.PLAN: ModelRoute("p", ("f",))}
     request = ModelRequest(stage="plan", model="p", system=[], messages=[])
-    with deps.segment("c1", "r1"):
-        deps.model_for("r1").invoke(request)
+    with worker_dependencies.segment("c1", "r1"):
+        worker_dependencies.model_for("r1").invoke(request)
     runs = [r["extra"]["metadata"] for r in client.created if r["name"] == "model:plan"]
     assert [(r["model"], r["requestedModel"]) for r in runs] == [("p", "p"), ("f", "p")]

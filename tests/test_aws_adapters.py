@@ -136,6 +136,39 @@ def task(task_id: str = "t1") -> Task:
 # DynamoDB
 
 
+def test_web_tool_admission_is_atomic_and_reads_legacy_requests(db, store) -> None:
+    params = {
+        "TableName": TABLE,
+        "Key": key("CHAT#c1", "MSG#m1"),
+        "UpdateExpression": "SET #count = if_not_exists(#count, :zero) + :one",
+        "ConditionExpression": (
+            "attribute_exists(PK) AND #kind = :kind AND "
+            "(attribute_not_exists(#count) OR #count < :limit)"
+        ),
+        "ExpressionAttributeNames": {"#count": "webToolCalls", "#kind": "kind"},
+        "ExpressionAttributeValues": {
+            ":zero": {"N": "0"},
+            ":one": {"N": "1"},
+            ":limit": {"N": "50"},
+            ":kind": {"S": "request"},
+        },
+        "ReturnValues": "UPDATED_NEW",
+        "ReturnValuesOnConditionCheckFailure": "ALL_OLD",
+    }
+    capped = item(store, "CHAT#c1", "MSG#m1", request().model_copy(update={"web_tool_calls": 50}))
+    with Stubber(db) as stub:
+        stub.add_response("update_item", {"Attributes": {"webToolCalls": {"N": "1"}}}, params)
+        stub.add_response("update_item", {"Attributes": {"webToolCalls": {"N": "50"}}}, params)
+        stub.add_client_error(
+            "update_item", CONDITION_FAILED, expected_params=params, modeled_fields={"Item": capped}
+        )
+        assert DynamoMessages(store).reserve_web_tool_call("c1", "m1", 50) == 1
+        # A reconstructed adapter uses the saved counter, never a process-local reset.
+        assert DynamoMessages(store).reserve_web_tool_call("c1", "m1", 50) == 50
+        assert DynamoMessages(store).reserve_web_tool_call("c1", "m1", 50) is None
+        stub.assert_no_pending_responses()
+
+
 def test_request_status_update_is_conditional_and_a_moved_status_is_stale(db, store) -> None:
     conditional_update = {
         "TableName": TABLE,

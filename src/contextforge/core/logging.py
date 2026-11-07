@@ -11,6 +11,8 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from datetime import UTC, datetime
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
 
 _request_message_id: ContextVar[str | None] = ContextVar("request_message_id", default=None)
 _task_id: ContextVar[str | None] = ContextVar("task_id", default=None)
@@ -31,6 +33,10 @@ def request_context(request_message_id: str, task_id: str | None = None) -> Iter
 class JsonFormatter(logging.Formatter):
     """One JSON object per record; the ids are null outside a ``request_context``."""
 
+    def __init__(self, secrets: tuple[str, ...] = ()) -> None:
+        super().__init__()
+        self.secrets = tuple(secret for secret in secrets if secret)
+
     def format(self, record: logging.LogRecord) -> str:
         entry: dict[str, str | None] = {
             "ts": datetime.fromtimestamp(record.created, UTC)
@@ -45,15 +51,36 @@ class JsonFormatter(logging.Formatter):
         # Present only when the record carries one, so logger.exception keeps its traceback.
         if record.exc_info:
             entry["exception"] = self.formatException(record.exc_info)
+        # Redact before JSON encoding so quotes/backslashes in a known secret cannot
+        # defeat replacement. Normal logs never intentionally include credentials.
+        for key, value in entry.items():
+            if isinstance(value, str):
+                for secret in self.secrets:
+                    value = value.replace(secret, "[redacted]")
+                entry[key] = value
         return json.dumps(entry)
 
 
-def configure() -> None:
-    """Send root-logger records at INFO and above to stderr as JSON. Safe to call twice."""
+def configure(log_path: Path | None = None, *, secrets: tuple[str, ...] = ()) -> None:
+    """JSON logs to stderr and an optional rotating file; repeated calls do not duplicate."""
     root = logging.getLogger()
     root.setLevel(logging.INFO)
-    if any(isinstance(handler.formatter, JsonFormatter) for handler in root.handlers):
-        return
-    handler = logging.StreamHandler()
-    handler.setFormatter(JsonFormatter())
-    root.addHandler(handler)
+    formatter = JsonFormatter(secrets)
+    handlers = [h for h in root.handlers if isinstance(h.formatter, JsonFormatter)]
+    if not any(not isinstance(h, logging.FileHandler) for h in handlers):
+        stream = logging.StreamHandler()
+        stream.setFormatter(formatter)
+        root.addHandler(stream)
+    for handler in handlers:
+        handler.setFormatter(formatter)
+    if log_path is not None:
+        resolved = log_path.resolve()
+        if not any(
+            isinstance(h, RotatingFileHandler) and h.baseFilename == str(resolved) for h in handlers
+        ):
+            resolved.parent.mkdir(parents=True, exist_ok=True)
+            file = RotatingFileHandler(
+                resolved, maxBytes=10_000_000, backupCount=3, encoding="utf-8"
+            )
+            file.setFormatter(formatter)
+            root.addHandler(file)

@@ -4,6 +4,7 @@ import asyncio
 import hmac
 import json
 import logging
+import os
 import re
 import sqlite3
 import time
@@ -33,7 +34,7 @@ from contextforge.core.services.application import (
 from contextforge.core.settings import Settings
 from contextforge.infra.runtime import build_worker
 from contextforge.worker.consumer import QueueConsumer
-from contextforge.worker.deps import WorkerDeps
+from contextforge.worker.dependencies import WorkerDependencies
 from contextforge.worker.runner import RequestRunner
 
 # Spec 11.5: a heartbeat comment every 15 seconds, and a stream never outlives 15 minutes, so a
@@ -70,15 +71,18 @@ class MePatch(BaseModel):
     preferences: dict[str, str] | None = None
 
 
-def create_app(settings: Settings | None = None, *, deps: WorkerDeps | None = None) -> FastAPI:
+def create_app(
+    settings: Settings | None = None, *, worker_dependencies: WorkerDependencies | None = None
+) -> FastAPI:
     config = settings or Settings()
-    if deps is None:
-        deps = build_worker(config)
+    if worker_dependencies is None:
+        worker_dependencies = build_worker(config)
     config.checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(config.checkpoint_path, check_same_thread=False)
-    runner = RequestRunner(deps, SqliteSaver(connection))
-    service = Application(deps, config.dev_user_id)
-    consumer = QueueConsumer(deps, runner)
+    runner = RequestRunner(worker_dependencies, SqliteSaver(connection))
+    service = Application(worker_dependencies, config.dev_user_id)
+    web_tool_limit = str(worker_dependencies.budgets.web_tool_call_budget)
+    consumer = QueueConsumer(worker_dependencies, runner)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -112,6 +116,9 @@ def create_app(settings: Settings | None = None, *, deps: WorkerDeps | None = No
     def health() -> dict[str, str]:
         return {
             "status": "ok",
+            "build": "web-research-v3",
+            "processId": str(os.getpid()),
+            "webToolCallLimit": web_tool_limit,
             "backend": config.backend,
             "model": config.model_backend,
             "search": config.search_provider,
@@ -349,5 +356,12 @@ def main() -> None:
 
     # The worker runs in this process; without this its INFO records (plan, task, report
     # progress, each with its request and task id) were dropped.
-    configure_logging()
-    uvicorn.run(create_app(), host="127.0.0.1", port=8000)
+    settings = Settings()
+    secrets = tuple(
+        value.get_secret_value()
+        for value in (settings.dev_token, settings.serper_api_key, settings.langsmith_api_key)
+        if value is not None
+    )
+    configure_logging(settings.backend_log_path, secrets=secrets)
+    logging.getLogger(__name__).info("starting API; build=web-research-v3")
+    uvicorn.run(create_app(settings), host="127.0.0.1", port=8000, log_config=None)

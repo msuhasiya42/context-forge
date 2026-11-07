@@ -22,9 +22,9 @@ from contextforge.core.entities.message import (
 from contextforge.core.logging import request_context
 from contextforge.core.repositories.base import StaleStatusError
 from contextforge.core.state import PendingInterrupt
-from contextforge.worker.brief import load_request
-from contextforge.worker.deps import WorkerDeps
-from contextforge.worker.workflow import build_workflow
+from contextforge.worker.dependencies import WorkerDependencies
+from contextforge.worker.request_state import load_request
+from contextforge.worker.workflow import build_research_workflow
 
 logger = logging.getLogger(__name__)
 
@@ -45,12 +45,14 @@ class RunOutcome:
 
 
 class RequestRunner:
-    """Holds one workflow over ``deps`` that checkpoints to ``checkpointer``."""
+    """Holds one workflow over ``worker_dependencies`` that checkpoints to ``checkpointer``."""
 
-    def __init__(self, deps: WorkerDeps, checkpointer: BaseCheckpointSaver[Any]) -> None:
-        self._deps = deps
+    def __init__(
+        self, worker_dependencies: WorkerDependencies, checkpointer: BaseCheckpointSaver[Any]
+    ) -> None:
+        self._worker_dependencies = worker_dependencies
         self._checkpointer = checkpointer
-        self._workflow = build_workflow(deps, checkpointer)
+        self._workflow = build_research_workflow(worker_dependencies, checkpointer)
 
     def start(self, chat_id: str, message_id: str) -> RunOutcome:
         """Claim the ACCEPTED request and run it until it ends or asks the user.
@@ -62,8 +64,10 @@ class RequestRunner:
         with request_context(message_id):
             if not self._claim(chat_id, message_id, RequestStatus.ACCEPTED):
                 return RunOutcome(started=False, reason=ALREADY_STARTED)
-            request = load_request(self._deps.repos.messages, chat_id, message_id)
-            self._deps.touch_chat(chat_id, request.user_id)
+            request = load_request(
+                self._worker_dependencies.repositories.messages, chat_id, message_id
+            )
+            self._worker_dependencies.touch_chat(chat_id, request.user_id)
             return self._run(self._start_input(chat_id, message_id), chat_id, message_id)
 
     def resume(self, chat_id: str, message_id: str, reply: Reply) -> RunOutcome:
@@ -100,7 +104,7 @@ class RequestRunner:
     def _claim(self, chat_id: str, message_id: str, expected: RequestStatus) -> bool:
         """Move the request ``expected`` -> RUNNING; False when another delivery moved it first."""
         try:
-            self._deps.repos.messages.update_request_status(
+            self._worker_dependencies.repositories.messages.update_request_status(
                 chat_id, message_id, expected, RequestStatus.RUNNING
             )
         except StaleStatusError as stale:
@@ -116,7 +120,7 @@ class RequestRunner:
             return False
         # Saved before the claim, so a RUNNING request always has its answer in the chat. A
         # delivery that then loses the claim to a concurrent one has saved its reply, no more.
-        self._deps.repos.messages.save(reply)
+        self._worker_dependencies.repositories.messages.save(reply)
         return self._claim(chat_id, message_id, RequestStatus.WAITING_USER)
 
     def _answers_pending(
@@ -124,7 +128,7 @@ class RequestRunner:
     ) -> bool:
         """Whether ``reply`` is the request user's answer to the interrupt the request waits on,
         with the request in ``status``: WAITING_USER before a claim, RUNNING after one."""
-        request = load_request(self._deps.repos.messages, chat_id, message_id)
+        request = load_request(self._worker_dependencies.repositories.messages, chat_id, message_id)
         if (
             reply.chat_id != chat_id
             or reply.request_message_id != message_id
@@ -154,7 +158,7 @@ class RequestRunner:
         self, payload: dict[str, str] | Command[Any] | None, chat_id: str, message_id: str
     ) -> RunOutcome:
         """Invoke the thread as one segment; a run paused on an interrupt returns no status."""
-        with self._deps.segment(chat_id, message_id):
+        with self._worker_dependencies.segment(chat_id, message_id):
             result = self._workflow.invoke(payload, _thread(message_id))
         status = result.get("status")
         logger.info("run returned %s", status or "on an interrupt")

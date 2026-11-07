@@ -30,6 +30,11 @@ class Budgets:
     no_progress_turns: int
     column_cap: int
     cell_char_cap: int
+    web_tool_call_budget: int
+
+    def __post_init__(self) -> None:
+        if not 1 <= self.web_tool_call_budget <= 50:
+            raise ValueError("webToolCallBudget must be between 1 and 50")
 
     def messages_budget(self, fixed_tokens: int) -> int:
         """Tokens left for section 8 (the loop messages) after sections 1 to 7.
@@ -63,6 +68,7 @@ def load_budgets(path: Path = BUDGETS_PATH) -> Budgets:
         no_progress_turns=_int(raw, "noProgressTurns"),
         column_cap=_int(raw, "columnCap"),
         cell_char_cap=_int(raw, "cellCharCap"),
+        web_tool_call_budget=_int(raw, "webToolCallBudget"),
     )
 
 

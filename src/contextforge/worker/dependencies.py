@@ -32,11 +32,11 @@ from contextforge.worker.routing import ModelCooldown, RoutedModel
 
 
 @dataclass
-class WorkerDeps:
+class WorkerDependencies:
     """``model`` is the provider client (traced when tracing is on); stages call it only through
     ``model_for`` so every call is admitted and recorded as a ModelCall of its request."""
 
-    repos: Repositories
+    repositories: Repositories
     blobs: BlobStore
     model: ModelClient
     budgets: Budgets
@@ -88,7 +88,7 @@ class WorkerDeps:
         settings = self.settings
         recorded = RecordingModelClient(
             self.model,
-            self.repos.model_calls,
+            self.repositories.model_calls,
             request_message_id=request_message_id,
             memory_version=memory_version or MEMORY_VERSION,
             price_version=self.price_version,
@@ -105,7 +105,7 @@ class WorkerDeps:
         # Without settings (tests, offline tools) the call budget is the only limit.
         budgeted = BudgetedModel(
             recorded,
-            self.repos.model_calls,
+            self.repositories.model_calls,
             request_message_id,
             call_budget=self.budgets.call_budget,
             max_usd=settings.request_max_usd if settings else math.inf,
@@ -151,7 +151,7 @@ class WorkerDeps:
     def _segment_summary(self, chat_id: str, request_message_id: str) -> dict[str, Any]:
         """The request's status as a segment ends, and which segment it was: 1 for the first
         run, n + 1 for the run after the user's n-th answer."""
-        messages = self.repos.messages.list_by_chat(chat_id)
+        messages = self.repositories.messages.list_by_chat(chat_id)
         answers = [
             m
             for m in messages
@@ -169,11 +169,13 @@ class WorkerDeps:
         return {"status": request.status if request else None, "attempt": len(answers) + 1}
 
     def touch_chat(self, chat_id: str, user_id: str) -> None:
-        chat = self.repos.chats.get(user_id, chat_id)
+        chat = self.repositories.chats.get(user_id, chat_id)
         if chat is None:
             return
         requests = [
-            m for m in self.repos.messages.list_by_chat(chat_id) if isinstance(m, RequestMessage)
+            m
+            for m in self.repositories.messages.list_by_chat(chat_id)
+            if isinstance(m, RequestMessage)
         ]
         latest = max(requests, key=lambda m: (m.created_at, m.message_id), default=None)
-        self.repos.chats.touch(user_id, chat_id, latest.status if latest else None)
+        self.repositories.chats.touch(user_id, chat_id, latest.status if latest else None)

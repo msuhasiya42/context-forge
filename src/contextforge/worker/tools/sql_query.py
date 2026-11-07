@@ -53,12 +53,12 @@ class SqlQueryTool:
         self._artifacts = artifacts
         self._blobs = blobs
 
-    def run(self, arguments: dict[str, Any], ctx: ToolContext) -> ToolResult:
+    def run(self, arguments: dict[str, Any], tool_context: ToolContext) -> ToolResult:
         """Rows of the query; bad arguments, an unknown dataset or bad SQL are ``code`` errors."""
         dataset_id, sql = arguments.get("dataset_id"), arguments.get("sql")
         if not isinstance(dataset_id, str) or not isinstance(sql, str):
             return _code_error("sql_query needs the string arguments dataset_id and sql")
-        artifact = self._artifacts.get(ctx.chat_id, dataset_id)
+        artifact = self._artifacts.get(tool_context.chat_id, dataset_id)
         if artifact is None or not _is_available_dataset(artifact):
             return _code_error(f"no available dataset {dataset_id} in this chat")
         rejection = _select_rejection(sql)

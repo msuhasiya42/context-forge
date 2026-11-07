@@ -76,7 +76,7 @@ def _question(req, message_id: str, content: str) -> ClarificationMessage:
 
 
 def test_api_request_lifecycle_memory_paging_and_ownership(tmp_path):
-    deps = make_deps(
+    worker_dependencies = make_deps(
         ScriptedModel(
             {
                 "plan": [ModelResponse(structured=six_task_plan())],
@@ -86,9 +86,12 @@ def test_api_request_lifecycle_memory_paging_and_ownership(tmp_path):
         tasks_in_flight=1,
     )
     # An upload-free public flow is separately covered at the engine seam.
-    seed_chat_with_dataset(deps, chat_id="c1", user_id="u1", dataset_id="a2")
-    with TestClient(create_app(_settings(tmp_path), deps=deps)) as client:
+    seed_chat_with_dataset(worker_dependencies, chat_id="c1", user_id="u1", dataset_id="a2")
+    with TestClient(
+        create_app(_settings(tmp_path), worker_dependencies=worker_dependencies)
+    ) as client:
         assert client.get("/health").json()["status"] == "ok"
+        assert client.get("/health").json()["build"] == "web-research-v3"
         user = client.patch(
             "/me", json={"instructions": "Use concise answers.", "preferences": {"currency": "INR"}}
         )
@@ -138,11 +141,11 @@ def test_connected_run_takes_the_production_call_path_with_the_users_memory(tmp_
     )
     planner_system: list[str] = []
     model.on_request = lambda r: planner_system.extend(r.system) if r.stage == "plan" else None
-    deps = make_deps(model, tasks_in_flight=1, settings=settings)
-    seed_chat_with_dataset(deps, chat_id="c1", user_id="u1", dataset_id="a2")
-    with TestClient(create_app(settings, deps=deps)) as client:
+    worker_dependencies = make_deps(model, tasks_in_flight=1, settings=settings)
+    seed_chat_with_dataset(worker_dependencies, chat_id="c1", user_id="u1", dataset_id="a2")
+    with TestClient(create_app(settings, worker_dependencies=worker_dependencies)) as client:
         client.patch("/me", json={"instructions": "Quote every figure in INR."})
-        memory = memory_snapshot(deps.repos.users.get("u1"))
+        memory = memory_snapshot(worker_dependencies.repositories.users.get("u1"))
         request_id = client.post(
             "/chats/c1/requests",
             json={"content": "Compare September and October spending"},
@@ -151,7 +154,7 @@ def test_connected_run_takes_the_production_call_path_with_the_users_memory(tmp_
         path = f"/chats/c1/requests/{request_id}"
         assert _until(client, path, "COMPLETED", "FAILED") == "COMPLETED"
         usage = client.get(path).json()["usage"]
-    calls = deps.repos.model_calls.list_by_request(request_id)
+    calls = worker_dependencies.repositories.model_calls.list_by_request(request_id)
     # The budgeted client reserved spend for each of the 5 calls (plan, three tasks, the report's
     # summary, which has no script and fails); without settings it is 0.
     assert usage["modelCalls"] == 5 and usage["estimatedCostUsd"] == pytest.approx(0.5)
@@ -170,7 +173,7 @@ def test_a_long_report_becomes_a_deliverable_that_the_content_route_serves(tmp_p
             fact["text"] += f" Task {task}: the statement rows give the detail." * 12
         return ModelResponse(structured=result)
 
-    deps = make_deps(
+    worker_dependencies = make_deps(
         ScriptedModel(
             {
                 "plan": [ModelResponse(structured=six_task_plan())],
@@ -179,8 +182,10 @@ def test_a_long_report_becomes_a_deliverable_that_the_content_route_serves(tmp_p
         ),
         tasks_in_flight=1,
     )
-    seed_chat_with_dataset(deps, chat_id="c1", user_id="u1", dataset_id="a2")
-    with TestClient(create_app(_settings(tmp_path), deps=deps)) as client:
+    seed_chat_with_dataset(worker_dependencies, chat_id="c1", user_id="u1", dataset_id="a2")
+    with TestClient(
+        create_app(_settings(tmp_path), worker_dependencies=worker_dependencies)
+    ) as client:
         request_id = client.post(
             "/chats/c1/requests", json={"content": "Compare"}, headers={"Idempotency-Key": "long"}
         ).json()["messageId"]
@@ -207,7 +212,7 @@ def test_a_long_report_becomes_a_deliverable_that_the_content_route_serves(tmp_p
     )
     assert all(claim["text"] in body for claim in claims)
     assert "Limitations:" in body and "## Evidence" in body and "## Coverage" in body
-    artifact = deps.repos.artifacts.get("c1", ref["artifactId"])
+    artifact = worker_dependencies.repositories.artifacts.get("c1", ref["artifactId"])
     assert artifact.kind == "deliverable" and artifact.name == f"report-{request_id}.md"
     assert (dataset.status_code, missing.status_code) == (404, 404)
     assert dataset.json() == {"error": {"code": "not_found", "message": "Artifact not found."}}
@@ -216,7 +221,7 @@ def test_a_long_report_becomes_a_deliverable_that_the_content_route_serves(tmp_p
 def test_one_clarification_closes_the_stream_and_a_second_is_not_asked(tmp_path):
     """The one question closes the stream and its answer resumes the same request; the
     planner's second question is not asked (it plans instead and the report says so)."""
-    deps = make_deps(
+    worker_dependencies = make_deps(
         ScriptedModel(
             {
                 "plan": [
@@ -229,8 +234,10 @@ def test_one_clarification_closes_the_stream_and_a_second_is_not_asked(tmp_path)
         ),
         tasks_in_flight=1,
     )
-    seed_chat_with_dataset(deps, chat_id="c1", user_id="u1", dataset_id="a2")
-    with TestClient(create_app(_settings(tmp_path), deps=deps)) as client:
+    seed_chat_with_dataset(worker_dependencies, chat_id="c1", user_id="u1", dataset_id="a2")
+    with TestClient(
+        create_app(_settings(tmp_path), worker_dependencies=worker_dependencies)
+    ) as client:
         request = client.post(
             "/chats/c1/requests",
             json={"content": "Compare spending"},
@@ -274,9 +281,9 @@ def test_one_clarification_closes_the_stream_and_a_second_is_not_asked(tmp_path)
 def test_waiting_stream_stays_open_until_the_new_question_exists(tmp_path):
     # The worker writes WAITING_USER before the question. On a second question the first one
     # (already answered) is in the chat; the stream must wait for the new one, not close.
-    deps = make_deps(ScriptedModel({}))
-    req = seed_chat_with_dataset(deps, chat_id="c1", user_id="u1", dataset_id="a2")
-    messages = deps.repos.messages
+    worker_dependencies = make_deps(ScriptedModel({}))
+    req = seed_chat_with_dataset(worker_dependencies, chat_id="c1", user_id="u1", dataset_id="a2")
+    messages = worker_dependencies.repositories.messages
     messages.update_request_status("c1", req.message_id, "ACCEPTED", "RUNNING")
     messages.save(_question(req, "q1", "Which months?"))
     now = now_iso()
@@ -296,7 +303,9 @@ def test_waiting_stream_stays_open_until_the_new_question_exists(tmp_path):
     )
     messages.update_request_status("c1", req.message_id, "RUNNING", "WAITING_USER")
     later = threading.Timer(0.2, messages.save, [_question(req, "q2", "Which accounts?")])
-    with TestClient(create_app(_settings(tmp_path, run_worker=False), deps=deps)) as client:
+    with TestClient(
+        create_app(_settings(tmp_path, run_worker=False), worker_dependencies=worker_dependencies)
+    ) as client:
         later.start()
         events = _events(client.get(f"/chats/c1/requests/{req.message_id}/events").text)
     asked = [r["content"] for k, r in events if k == "message" and r["kind"] == "clarification"]
@@ -305,12 +314,16 @@ def test_waiting_stream_stays_open_until_the_new_question_exists(tmp_path):
 
 
 def test_open_stream_heartbeats_on_wall_time_and_ends_at_its_cap():
-    deps = make_deps(ScriptedModel({}))
-    req = seed_chat_with_dataset(deps, chat_id="c1", user_id="u1", dataset_id="a2")
+    worker_dependencies = make_deps(ScriptedModel({}))
+    req = seed_chat_with_dataset(worker_dependencies, chat_id="c1", user_id="u1", dataset_id="a2")
 
     async def frames() -> list[str]:
         stream = event_stream(
-            Application(deps, "u1"), req, 0.01, heartbeat_seconds=0.05, max_seconds=0.3
+            Application(worker_dependencies, "u1"),
+            req,
+            0.01,
+            heartbeat_seconds=0.05,
+            max_seconds=0.3,
         )
         return [frame async for frame in stream]
 
@@ -322,10 +335,12 @@ def test_open_stream_heartbeats_on_wall_time_and_ends_at_its_cap():
 
 
 def test_cancel_succeeds_and_one_that_loses_a_race_gets_the_409_envelope(tmp_path, monkeypatch):
-    deps = make_deps(ScriptedModel({}))
-    req = seed_chat_with_dataset(deps, chat_id="c1", user_id="u1", dataset_id="a2")
-    messages = deps.repos.messages
-    with TestClient(create_app(_settings(tmp_path, run_worker=False), deps=deps)) as client:
+    worker_dependencies = make_deps(ScriptedModel({}))
+    req = seed_chat_with_dataset(worker_dependencies, chat_id="c1", user_id="u1", dataset_id="a2")
+    messages = worker_dependencies.repositories.messages
+    with TestClient(
+        create_app(_settings(tmp_path, run_worker=False), worker_dependencies=worker_dependencies)
+    ) as client:
         cancelled = client.post(f"/chats/c1/requests/{req.message_id}/cancel")
         assert cancelled.status_code == 200 and cancelled.json()["status"] == "CANCELLED"
         racing = client.post(
@@ -346,9 +361,12 @@ def test_cancel_succeeds_and_one_that_loses_a_race_gets_the_409_envelope(tmp_pat
 
 
 def test_errors_share_one_envelope_without_internals(tmp_path, monkeypatch, caplog):
-    deps = make_deps(ScriptedModel({}))
-    seed_chat_with_dataset(deps, chat_id="c1", user_id="u1", dataset_id="a2")
-    app = create_app(_settings(tmp_path, run_worker=False, dev_token="s3cret"), deps=deps)
+    worker_dependencies = make_deps(ScriptedModel({}))
+    seed_chat_with_dataset(worker_dependencies, chat_id="c1", user_id="u1", dataset_id="a2")
+    app = create_app(
+        _settings(tmp_path, run_worker=False, dev_token="s3cret"),
+        worker_dependencies=worker_dependencies,
+    )
     with TestClient(app, raise_server_exceptions=False) as client:
         denied = client.get("/me")
         assert denied.status_code == 401 and denied.json()["error"]["code"] == "unauthenticated"
@@ -371,8 +389,10 @@ def test_errors_share_one_envelope_without_internals(tmp_path, monkeypatch, capl
 
 
 def test_patch_me_validates_preferences_and_refuses_credentials(tmp_path):
-    deps = make_deps(ScriptedModel({}))
-    with TestClient(create_app(_settings(tmp_path, run_worker=False), deps=deps)) as client:
+    worker_dependencies = make_deps(ScriptedModel({}))
+    with TestClient(
+        create_app(_settings(tmp_path, run_worker=False), worker_dependencies=worker_dependencies)
+    ) as client:
         saved = client.patch(
             "/me",
             json={
@@ -401,20 +421,22 @@ def test_consumer_redelivers_a_start_that_failed_before_its_claim(monkeypatch, c
         def ack(self, msg: WorkMessage) -> None:
             self.acked.append(msg)
 
-    deps = make_deps(ScriptedModel({}))
-    deps.queue = RecordingQueue()
-    req = seed_chat_with_dataset(deps, chat_id="c1", user_id="u1", dataset_id="a2")
+    worker_dependencies = make_deps(ScriptedModel({}))
+    worker_dependencies.queue = RecordingQueue()
+    req = seed_chat_with_dataset(worker_dependencies, chat_id="c1", user_id="u1", dataset_id="a2")
     saver = SqliteSaver(sqlite3.connect(":memory:", check_same_thread=False))
-    consumer = QueueConsumer(deps, RequestRunner(deps, saver))
+    consumer = QueueConsumer(worker_dependencies, RequestRunner(worker_dependencies, saver))
 
     def throttled(*args, **kwargs):
         raise RuntimeError("throttled")
 
-    monkeypatch.setattr(deps.repos.messages, "update_request_status", throttled)
+    monkeypatch.setattr(
+        worker_dependencies.repositories.messages, "update_request_status", throttled
+    )
     consumer.handle(WorkMessage(kind="start", chat_id="c1", message_id=req.message_id))
     assert (
-        deps.queue.acked == []
-        and deps.repos.messages.get("c1", req.message_id).status == "ACCEPTED"
+        worker_dependencies.queue.acked == []
+        and worker_dependencies.repositories.messages.get("c1", req.message_id).status == "ACCEPTED"
     )
     monkeypatch.undo()
     # A resume naming something other than a clarification answer is logged and acked.
@@ -423,7 +445,9 @@ def test_consumer_redelivers_a_start_that_failed_before_its_claim(monkeypatch, c
     )
     with caplog.at_level(logging.WARNING):
         consumer.handle(resume)
-    assert deps.queue.acked == [resume] and "not a clarification answer" in caplog.text
+    assert (
+        worker_dependencies.queue.acked == [resume] and "not a clarification answer" in caplog.text
+    )
     consumer.start()
     consumer.stop()
     consumer.start()  # a stopped consumer starts again on a new thread
@@ -449,12 +473,13 @@ def _two_task_plan() -> dict:
 
 def _traced_run(tmp_path, *, clarify: bool, **settings) -> tuple:
     """Run one request through the API on a scripted model: optionally one question, then two
-    tasks, the first making one sql_query call. The client, the request path and the deps."""
+    tasks, the first making one sql_query call. The client, the request path and the
+    worker_dependencies."""
     query = ToolCall(
         id="x1", name="sql_query", arguments={"dataset_id": "a2", "sql": "SELECT * FROM t LIMIT 5"}
     )
     asks = [ModelResponse(structured=clarification("Which months?"))] if clarify else []
-    deps = make_deps(
+    worker_dependencies = make_deps(
         ScriptedModel(
             {
                 "plan": [*asks, ModelResponse(structured=_two_task_plan())],
@@ -468,15 +493,17 @@ def _traced_run(tmp_path, *, clarify: bool, **settings) -> tuple:
         tasks_in_flight=1,
         settings=_settings(tmp_path, **settings),
     )
-    seed_chat_with_dataset(deps, chat_id="c1", user_id="u1", dataset_id="a2")
-    client = TestClient(create_app(deps.settings, deps=deps))
-    return client, deps
+    seed_chat_with_dataset(worker_dependencies, chat_id="c1", user_id="u1", dataset_id="a2")
+    client = TestClient(
+        create_app(worker_dependencies.settings, worker_dependencies=worker_dependencies)
+    )
+    return client, worker_dependencies
 
 
 def test_the_trace_shows_the_planner_its_question_the_tasks_their_calls_and_tool_calls(tmp_path):
     """F6 Deep Dive: one request with a clarification, two tasks and one tool call; the trace
     tree, its events in order, and each call's transcript with the tool use and its result."""
-    client, deps = _traced_run(tmp_path, clarify=True)
+    client, worker_dependencies = _traced_run(tmp_path, clarify=True)
     with client:
         request_id = client.post(
             "/chats/c1/requests", json={"content": "Compare"}, headers={"Idempotency-Key": "t"}
@@ -557,7 +584,7 @@ def test_the_trace_shows_the_planner_its_question_the_tasks_their_calls_and_tool
 
 
 def test_with_transcripts_off_no_call_has_one_and_the_route_is_404(tmp_path):
-    client, deps = _traced_run(tmp_path, clarify=False, record_transcripts=False)
+    client, worker_dependencies = _traced_run(tmp_path, clarify=False, record_transcripts=False)
     with client:
         request_id = client.post(
             "/chats/c1/requests", json={"content": "Compare"}, headers={"Idempotency-Key": "off"}

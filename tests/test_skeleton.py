@@ -24,6 +24,7 @@ def test_budgets_yaml_has_spec_values() -> None:
         "toolResultRowCap": 50,
         "factsCap": 30,
         "callBudget": 50,
+        "webToolCallBudget": 50,
         "tasksInFlight": 5,
         "toolCallsPerTask": 6,
         "taskRetries": 1,

@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     s3_bucket: str = "contextforge-441186132531-apse2"
     sqs_queue_url: str | None = None
     checkpoint_path: Path = Path(".data/checkpoints.sqlite")
+    backend_log_path: Path = Path("backend.log")
     dev_user_id: str = "local-user"
     dev_token: SecretStr | None = None
     cors_origins: list[str] = ["http://localhost:5173"]
@@ -54,5 +55,8 @@ class Settings(BaseSettings):
     # (GET .../model-calls/{id}/transcript). They hold user data and fetched page text: turn this
     # off for a shared deployment. Known secret values are redacted from them either way.
     record_transcripts: bool = True
+    verify_web_claims: bool = True
+    research_reports: bool = True
+    web_tool_calls_per_task: int = Field(default=12, ge=1, le=50)
     run_worker: bool = True
     sse_poll_seconds: float = Field(default=1, gt=0)

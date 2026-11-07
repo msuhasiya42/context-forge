@@ -19,8 +19,8 @@ from contextforge.core.entities.model_call import Stage
 from contextforge.core.models.base import ModelRequest
 from contextforge.core.models.errors import ModelError
 from contextforge.core.state import RequestState
-from contextforge.worker.deps import WorkerDeps
-from contextforge.worker.stages.cite import claim_key
+from contextforge.worker.dependencies import WorkerDependencies
+from contextforge.worker.stages.citation_checks import claim_key
 from contextforge.worker.stages.execute import TaskOutcome
 
 logger = logging.getLogger(__name__)
@@ -43,18 +43,18 @@ _SENTENCE_STARTERS = frozenset(
 
 
 def summarize(
-    brief: RequestState,
-    outcomes: list[TaskOutcome],
+    request_state: RequestState,
+    task_outcomes: list[TaskOutcome],
     body: ReportBody,
     not_answered: list[str],
-    deps: WorkerDeps,
+    worker_dependencies: WorkerDependencies,
 ) -> str:
     """The summary model's text when it names only what the report holds, else the summary
     built from the claims (``fallback_summary``). ``body`` has at least one claim."""
-    written = _written_summary(brief, body, not_answered, deps)
+    written = _written_summary(request_state, body, not_answered, worker_dependencies)
     if written is not None:
         sources = [
-            brief["goal"],
+            request_state["goal"],
             *(claim.text for claim in body.claims),
             *(conclusion.text for conclusion in body.conclusions),
             *not_answered,
@@ -65,7 +65,7 @@ def summarize(
         logger.warning(
             "summary not used: %d words, not in the report: %s", len(written.split()), unsupported
         )
-    return fallback_summary(outcomes, body)
+    return fallback_summary(task_outcomes, body)
 
 
 def unsupported_terms(summary: str, sources: Iterable[str]) -> list[str]:
@@ -88,12 +88,12 @@ def unsupported_terms(summary: str, sources: Iterable[str]) -> list[str]:
     return missing
 
 
-def fallback_summary(outcomes: list[TaskOutcome], body: ReportBody) -> str:
+def fallback_summary(task_outcomes: list[TaskOutcome], body: ReportBody) -> str:
     """The first claim of each task, in plan order (task ids sort in it), then the first
     conclusion, cut at ``MAX_SUMMARY_WORDS``: built without a model from what the report holds."""
     claims = {claim_key(claim.text): claim.text for claim in body.claims}
     firsts: list[str] = []
-    for outcome in sorted(outcomes, key=lambda outcome: outcome["task_id"]):
+    for outcome in sorted(task_outcomes, key=lambda outcome: outcome["task_id"]):
         texts = (claims.get(claim_key(fact["text"])) for fact in outcome["facts"])
         first = next((text for text in texts if text and text not in firsts), None)
         if first is not None:
@@ -106,17 +106,22 @@ def fallback_summary(outcomes: list[TaskOutcome], body: ReportBody) -> str:
 
 
 def _written_summary(
-    brief: RequestState, body: ReportBody, not_answered: list[str], deps: WorkerDeps
+    request_state: RequestState,
+    body: ReportBody,
+    not_answered: list[str],
+    worker_dependencies: WorkerDependencies,
 ) -> str | None:
     """The summary model's text on one line; None when the call fails or returns no text. The
     call is recorded as a ``summary`` ModelCall of the request and counts against its budget."""
-    model = deps.model_for(brief["request_message_id"], memory_version=brief["memory"]["version"])
+    model = worker_dependencies.model_for(
+        request_state["request_message_id"], memory_version=request_state["memory"]["version"]
+    )
     request = ModelRequest(
         stage=Stage.SUMMARY,
         # Routed like compress: the cheap stage (config/models.yaml).
-        model=deps.model_id(Stage.SUMMARY),
-        system=[brief["memory"]["text"], load_prompt(prompt_version(Stage.SUMMARY))],
-        messages=[HumanMessage(_summary_input(brief["goal"], body, not_answered))],
+        model=worker_dependencies.model_id(Stage.SUMMARY),
+        system=[request_state["memory"]["text"], load_prompt(prompt_version(Stage.SUMMARY))],
+        messages=[HumanMessage(_summary_input(request_state["goal"], body, not_answered))],
         max_tokens=SUMMARY_MAX_TOKENS,
     )
     try:

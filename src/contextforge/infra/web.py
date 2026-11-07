@@ -5,12 +5,14 @@ as the bytes arrive. Fetches go only where ``web_guard`` allows, pinned to the c
 """
 
 import contextvars
+import hashlib
 import json
 import re
 import threading
 import time
 from collections.abc import Callable
 from concurrent.futures import Future
+from datetime import datetime
 from functools import partial
 from html.parser import HTMLParser
 from typing import Any
@@ -176,6 +178,7 @@ class PublicWebClient:
             response.close()
 
     def _fetch(self, url: str, deadline: float) -> dict[str, Any]:
+        requested_url = url
         for _ in range(_MAX_HOPS):
             host, addresses = public_url(url, self.resolver)
             # Pinned to the checked address: a second DNS lookup could rebind to a private one.
@@ -190,7 +193,7 @@ class PublicWebClient:
             response = self.client.send(request, stream=True)
             try:
                 if not response.is_redirect:
-                    return self._page(url, response, deadline)
+                    return {**self._page(url, response, deadline), "requestedUrl": requested_url}
                 location = response.headers.get("location")
                 if not location:
                     raise WebUnavailable("A redirect had no destination.")
@@ -209,13 +212,25 @@ class PublicWebClient:
         # economictimes.indiatimes.com/markets); its first max_bytes are read, not refused.
         body = _body(response, self.max_bytes, deadline, keep_first=True)
         text = _decode(body, response.charset_encoding)
+        metadata: dict[str, Any] = {}
         if content_type != "text/plain":
-            text = page_text(text)
+            parser = _parsed_page(text)
+            text = "\n".join(parser.lines)
+            metadata = parser.metadata
+            metadata["title"] = _clean("".join(parser.title))[:500] or None
+        kept = text[: self.max_chars]
         return {
             "url": url,
-            "text": text[: self.max_chars],
+            "text": kept,
             "truncated": len(text) > self.max_chars or len(body) >= self.max_bytes,
             "retrievedAt": now_iso(),
+            "publishedAt": metadata.get("publishedAt"),
+            "modifiedAt": metadata.get("modifiedAt"),
+            "title": metadata.get("title"),
+            "publisher": metadata.get("publisher") or urlsplit(url).hostname,
+            "sourceKind": "page",
+            "contentHash": hashlib.sha256(kept.encode()).hexdigest(),
+            "hashScope": "extracted_text",
         }
 
 
@@ -307,20 +322,31 @@ class _PageText(HTMLParser):
         self.lines: list[str] = []
         self._line: list[str] = []
         self._hidden = 0
+        self._in_title = False
+        self.title: list[str] = []
+        self.metadata: dict[str, Any] = {}
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag == "title":
+            self._in_title = True
+        if tag == "meta":
+            self._meta(dict(attrs))
         if tag in _HIDDEN_TAGS:
             self._hidden += 1
         elif tag in _BLOCK_TAGS:
             self.end_line()
 
     def handle_endtag(self, tag: str) -> None:
+        if tag == "title":
+            self._in_title = False
         if tag in _HIDDEN_TAGS:
             self._hidden = max(0, self._hidden - 1)
         elif tag in _BLOCK_TAGS:
             self.end_line()
 
     def handle_data(self, data: str) -> None:
+        if self._in_title:
+            self.title.append(data)
         if not self._hidden:
             self._line.append(data)
 
@@ -330,13 +356,37 @@ class _PageText(HTMLParser):
             self.lines.append(line)
         self._line = []
 
+    def _meta(self, attrs: dict[str, str | None]) -> None:
+        name = (attrs.get("property") or attrs.get("name") or "").lower()
+        value = (attrs.get("content") or "").strip()[:500]
+        field = {
+            "article:published_time": "publishedAt",
+            "datepublished": "publishedAt",
+            "pubdate": "publishedAt",
+            "article:modified_time": "modifiedAt",
+            "datemodified": "modifiedAt",
+            "og:site_name": "publisher",
+        }.get(name)
+        if not field or not value or field in self.metadata:
+            return
+        if field != "publisher":
+            try:
+                datetime.fromisoformat(value.replace("Z", "+00:00"))
+            except ValueError:
+                return
+        self.metadata[field] = value
+
 
 def page_text(html: str) -> str:
+    return "\n".join(_parsed_page(html).lines)
+
+
+def _parsed_page(html: str) -> _PageText:
     parser = _PageText()
     parser.feed(html)
     parser.close()
     parser.end_line()
-    return "\n".join(parser.lines)
+    return parser
 
 
 class _DuckDuckGoResults(HTMLParser):
@@ -408,20 +458,22 @@ def _serper_rows(body: bytes) -> list[dict[str, str]]:
     ]
 
 
-def web_tools(web: PublicWebClient, repos: Repositories, blobs: BlobStore) -> dict[str, Tool]:
+def web_tools(
+    web: PublicWebClient, repositories: Repositories, blobs: BlobStore
+) -> dict[str, Tool]:
     """``web_search`` and ``fetch_url`` sharing one per-task allowlist, so a fetch reads only a
     URL its task's searches returned or its task names."""
-    seen = SeenUrls(partial(_task_text, repos))
+    seen = SeenUrls(partial(_task_text, repositories))
     return {
-        "web_search": WebSearchTool(web, repos.artifacts, blobs, seen),
-        "fetch_url": FetchURLTool(web, repos.artifacts, blobs, seen),
+        "web_search": WebSearchTool(web, repositories.artifacts, blobs, seen),
+        "fetch_url": FetchURLTool(web, repositories.artifacts, blobs, seen),
     }
 
 
-def _task_text(repos: Repositories, ctx: ToolContext) -> str:
+def _task_text(repositories: Repositories, tool_context: ToolContext) -> str:
     """The task's goal and the user's request: a URL written there may be fetched directly."""
-    task = repos.tasks.get(ctx.request_message_id, ctx.task_id)
-    request = repos.messages.get(ctx.chat_id, ctx.request_message_id)
+    task = repositories.tasks.get(tool_context.request_message_id, tool_context.task_id)
+    request = repositories.messages.get(tool_context.chat_id, tool_context.request_message_id)
     return "\n".join([task.goal if task else "", request.content if request else ""])
 
 
@@ -448,24 +500,28 @@ class WebSearchTool:
     ) -> None:
         self.web, self.artifacts, self.blobs, self.seen = web, artifacts, blobs, seen
 
-    def run(self, arguments: dict[str, Any], ctx: ToolContext) -> ToolResult:
+    def run(self, arguments: dict[str, Any], tool_context: ToolContext) -> ToolResult:
         query = arguments.get("query")
         if not isinstance(query, str):
             return ToolResult(status="error", error="query must be text", error_class="code")
-        return _guarded(partial(self._search, query, ctx))
+        return _guarded(partial(self._search, query, tool_context))
 
-    def _search(self, query: str, ctx: ToolContext) -> ToolResult:
+    def _search(self, query: str, tool_context: ToolContext) -> ToolResult:
         """The hits as rows, all saved first as one raw_result Artifact the rows name.
 
         Its id, name and JSON-lines format are the ones the result processor uses when it
         offloads these rows, so that write changes nothing and the handle is the same.
         """
-        artifact_id = raw_result_id(ctx.task_id, ctx.tool_call_id)
-        rows = [{**hit, "artifactId": artifact_id} for hit in self.web.search(query)]
+        artifact_id = raw_result_id(tool_context.task_id, tool_context.tool_call_id)
+        retrieved = now_iso()
+        rows = [
+            {**hit, "artifactId": artifact_id, "retrievedAt": retrieved, "sourceKind": "search"}
+            for hit in self.web.search(query)
+        ]
         data = "".join(f"{json.dumps(row, sort_keys=True)}\n" for row in rows).encode()
-        name = f"{self.spec.name} result {ctx.tool_call_id}"
-        _save_snapshot(self.artifacts, self.blobs, ctx, artifact_id, name, _NDJSON, data)
-        self.seen.add(ctx.task_id, [row["url"] for row in rows])
+        name = f"{self.spec.name} result {tool_context.tool_call_id}"
+        _save_snapshot(self.artifacts, self.blobs, tool_context, artifact_id, name, _NDJSON, data)
+        self.seen.add(tool_context.task_id, [row["url"] for row in rows])
         return ToolResult(rows=rows, artifact_ids=[artifact_id])
 
 
@@ -493,30 +549,36 @@ class FetchURLTool:
     ) -> None:
         self.web, self.artifacts, self.blobs, self.seen = web, artifacts, blobs, seen
 
-    def run(self, arguments: dict[str, Any], ctx: ToolContext) -> ToolResult:
+    def run(self, arguments: dict[str, Any], tool_context: ToolContext) -> ToolResult:
         url = arguments.get("url")
         if not isinstance(url, str):
             return ToolResult(status="error", error="url must be text", error_class="code")
-        if not self.seen.allows(ctx, url):
+        if not self.seen.allows(tool_context, url):
             refusal = WebRefusal(
                 "url_not_allowed",
                 "fetch_url reads only URLs that web_search returned in this task or that the "
                 "task names. Search first.",
             )
             return _failure(refusal)
-        return _guarded(partial(self._fetch, url, ctx))
+        return _guarded(partial(self._fetch, url, tool_context))
 
-    def _fetch(self, url: str, ctx: ToolContext) -> ToolResult:
+    def _fetch(self, url: str, tool_context: ToolContext) -> ToolResult:
         page = self.web.fetch(url)
-        artifact_id = raw_result_id(ctx.task_id, ctx.tool_call_id)
+        artifact_id = raw_result_id(tool_context.task_id, tool_context.tool_call_id)
         data = json.dumps(page, ensure_ascii=False).encode()
         name = snapshot_name(page["url"])
-        _save_snapshot(self.artifacts, self.blobs, ctx, artifact_id, name, "application/json", data)
+        _save_snapshot(
+            self.artifacts, self.blobs, tool_context, artifact_id, name, "application/json", data
+        )
         header = {
             "artifactId": artifact_id,
             "url": page["url"],
             "chars": len(page["text"]),
             "truncated": page["truncated"],
+            "title": page.get("title"),
+            "publisher": page.get("publisher"),
+            "publishedAt": page.get("publishedAt"),
+            "retrievedAt": page["retrievedAt"],
         }
         return ToolResult(text=f"{json.dumps(header)}\n{page['text']}", artifact_ids=[artifact_id])
 
@@ -533,7 +595,7 @@ def snapshot_name(url: str) -> str:
 def _save_snapshot(
     artifacts: ArtifactRepository,
     blobs: BlobStore,
-    ctx: ToolContext,
+    tool_context: ToolContext,
     artifact_id: str,
     name: str,
     media_type: str,
@@ -544,13 +606,13 @@ def _save_snapshot(
     artifacts.save(
         Artifact(
             artifact_id=artifact_id,
-            user_id=ctx.user_id,
-            chat_id=ctx.chat_id,
+            user_id=tool_context.user_id,
+            chat_id=tool_context.chat_id,
             kind=ArtifactKind.RAW_RESULT,
             name=name,
             media_type=media_type,
             size_bytes=len(data),
-            storage_ref=blobs.put(raw_result_key(ctx.chat_id, artifact_id), data),
+            storage_ref=blobs.put(raw_result_key(tool_context.chat_id, artifact_id), data),
             status=ArtifactStatus.AVAILABLE,
             index_status=IndexStatus.NOT_INDEXED,
             created_at=now_iso(),

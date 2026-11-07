@@ -4,12 +4,15 @@ A web snapshot (a raw_result Artifact) is cited with a url locator naming a URL 
 holds and a verbatim excerpt of that URL's text: a fetched page's text or a search hit's
 snippet. The excerpt must have ``MIN_EXCERPT_CHARS`` characters and is matched with whitespace
 collapsed, case folded and pictographs left out on both sides, ignoring a leading or trailing
-ellipsis. A web fact cited with another locator (a model wrote
+ellipsis. A quote differing only in sentence-ending periods can be replaced with the actual
+contiguous source span; changed words, numbers and operators are not repaired. A web fact
+cited with another locator (a model wrote
 ``{"kind": "row", "value": "0"}`` for a search hit) is pointed at the URL whose saved text holds
 its excerpt. A fact failing all that is dropped, and the reason is kept as an uncertainty,
-never dropped silently. Facts that state the same claim are then merged (``merge_repeats``).
+never dropped silently. Facts stating the same claim are merged by
+``merge_duplicate_findings``.
 
-A conclusion quotes no source, so cite checks only that the facts it rests on passed
+A conclusion quotes no source, so cite checks that all the facts it rests on passed
 (``supported_conclusions``).
 """
 
@@ -17,42 +20,47 @@ import json
 import re
 import unicodedata
 from collections.abc import Iterable
-from typing import Any, TypedDict
+from typing import Any, NotRequired, TypedDict
 
 from contextforge.core.entities.artifact import Artifact, ArtifactKind, ArtifactStatus
 from contextforge.core.state import Conclusion, Fact, RequestState
 from contextforge.core.values import EvidenceRef, Locator, LocatorKind
-from contextforge.worker.deps import WorkerDeps
+from contextforge.worker.dependencies import WorkerDependencies
 
 # Shorter quotes ("e", "Python") occur on almost any page and prove nothing. The web tools'
 # descriptions tell the model this minimum.
 MIN_EXCERPT_CHARS = 20
 
 
-class Citations(TypedDict):
+class CitationCheckResult(TypedDict):
     """The facts that passed, and one uncertainty per distinct reason a fact was dropped."""
 
     facts: list[Fact]
     uncertainties: list[str]
+    review: NotRequired[dict[str, Any]]
 
 
-def check_citations(brief: RequestState, deps: WorkerDeps) -> Citations:
-    """The brief's facts that cite their evidence correctly, each web ref naming the URL it
+def check_citations(
+    request_state: RequestState, worker_dependencies: WorkerDependencies
+) -> CitationCheckResult:
+    """The request state's facts that cite their evidence correctly, each web ref naming the URL it
     quotes, with repeats merged; the reasons for the rest go to the report as uncertainties.
 
     Each fact is checked before merging, so one repeat's bad ref cannot drop the claim."""
     facts: list[Fact] = []
     uncertainties: list[str] = []
-    for fact in brief["facts"]:
-        checked = _checked(fact, brief, deps)
+    for fact in request_state["facts"]:
+        checked = _checked(fact, request_state, worker_dependencies)
         if isinstance(checked, str):
             uncertainties.append(checked)
         else:
             facts.append(checked)
-    return Citations(facts=merge_repeats(facts), uncertainties=list(dict.fromkeys(uncertainties)))
+    return CitationCheckResult(
+        facts=merge_duplicate_findings(facts), uncertainties=list(dict.fromkeys(uncertainties))
+    )
 
 
-def merge_repeats(facts: list[Fact]) -> list[Fact]:
+def merge_duplicate_findings(facts: list[Fact]) -> list[Fact]:
     """One fact per claim, first occurrence first, with the first one's text and every repeat's
     evidence refs (F7 ruling 3: a comparison task restates its dependencies' facts, "350+ kms."
     beside "350+ km.")."""
@@ -68,9 +76,11 @@ def merge_repeats(facts: list[Fact]) -> list[Fact]:
 def supported_conclusions(
     conclusions: list[Conclusion], facts: list[Fact]
 ) -> tuple[list[Conclusion], list[str]]:
-    """The ``conclusions`` resting on at least one of ``facts`` (the facts that passed, merged),
-    each naming only those, by the merged fact's text; and one uncertainty per conclusion
-    dropped because none of its facts passed (F10 ruling 1)."""
+    """Retain a conclusion only when all its declared supporting findings survived.
+
+    Silently shrinking a comparison's evidence from two dates to one does not establish
+    which is newer. Missing support becomes a limitation instead of a confident assessment.
+    """
     passed = {claim_key(fact["text"]): fact["text"] for fact in facts}
     kept: list[Conclusion] = []
     dropped: list[str] = []
@@ -80,6 +90,12 @@ def supported_conclusions(
         if not based_on:
             dropped.append(
                 f"unsupported conclusion, no finding it rests on held: {conclusion['text'][:80]}"
+            )
+            continue
+        if len(based_on) != len(keys):
+            dropped.append(
+                "unsupported conclusion, required supporting findings did not all pass: "
+                + conclusion["text"][:80]
             )
             continue
         kept.append(
@@ -134,7 +150,9 @@ def _union(ref_lists: Iterable[list[dict[str, Any]]]) -> list[dict[str, Any]]:
     return union
 
 
-def _checked(fact: Fact, brief: RequestState, deps: WorkerDeps) -> Fact | str:
+def _checked(
+    fact: Fact, request_state: RequestState, worker_dependencies: WorkerDependencies
+) -> Fact | str:
     """``fact`` with every web ref naming the URL it quotes, or why it is unsupported, worded
     as the uncertainty to record. A fact whose refs all stood as written is returned as is."""
     refs = [EvidenceRef.model_validate(raw) for raw in fact["evidence_refs"]]
@@ -142,7 +160,7 @@ def _checked(fact: Fact, brief: RequestState, deps: WorkerDeps) -> Fact | str:
         return f"unsupported claim without evidence: {fact['text'][:80]}"
     checked: list[EvidenceRef] = []
     for ref in refs:
-        result = _checked_ref(ref, brief, deps)
+        result = _checked_ref(ref, request_state, worker_dependencies)
         if isinstance(result, str):
             return result
         checked.append(result)
@@ -152,13 +170,19 @@ def _checked(fact: Fact, brief: RequestState, deps: WorkerDeps) -> Fact | str:
     return Fact(text=fact["text"], evidence_refs=dumped)
 
 
-def _checked_ref(ref: EvidenceRef, brief: RequestState, deps: WorkerDeps) -> EvidenceRef | str:
-    artifact = deps.repos.artifacts.get(brief["chat_id"], ref.artifact_id)
+def _checked_ref(
+    ref: EvidenceRef, request_state: RequestState, worker_dependencies: WorkerDependencies
+) -> EvidenceRef | str:
+    artifact = worker_dependencies.repositories.artifacts.get(
+        request_state["chat_id"], ref.artifact_id
+    )
     if ref.locator.kind != LocatorKind.URL:
         # Dataset evidence is verified elsewhere; a web snapshot only through a URL it holds.
         if artifact is None or artifact.kind != ArtifactKind.RAW_RESULT:
             return ref
-        url = _url_quoting(ref.excerpt, _owned_records(artifact, brief, deps))
+        url = _url_quoting(
+            ref.excerpt, _owned_records(artifact, request_state, worker_dependencies)
+        )
         if url is None:
             return (
                 f"unsupported excerpt for artifact {ref.artifact_id}: "
@@ -166,24 +190,31 @@ def _checked_ref(ref: EvidenceRef, brief: RequestState, deps: WorkerDeps) -> Evi
             )
         return ref.model_copy(update={"locator": Locator(kind=LocatorKind.URL, value=url)})
     url = ref.locator.value
-    evidence = _text_for(url, _owned_records(artifact, brief, deps))
-    if evidence is None or not _quotes(ref.excerpt, evidence):
+    evidence = _text_for(url, _owned_records(artifact, request_state, worker_dependencies))
+    if evidence is None:
         return f"unsupported excerpt for {url}"
-    return ref
+    if _quotes(ref.excerpt, evidence):
+        return ref
+    recovered = _recover_sentence_periods(ref.excerpt, evidence)
+    if recovered is None:
+        return f"unsupported excerpt for {url}"
+    # Store actual source characters, not the model's punctuated reconstruction. The
+    # later semantic review and exported evaluation still receive a real source excerpt.
+    return ref.model_copy(update={"excerpt": recovered})
 
 
 def _owned_records(
-    artifact: Artifact | None, brief: RequestState, deps: WorkerDeps
+    artifact: Artifact | None, request_state: RequestState, worker_dependencies: WorkerDependencies
 ) -> list[dict[str, Any]]:
     """The records ``artifact`` saved; none unless it is this user's available snapshot."""
     if (
         artifact is None
         or artifact.status != ArtifactStatus.AVAILABLE
-        or artifact.user_id != brief["user_id"]
+        or artifact.user_id != request_state["user_id"]
     ):
         return []
     try:
-        return _records(deps.blobs.get(artifact.storage_ref))
+        return _records(worker_dependencies.blobs.get(artifact.storage_ref))
     except (LookupError, ValueError):  # gone (expired) or not a snapshot
         return []
 
@@ -228,6 +259,36 @@ def _quotes(excerpt: str | None, evidence: str) -> bool:
     """
     wanted = _ELLIPSIS_ENDS.sub("", _normalised(excerpt or ""))
     return len(wanted) >= MIN_EXCERPT_CHARS and wanted in _normalised(evidence)
+
+
+def _recover_sentence_periods(excerpt: str | None, evidence: str) -> str | None:
+    """Recover a contiguous source span when only sentence-ending periods differ.
+
+    Live Python release pages put the date and description on adjacent lines without
+    periods. Models appended periods to both. Words, order, internal decimal/version
+    points, signs and all other punctuation must still match; this is not fuzzy quoting.
+    """
+    wanted = _ELLIPSIS_ENDS.sub("", _normalised(excerpt or ""))
+    if len(wanted) < MIN_EXCERPT_CHARS:
+        return None
+    words = [_sentence_word(word) for word in wanted.split()]
+    spans = [
+        (match.start(), match.end(), word)
+        for match in re.finditer(r"\S+", evidence)
+        if (word := _normalised(match.group()))
+    ]
+    source_words = [_sentence_word(word) for _, _, word in spans]
+    for start in range(len(spans) - len(words) + 1):
+        if source_words[start : start + len(words)] == words:
+            recovered = evidence[spans[start][0] : spans[start + len(words) - 1][1]]
+            if len(_normalised(recovered)) >= MIN_EXCERPT_CHARS:
+                return recovered
+    return None
+
+
+def _sentence_word(word: str) -> str:
+    # A single final period only: never erase an internal decimal or an omitted span (...).
+    return word[:-1] if len(word) > 1 and word.endswith(".") and not word.endswith("..") else word
 
 
 # "..." or "…" with the spaces beside it, at either end of a normalised excerpt.

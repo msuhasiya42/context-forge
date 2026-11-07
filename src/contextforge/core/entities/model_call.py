@@ -20,6 +20,7 @@ class Stage(StrEnum):
     # The few sentences that open a report (F10 ruling 2); not ``summarize``, which maps over an
     # artifact's items.
     SUMMARY = "summary"
+    REPORT = "report"
 
 
 # Facts about one call that have no field of their own (keys snake_case, values plain JSON):

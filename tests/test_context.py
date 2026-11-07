@@ -81,7 +81,7 @@ def _inputs() -> ContextInputs:
 
 
 def _process(
-    repos: Repositories,
+    repositories: Repositories,
     blobs: MemoryBlobStore,
     rows: list[dict[str, Any]],
     artifact_id: str,
@@ -92,7 +92,7 @@ def _process(
     return process_rows(
         rows,
         cap=cap,
-        artifacts=repos.artifacts,
+        artifacts=repositories.artifacts,
         blobs=blobs,
         chat_id="c1",
         user_id="u1",
@@ -126,9 +126,9 @@ def test_builder_sections_in_spec_order_and_system_blocks() -> None:
         prior_messages=[],
         loop_messages=[],
     )
-    built = build_context(inputs, load_budgets())
-    assert built.system == ["MEM", "PLAN"]
-    assert [name for name, _ in built.sections] == [
+    model_context = build_context(inputs, load_budgets())
+    assert model_context.system == ["MEM", "PLAN"]
+    assert [name for name, _ in model_context.sections] == [
         "memory",
         "brief",
         "facts",
@@ -138,8 +138,10 @@ def test_builder_sections_in_spec_order_and_system_blocks() -> None:
         "tools",
         "messages",
     ]
-    assert "<sources chat_id=" in built.user_text and "a2  dataset" in built.user_text
-    assert '<sources chat_id="c1">' in built.user_text
+    assert (
+        "<sources chat_id=" in model_context.user_text and "a2  dataset" in model_context.user_text
+    )
+    assert '<sources chat_id="c1">' in model_context.user_text
 
 
 def test_facts_are_capped_to_newest() -> None:
@@ -166,44 +168,44 @@ def test_facts_are_capped_to_newest() -> None:
 
 
 def test_process_rows_boundary_at_cap() -> None:
-    repos, blobs = Repositories.in_memory(), MemoryBlobStore()
+    repositories, blobs = Repositories.in_memory(), MemoryBlobStore()
     fifty = [{"i": i} for i in range(50)]
-    r = _process(repos, blobs, fifty, "a6")
+    r = _process(repositories, blobs, fifty, "a6")
     assert r.artifact_id is None and len(r.rows) == 50 and r.text == "showing 50 of 50 rows"
-    r2 = _process(repos, blobs, fifty + [{"i": 50}], "a7")
-    r3 = _process(repos, blobs, fifty + [{"i": 50}], "a7")  # replay: same id, one artifact
-    assert r3.artifact_id == "a7" and len(repos.artifacts.list_by_chat("c1")) == 1
+    r2 = _process(repositories, blobs, fifty + [{"i": 50}], "a7")
+    r3 = _process(repositories, blobs, fifty + [{"i": 50}], "a7")  # replay: same id, one artifact
+    assert r3.artifact_id == "a7" and len(repositories.artifacts.list_by_chat("c1")) == 1
     assert (
         r2.artifact_id
         and len(r2.rows) == 50
         and r2.text == f"showing 50 of 51 rows; 1 more row(s) in artifact {r2.artifact_id}"
     )
-    art = repos.artifacts.get("c1", r2.artifact_id)
+    art = repositories.artifacts.get("c1", r2.artifact_id)
     assert art and art.kind == "raw_result" and art.status == "AVAILABLE"
     assert blobs.get(art.storage_ref).count(b"\n") == 51
 
 
 def test_process_rows_1240_rows_keeps_50() -> None:
-    repos, blobs = Repositories.in_memory(), MemoryBlobStore()
-    r = _process(repos, blobs, [{"i": i} for i in range(1240)], "a8")
+    repositories, blobs = Repositories.in_memory(), MemoryBlobStore()
+    r = _process(repositories, blobs, [{"i": i} for i in range(1240)], "a8")
     assert len(r.rows) == 50 and r.total_rows == 1240 and "1190 more row(s)" in r.text
 
 
 def test_zero_rows_is_a_valid_result() -> None:
-    repos, blobs = Repositories.in_memory(), MemoryBlobStore()
-    r = _process(repos, blobs, [], "a8")
+    repositories, blobs = Repositories.in_memory(), MemoryBlobStore()
+    r = _process(repositories, blobs, [], "a8")
     assert r.rows == [] and r.artifact_id is None and r.text == "showing 0 of 0 rows"
 
 
 def test_wide_cells_are_shaped_once() -> None:
-    repos, blobs = Repositories.in_memory(), MemoryBlobStore()
-    r = _process(repos, blobs, [{"c": "x" * 500}], "a9")
+    repositories, blobs = Repositories.in_memory(), MemoryBlobStore()
+    r = _process(repositories, blobs, [{"c": "x" * 500}], "a9")
     assert r.rows[0]["c"].endswith("…[+300 chars]") and len(r.rows[0]["c"]) == 200 + len(
         "…[+300 chars]"
     )
     # Cut but not over the row cap: the full row stays recoverable.
     assert r.artifact_id == "a9" and r.text == "showing 1 of 1 rows; full rows in artifact a9"
-    art = repos.artifacts.get("c1", "a9")
+    art = repositories.artifacts.get("c1", "a9")
     assert art and json.loads(blobs.get(art.storage_ref).splitlines()[0])["c"] == "x" * 500
 
 
@@ -218,7 +220,7 @@ def test_build_context_is_byte_stable() -> None:
     )
 
 
-# Beyond the brief: the controller's rulings on budgets, ids, rendering and shaping.
+# Beyond the request state: the controller's rulings on budgets, ids, rendering and shaping.
 
 
 def test_messages_budget_rounds_the_margin_exactly() -> None:
@@ -242,8 +244,8 @@ def test_raw_result_id_is_deterministic_and_ulid_shaped() -> None:
 
 
 def test_user_text_follows_the_spec_layout() -> None:
-    built = build_context(_inputs(), load_budgets())
-    text = built.user_text
+    model_context = build_context(_inputs(), load_budgets())
+    text = model_context.user_text
     tags = [
         '<request message_id="m1">',
         "<user_preferences>",
@@ -260,16 +262,16 @@ def test_user_text_follows_the_spec_layout() -> None:
     assert "a2  dataset  transactions_sep_oct.parquet  rows: 1,240" in text
     # No prior messages: the block is left out; tools go to the model as specs, not text.
     assert "<prior_context>" not in text and "sql_query" not in text
-    sections = dict(built.sections)
+    sections = dict(model_context.sections)
     assert sections["tools"] > 0 and sections["messages"] > 0
-    assert built.fixed_tokens == sum(
-        tokens for name, tokens in built.sections if name != "messages"
+    assert model_context.fixed_tokens == sum(
+        tokens for name, tokens in model_context.sections if name != "messages"
     )
-    assert built.messages == _inputs().loop_messages
+    assert model_context.messages == _inputs().loop_messages
     # Section 8 uses the rule compaction shares: a tool-call turn with empty content costs its
     # tool calls, and even an empty message costs one token.
-    assert sections["messages"] == messages_tokens(built.messages)
-    assert messages_tokens([built.messages[1]]) > messages_tokens([AIMessage("")]) == 1
+    assert sections["messages"] == messages_tokens(model_context.messages)
+    assert messages_tokens([model_context.messages[1]]) > messages_tokens([AIMessage("")]) == 1
 
 
 def test_ampersands_reach_the_model_as_written_and_tags_stay_escaped() -> None:
@@ -321,15 +323,15 @@ def test_prior_context_renders_report_claims_and_other_kinds() -> None:
 
 
 def test_shaping_caps_columns_and_leaves_the_blob_unshaped() -> None:
-    repos, blobs = Repositories.in_memory(), MemoryBlobStore()
+    repositories, blobs = Repositories.in_memory(), MemoryBlobStore()
     wide = [{f"k{j}": "y" * 250 for j in range(25)} for _ in range(3)]
-    r = _process(repos, blobs, wide, "a10", cap=2)
+    r = _process(repositories, blobs, wide, "a10", cap=2)
     assert list(r.rows[0]) == [f"k{j}" for j in range(20)]
     assert r.rows[0]["k0"].endswith("…[+50 chars]")
-    art = repos.artifacts.get("c1", "a10")
+    art = repositories.artifacts.get("c1", "a10")
     assert (
         art and b"y" * 250 in blobs.get(art.storage_ref) and b'"k24"' in blobs.get(art.storage_ref)
     )
     # Only columns cut, short cells, under the row cap: still offloaded.
-    r2 = _process(repos, blobs, [{f"k{j}": j for j in range(25)}], "a11")
+    r2 = _process(repositories, blobs, [{f"k{j}": j for j in range(25)}], "a11")
     assert r2.artifact_id == "a11" and r2.text == "showing 1 of 1 rows; full rows in artifact a11"

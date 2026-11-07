@@ -20,19 +20,19 @@ from contextforge.infra.aws import S3Blobs, SqsQueue, dynamo_repositories
 from contextforge.infra.bedrock import BedrockModel
 from contextforge.infra.tracing import RequestTracer, langsmith_client
 from contextforge.infra.web import PublicWebClient, web_tools
-from contextforge.worker.deps import WorkerDeps
+from contextforge.worker.dependencies import WorkerDependencies
 from contextforge.worker.tools.sql_query import SqlQueryTool
 
 logger = logging.getLogger(__name__)
 
 
-def build_worker(settings: Settings) -> WorkerDeps:
+def build_worker(settings: Settings) -> WorkerDependencies:
     session = (
         boto3.Session(profile_name=settings.aws_profile, region_name=settings.aws_region)
         if settings.aws_profile
         else boto3.Session(region_name=settings.aws_region)
     )
-    repos, blobs, queue = _persistence(session, settings)
+    repositories, blobs, queue = _persistence(session, settings)
     model: ModelClient = ScriptedModel({})
     if settings.model_backend == "bedrock":
         model = _bedrock_model(session, settings)
@@ -46,16 +46,16 @@ def build_worker(settings: Settings) -> WorkerDeps:
     )
     models = load_models_config()
     tracer = _tracer(settings, models.prices)
-    return WorkerDeps(
-        repos=repos,
+    return WorkerDependencies(
+        repositories=repositories,
         blobs=blobs,
         queue=queue,
         model=tracer.model(model),
         budgets=load_budgets(),
         tools=tracer.tools(
             {
-                "sql_query": SqlQueryTool(repos.artifacts, blobs),
-                **web_tools(web, repos, blobs),
+                "sql_query": SqlQueryTool(repositories.artifacts, blobs),
+                **web_tools(web, repositories, blobs),
             }
         ),
         tracer=tracer,

@@ -38,6 +38,17 @@ from contextforge.core.values import Usage
 
 
 class InMemoryMessages:
+    def reserve_web_tool_call(self, chat_id: str, message_id: str, limit: int) -> int | None:
+        with self._lock:
+            current = self._request(chat_id, message_id)
+            if current.web_tool_calls >= limit:
+                return None
+            count = current.web_tool_calls + 1
+            self._messages[(chat_id, message_id)] = current.model_copy(
+                update={"web_tool_calls": count}
+            )
+            return count
+
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._messages: dict[tuple[str, str], Message] = {}

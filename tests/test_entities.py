@@ -23,7 +23,8 @@ def test_request_message_round_trips_camel_case() -> None:
     }
     m = MessageAdapter.validate_python(raw)
     assert isinstance(m, RequestMessage)
-    assert m.model_dump(by_alias=True) == raw
+    assert m.web_tool_calls == 0  # Older request records still load.
+    assert m.model_dump(by_alias=True) == {**raw, "webToolCalls": 0}
 
 
 def test_message_without_kind_is_rejected() -> None:

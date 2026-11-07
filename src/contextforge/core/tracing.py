@@ -26,7 +26,7 @@ class Tracer(Protocol):
         """A stage (plan, cite, report) under the request's root."""
         ...
 
-    def task(self, brief: RequestState, task_id: str) -> AbstractContextManager[None]:
+    def task(self, request_state: RequestState, task_id: str) -> AbstractContextManager[None]:
         """One task's execution under the request's root."""
         ...
 
@@ -48,5 +48,5 @@ class NullTracer:
         yield
 
     @contextmanager
-    def task(self, brief: RequestState, task_id: str) -> Iterator[None]:
+    def task(self, request_state: RequestState, task_id: str) -> Iterator[None]:
         yield

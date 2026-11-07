@@ -69,6 +69,7 @@ def build_trace(records: TraceRecords) -> dict[str, Any]:
             "failureReason": request.failure_reason,
             "createdAt": request.created_at,
             "usage": records.usage,
+            "webToolCalls": request.web_tool_calls,
         },
         "plan": {
             "calls": summaries(by_task[None]),

@@ -1,4 +1,4 @@
-"""Builders shared by the worker tests: dependencies, a seeded chat, an empty brief, a plan,
+"""Builders shared by the worker tests: dependencies, a seeded chat, an empty request state, a plan,
 and a run that answers the planner's one question."""
 
 import dataclasses
@@ -28,10 +28,10 @@ from contextforge.core.services.memory import memory_snapshot
 from contextforge.core.settings import Settings
 from contextforge.core.state import RequestState
 from contextforge.core.storage import MemoryBlobStore, dataset_key
-from contextforge.worker import brief
-from contextforge.worker.deps import WorkerDeps
+from contextforge.worker import request_state
+from contextforge.worker.dependencies import WorkerDependencies
 from contextforge.worker.tools.sql_query import SqlQueryTool
-from contextforge.worker.workflow import build_workflow
+from contextforge.worker.workflow import build_research_workflow
 
 # Resolved from this file, not the CWD, so the helpers work wherever pytest is launched.
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -45,19 +45,19 @@ def make_deps(
     call_budget: int | None = None,
     tasks_in_flight: int | None = None,
     settings: Settings | None = None,
-) -> WorkerDeps:
-    """In-memory WorkerDeps over ``model``, with the configured budgets and per-stage models,
+) -> WorkerDependencies:
+    """In-memory worker dependencies over ``model``, with configured budgets and model routes,
     and the real ``sql_query`` tool over the same repositories and blob store. ``settings``
     turns on the production call path: spend reservation, call admission and the deadline."""
     models = load_models_config(REPO_ROOT / "config" / "models.yaml")
-    repos = Repositories.in_memory()
+    repositories = Repositories.in_memory()
     blobs = MemoryBlobStore()
-    return WorkerDeps(
-        repos=repos,
+    return WorkerDependencies(
+        repositories=repositories,
         blobs=blobs,
         model=model,
         budgets=_budgets(call_budget=call_budget, tasks_in_flight=tasks_in_flight),
-        tools={"sql_query": SqlQueryTool(repos.artifacts, blobs)},
+        tools={"sql_query": SqlQueryTool(repositories.artifacts, blobs)},
         queue=InProcessQueue(),
         price_version=models.price_version,
         routes={Stage(name): stage.route for name, stage in models.stages.items()},
@@ -81,10 +81,10 @@ class ByModel:
         return answer
 
 
-def initial_brief(request: RequestMessage) -> RequestState:
-    """The brief a run starts from, with the memory snapshot of a user who has set no
+def create_initial_request_state(request: RequestMessage) -> RequestState:
+    """The request state a run starts from, with the memory snapshot of a user who has set no
     instructions or preferences: the snapshot every stage requires."""
-    return brief.initial_brief(request, memory_snapshot(None))
+    return request_state.create_initial_request_state(request, memory_snapshot(None))
 
 
 def _budgets(**overrides: int | None) -> Budgets:
@@ -94,11 +94,11 @@ def _budgets(**overrides: int | None) -> Budgets:
 
 
 def seed_chat_with_dataset(
-    deps: WorkerDeps, *, chat_id: str, user_id: str, dataset_id: str
+    worker_dependencies: WorkerDependencies, *, chat_id: str, user_id: str, dataset_id: str
 ) -> RequestMessage:
     """Save a chat holding the fixture CSV as an AVAILABLE dataset and an ACCEPTED request."""
     now = now_iso()
-    deps.repos.chats.save(
+    worker_dependencies.repositories.chats.save(
         Chat(
             chat_id=chat_id,
             user_id=user_id,
@@ -108,7 +108,9 @@ def seed_chat_with_dataset(
             updated_at=now,
         )
     )
-    deps.repos.artifacts.save(_fixture_dataset(deps, chat_id, user_id, dataset_id, now))
+    worker_dependencies.repositories.artifacts.save(
+        _fixture_dataset(worker_dependencies, chat_id, user_id, dataset_id, now)
+    )
     request = RequestMessage(
         message_id=new_ulid(),
         chat_id=chat_id,
@@ -120,12 +122,12 @@ def seed_chat_with_dataset(
         created_at=now,
         updated_at=now,
     )
-    deps.repos.messages.save(request)
+    worker_dependencies.repositories.messages.save(request)
     return request
 
 
 def _fixture_dataset(
-    deps: WorkerDeps, chat_id: str, user_id: str, dataset_id: str, now: str
+    worker_dependencies: WorkerDependencies, chat_id: str, user_id: str, dataset_id: str, now: str
 ) -> Artifact:
     """The fixture CSV copied into the blob store, as the dataset Artifact that points at it."""
     data = FIXTURE_CSV.read_bytes()
@@ -137,7 +139,7 @@ def _fixture_dataset(
         name=FIXTURE_CSV.name,
         media_type="text/csv",
         size_bytes=len(data),
-        storage_ref=deps.blobs.put(dataset_key(chat_id, dataset_id), data),
+        storage_ref=worker_dependencies.blobs.put(dataset_key(chat_id, dataset_id), data),
         status=ArtifactStatus.AVAILABLE,
         index_status=IndexStatus.NOT_INDEXED,
         created_at=now,
@@ -182,13 +184,17 @@ def clarification(question: str) -> dict[str, Any]:
 
 
 def run_answering_the_question(
-    deps: WorkerDeps, request: RequestMessage, answer: str, *, answered_at: str
+    worker_dependencies: WorkerDependencies,
+    request: RequestMessage,
+    answer: str,
+    *,
+    answered_at: str,
 ) -> str:
     """Run ``request`` until the planner asks, answer the pending question as the API does
     (save the answer, claim the request) at ``answered_at``, and run on; the final status."""
-    workflow = build_workflow(deps, InMemorySaver())
+    workflow = build_research_workflow(worker_dependencies, InMemorySaver())
     thread = {"configurable": {"thread_id": request.message_id}}
-    messages = deps.repos.messages
+    messages = worker_dependencies.repositories.messages
     messages.update_request_status(request.chat_id, request.message_id, "ACCEPTED", "RUNNING")
     workflow.invoke({"chat_id": request.chat_id, "message_id": request.message_id}, thread)
     question = messages.pending_for_request(request.chat_id, request.message_id)[0]

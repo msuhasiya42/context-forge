@@ -24,7 +24,7 @@
 - Trace assertions (`mustCall`, `mustNot`, `maxCalls`, `maxUsd`) look at task kinds and tool names only, never call order. golden-001 phase 2 limits: `maxCalls: 30`, `maxUsd: 0.40`, numeric tolerance zero.
 - Two kinds of replay, kept apart: a checkpoint-restored response (`ModelResponse.replayed=True`) never creates a ModelCall; an eval replay response stands in for a provider call, so it is returned with `replayed=False` and recorded with its saved usage.
 - Testing style: tests alongside each task, few and clubbed, integration-first, one test module per task; DRY; small single-purpose functions (about 40 lines at most).
-- Shared files (other milestone-2 phases edit them too): `worker/deps.py`, `tests/helpers.py`, `config/*.yaml`, `pyproject.toml`. Edits there stay additive: new keys, new fields with defaults, new lines; no renames or removals.
+- Shared files (other milestone-2 phases edit them too): `worker/dependencies.py`, `tests/helpers.py`, `config/*.yaml`, `pyproject.toml`. Edits there stay additive: new keys, new fields with defaults, new lines; no renames or removals.
 
 ## Review Focus
 
@@ -57,7 +57,7 @@ src/contextforge/infra/bedrock/__init__.py
 src/contextforge/infra/bedrock/mapping.py        ModelRequest -> Converse request; Converse response -> ModelResponse
 src/contextforge/infra/bedrock/client.py         BedrockConverseClient, as_model_error, bedrock_model_client
 src/contextforge/infra/langsmith.py              LangSmithTracer, trace_metadata/inputs/outputs (masking hook), configure_tracing
-src/contextforge/worker/deps.py                  + pricing, tracer fields
+src/contextforge/worker/dependencies.py                  + pricing, tracer fields
 src/contextforge/worker/stages/guards.py         + LimitExceeded, SpendCapExceeded, DeadlineExceeded, check_spend_cap, check_deadline
 src/contextforge/worker/stages/calls.py          backoff_seconds, GuardedModelClient
 src/contextforge/worker/stages/plan.py           guarded planner call; ModelError and LimitExceeded replace the ScriptExhausted catch
@@ -193,7 +193,7 @@ git commit -m "feat: settings from .env and the phase 2 limits in budgets"
 
 **Files:**
 - Create: `src/contextforge/core/models/errors.py`, `src/contextforge/core/models/pricing.py`
-- Modify: `src/contextforge/core/models/scripted.py`, `config.py`, `recording.py`; `src/contextforge/core/context/prompts.py`; `config/models.yaml`; `src/contextforge/worker/deps.py`; `tests/helpers.py`; `tests/test_models.py`, `tests/test_skeleton.py` (the two assertions that pinned `scripted` and `2026-11-04`)
+- Modify: `src/contextforge/core/models/scripted.py`, `config.py`, `recording.py`; `src/contextforge/core/context/prompts.py`; `config/models.yaml`; `src/contextforge/worker/dependencies.py`; `tests/helpers.py`; `tests/test_models.py`, `tests/test_skeleton.py` (the two assertions that pinned `scripted` and `2026-11-04`)
 - Test: `tests/test_pricing.py`
 
 **Interfaces:**
@@ -208,7 +208,7 @@ git commit -m "feat: settings from .env and the phase 2 limits in budgets"
   - `pricing.spent_usd(calls: Iterable[ModelCall]) -> float`: sum of `estimated_cost_usd`; a record without one (phase 1, unpriced) counts 0.0.
   - `prompts.context_version(memory_version: str, stage: Stage) -> str` = `f"mem:{memory_version}|prompt:{prompt_version(stage)}"`; the recorder uses it instead of its inline f-string.
   - `RecordingModelClient(..., pricing: CallPricing | None = None, run_id: Callable[[], str | None] | None = None)` (new keyword arguments; existing callers unchanged): `estimated_cost_usd = pricing.charge(stage, request.model, usage)` when `pricing` is given; on an exception `outcome = exc.outcome` for a `ModelError`, else `ERROR`; `ended_at` is None when the outcome is TIMEOUT; `langsmith_run_id = run_id()` when given (the call to `run_id` happens inside `invoke`, after the inner call returns or raises).
-  - `WorkerDeps.pricing: CallPricing | None = None` (new field); `model_for` passes it to the recorder. `tests/helpers.make_deps` computes `budgets` once and adds `pricing=call_pricing(models, budgets)`, so every test run is priced.
+  - `WorkerDependencies.pricing: CallPricing | None = None` (new field); `model_for` passes it to the recorder. `tests/helpers.make_deps` computes `budgets` once and adds `pricing=call_pricing(models, budgets)`, so every test run is priced.
 
 - [ ] **Step 1: Verify and record the Nova ids and prices**
 
@@ -285,7 +285,7 @@ def test_cost_counts_cache_columns_and_unknown_usage_is_the_stage_worst_case() -
 
 
 def test_recorder_prices_calls_and_records_a_timeout_without_usage_or_end() -> None:
-    models, repos = load_models_config(), Repositories.in_memory()
+    models, repositories = load_models_config(), Repositories.in_memory()
     pricing = call_pricing(models, load_budgets())
     usage = Usage(input_tokens=1000, output_tokens=100, cache_read_tokens=800)
 
@@ -298,14 +298,14 @@ def test_recorder_prices_calls_and_records_a_timeout_without_usage_or_end() -> N
                 raise ModelTimeout("read timed out after 120 s")
             return ModelResponse(structured={}, usage=usage)
 
-    client = RecordingModelClient(TimesOutOnce(), repos.model_calls, request_message_id="m1",
+    client = RecordingModelClient(TimesOutOnce(), repositories.model_calls, request_message_id="m1",
                                   memory_version="1", price_version=models.price_version,
                                   pricing=pricing, run_id=lambda: "run-1")
     req = ModelRequest(stage="plan", model=models.stages["plan"].model, system=["s"], messages=[])
     with pytest.raises(ModelTimeout):
         client.invoke(req)
     client.invoke(req)
-    by_outcome = {c.outcome: c for c in repos.model_calls.list_by_request("m1")}
+    by_outcome = {c.outcome: c for c in repositories.model_calls.list_by_request("m1")}
     timeout, done = by_outcome["TIMEOUT"], by_outcome["COMPLETED"]
     assert (timeout.usage, timeout.ended_at) == (None, None)
     assert timeout.estimated_cost_usd == pytest.approx(pricing.charge(Stage.PLAN, req.model, None))
@@ -338,7 +338,7 @@ Expected: all pass (4 new); clean. Phase 1 tests still pass under real Nova pric
 - [ ] **Step 6: Commit**
 
 ```bash
-git add config/models.yaml src/contextforge/core src/contextforge/worker/deps.py tests
+git add config/models.yaml src/contextforge/core src/contextforge/worker/dependencies.py tests
 git commit -m "feat: model error classes, versioned Nova prices and a cost on every ModelCall"
 ```
 
@@ -549,15 +549,15 @@ def _request() -> ModelRequest:
 
 
 def test_stubbed_call_is_mapped_and_recorded_with_cache_usage_and_cost() -> None:
-    runtime, repos = _runtime(), Repositories.in_memory()
+    runtime, repositories = _runtime(), Repositories.in_memory()
     client = BedrockConverseClient(dict.fromkeys(MODEL_STAGES, runtime), {})
-    recorded = RecordingModelClient(client, repos.model_calls, request_message_id="m1", memory_version="1",
+    recorded = RecordingModelClient(client, repositories.model_calls, request_message_id="m1", memory_version="1",
                                     price_version="v", pricing=call_pricing(load_models_config(), load_budgets()))
     with Stubber(runtime) as stub:
         stub.add_response("converse", TOOL_USE)
         resp = recorded.invoke(_request())
     assert resp.stop_reason == "tool_use" and resp.tool_calls[0].name == "sql_query"
-    (call,) = repos.model_calls.list_by_request("m1")
+    (call,) = repositories.model_calls.list_by_request("m1")
     assert call.usage is not None and call.usage.cache_read_tokens == 1000 and call.estimated_cost_usd > 0
 
 
@@ -666,15 +666,15 @@ git commit -m "feat: Bedrock Converse client with error classes, per-stage timeo
 - Test: `tests/test_model_guards.py`
 
 **Interfaces:**
-- Consumes: `ModelError` and its classes, `spent_usd`, `Budgets` phase 2 fields, `WorkerDeps.model_for`.
+- Consumes: `ModelError` and its classes, `spent_usd`, `Budgets` phase 2 fields, `WorkerDependencies.model_for`.
 - Produces:
   - `guards.LimitExceeded(Exception)`; `CallBudgetExceeded`, `SpendCapExceeded` and `DeadlineExceeded` subclass it. `guards.DEADLINE_EXCEEDED = "deadline exceeded"`.
-  - `guards.check_spend_cap(deps: WorkerDeps, request_message_id: str) -> None`: raises `SpendCapExceeded(f"spend cap of ${cap:.2f} reached: ${spent:.4f} spent")` when `spent_usd(...) >= deps.budgets.spend_cap_usd` (one call may cross the cap; the next is refused).
+  - `guards.check_spend_cap(deps: WorkerDependencies, request_message_id: str) -> None`: raises `SpendCapExceeded(f"spend cap of ${cap:.2f} reached: ${spent:.4f} spent")` when `spent_usd(...) >= deps.budgets.spend_cap_usd` (one call may cross the cap; the next is refused).
   - `guards.check_deadline(deadline_at: float, what: str) -> None`: raises `DeadlineExceeded(f"{DEADLINE_EXCEEDED}: {what}")` when `time.monotonic() >= deadline_at`.
   - `calls.backoff_seconds(attempt: int, base: float, cap: float, rng: random.Random) -> float` = `rng.uniform(0, min(cap, base * 2 ** (attempt - 1)))` (full jitter).
-  - `calls.GuardedModelClient(deps: WorkerDeps, chat_id: str, request_message_id: str, *, sleep: Callable[[float], None] = time.sleep, rng: random.Random | None = None)` implementing `ModelClient`: at most `1 + budgets.model_retries` attempts; before each, `check_not_cancelled`, `check_call_budget`, `check_spend_cap`; each attempt is `deps.model_for(request_message_id).invoke(request)`, so each is its own ModelCall; a retryable `ModelError` with attempts left sleeps `backoff_seconds(attempt, budgets.retry_base_delay_seconds, budgets.retry_max_delay_seconds, rng)` and tries again; anything else propagates.
+  - `calls.GuardedModelClient(deps: WorkerDependencies, chat_id: str, request_message_id: str, *, sleep: Callable[[float], None] = time.sleep, rng: random.Random | None = None)` implementing `ModelClient`: at most `1 + budgets.model_retries` attempts; before each, `check_not_cancelled`, `check_call_budget`, `check_spend_cap`; each attempt is `deps.model_for(request_message_id).invoke(request)`, so each is its own ModelCall; a retryable `ModelError` with attempts left sleeps `backoff_seconds(attempt, budgets.retry_base_delay_seconds, budgets.retry_max_delay_seconds, rng)` and tries again; anything else propagates.
   - `plan._call_planner` invokes through `GuardedModelClient` (its explicit guard calls move into it); `plan._plan_or_fail` maps `LimitExceeded` to `PlanFailed(f"model budget exhausted: {exc}")` and `ModelError` to `PlanFailed(f"planner model call failed: {exc}")`. The `ScriptExhausted` import and catch go.
-  - `execute.TaskRun.deadline_at: float = math.inf` (new field). `_run_sql_analysis` sets it once, `time.monotonic() + budgets.deadline_seconds[task.kind.value]`, so the deadline covers the retry, and does not retry an error starting with `DEADLINE_EXCEEDED`. `call_model` calls `check_deadline(run.deadline_at, run.task.kind.value)` first inside its `try`, uses one `GuardedModelClient` for both the compaction summary and the execute call, and catches `(LimitExceeded, ModelError)` instead of `(CallBudgetExceeded, ScriptExhausted)`. `Cancelled` still propagates. Deadlines are checked before model calls, not inside a running tool.
+  - `execute.TaskContext.deadline_at: float = math.inf` (new field). `_run_model_tool_loop` sets it once, `time.monotonic() + budgets.deadline_seconds[task.kind.value]`, so the deadline covers the retry, and does not retry an error starting with `DEADLINE_EXCEEDED`. `call_model` calls `check_deadline(run.deadline_at, run.task.kind.value)` first inside its `try`, uses one `GuardedModelClient` for both the compaction summary and the execute call, and catches `(LimitExceeded, ModelError)` instead of `(CallBudgetExceeded, ScriptExhausted)`. `Cancelled` still propagates. Deadlines are checked before model calls, not inside a running tool.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -691,9 +691,9 @@ from contextforge.core.models.errors import ModelError, ModelRejected, ModelThro
 from contextforge.core.models.pricing import cost_usd
 from contextforge.core.models.scripted import ScriptedModel
 from contextforge.core.values import Usage
-from contextforge.worker.deps import WorkerDeps
+from contextforge.worker.dependencies import WorkerDependencies
 from contextforge.worker.stages.calls import backoff_seconds
-from contextforge.worker.workflow import build_workflow
+from contextforge.worker.workflow import build_research_workflow
 from tests.helpers import make_deps, seed_chat_with_dataset, six_task_plan, t1_result
 
 
@@ -716,19 +716,19 @@ def _script(**plan_extra: object) -> dict[str, list[ModelResponse]]:
             "execute": [ModelResponse(structured=t1_result())] * 3}
 
 
-def _run(deps: WorkerDeps) -> tuple[str, str]:
-    req = seed_chat_with_dataset(deps, chat_id="c1", user_id="u1", dataset_id="a2")
-    deps.repos.messages.update_request_status("c1", req.message_id, "ACCEPTED", "RUNNING")
-    deps.budgets = dataclasses.replace(deps.budgets, retry_base_delay_seconds=0.0)
-    out = build_workflow(deps, checkpointer=None).invoke(
+def _run(worker_dependencies: WorkerDependencies) -> tuple[str, str]:
+    req = seed_chat_with_dataset(worker_dependencies, chat_id="c1", user_id="u1", dataset_id="a2")
+    worker_dependencies.repositories.messages.update_request_status("c1", req.message_id, "ACCEPTED", "RUNNING")
+    worker_dependencies.budgets = dataclasses.replace(worker_dependencies.budgets, retry_base_delay_seconds=0.0)
+    out = build_research_workflow(worker_dependencies, checkpointer=None).invoke(
         {"chat_id": "c1", "message_id": req.message_id}, {"configurable": {"thread_id": req.message_id}})
     return out["status"], req.message_id
 
 
 def test_throttled_planner_is_retried_once_and_each_attempt_is_a_priced_model_call() -> None:
-    deps = make_deps(Flaky(_script(), {"plan": [ModelThrottled("ThrottlingException: slow down")]}))
-    status, rid = _run(deps)
-    plans = [c for c in deps.repos.model_calls.list_by_request(rid) if c.stage == "plan"]
+    worker_dependencies = make_deps(Flaky(_script(), {"plan": [ModelThrottled("ThrottlingException: slow down")]}))
+    status, rid = _run(worker_dependencies)
+    plans = [c for c in worker_dependencies.repositories.model_calls.list_by_request(rid) if c.stage == "plan"]
     assert status == "COMPLETED" and sorted(c.outcome for c in plans) == ["COMPLETED", "ERROR"]
     assert all(c.estimated_cost_usd is not None and c.estimated_cost_usd > 0 for c in plans)
 
@@ -737,33 +737,33 @@ def test_throttled_planner_is_retried_once_and_each_attempt_is_a_priced_model_ca
     ([ModelRejected("AccessDeniedException: no model access")], "ERROR"),
     ([ModelTimeout("read timed out"), ModelTimeout("read timed out again")], "TIMEOUT")])
 def test_rejected_or_twice_timed_out_planner_fails_with_a_reason(errors: list[ModelError], outcome: str) -> None:
-    deps = make_deps(Flaky(_script(), {"plan": errors}))
-    status, rid = _run(deps)
-    calls = deps.repos.model_calls.list_by_request(rid)
+    worker_dependencies = make_deps(Flaky(_script(), {"plan": errors}))
+    status, rid = _run(worker_dependencies)
+    calls = worker_dependencies.repositories.model_calls.list_by_request(rid)
     assert status == "FAILED" and len(calls) == len(errors) and {c.outcome for c in calls} == {outcome}
     assert all(c.ended_at is None for c in calls if c.outcome == "TIMEOUT")
-    assert "planner model call failed" in (deps.repos.messages.get("c1", rid).failure_reason or "")
+    assert "planner model call failed" in (worker_dependencies.repositories.messages.get("c1", rid).failure_reason or "")
 
 
 def test_spend_cap_counts_recorded_cost_and_refuses_the_next_call() -> None:
     usage = Usage(input_tokens=1000, output_tokens=100)
-    deps = make_deps(ScriptedModel(_script(usage=usage)))
-    cap = cost_usd(usage, load_models_config().prices[deps.planner_model])
-    deps.budgets = dataclasses.replace(deps.budgets, spend_cap_usd=cap)
-    status, rid = _run(deps)
-    assert status == "FAILED" and [c.stage for c in deps.repos.model_calls.list_by_request(rid)] == ["plan"]
-    t1 = deps.repos.tasks.list_by_request(rid)[0]
+    worker_dependencies = make_deps(ScriptedModel(_script(usage=usage)))
+    cap = cost_usd(usage, load_models_config().prices[worker_dependencies.planner_model])
+    worker_dependencies.budgets = dataclasses.replace(worker_dependencies.budgets, spend_cap_usd=cap)
+    status, rid = _run(worker_dependencies)
+    assert status == "FAILED" and [c.stage for c in worker_dependencies.repositories.model_calls.list_by_request(rid)] == ["plan"]
+    t1 = worker_dependencies.repositories.tasks.list_by_request(rid)[0]
     assert t1.status == "FAILED" and "spend cap" in (t1.failure_reason or "")
 
 
 def test_task_deadline_fails_the_task_before_any_call_and_without_a_retry() -> None:
-    deps = make_deps(ScriptedModel(_script()))
-    deps.budgets = dataclasses.replace(
-        deps.budgets, deadline_seconds={**deps.budgets.deadline_seconds, "sql_analysis": 0})
-    _, rid = _run(deps)
-    sql = [t for t in deps.repos.tasks.list_by_request(rid) if t.kind == "sql_analysis"]
+    worker_dependencies = make_deps(ScriptedModel(_script()))
+    worker_dependencies.budgets = dataclasses.replace(
+        worker_dependencies.budgets, deadline_seconds={**worker_dependencies.budgets.deadline_seconds, "sql_analysis": 0})
+    _, rid = _run(worker_dependencies)
+    sql = [t for t in worker_dependencies.repositories.tasks.list_by_request(rid) if t.kind == "sql_analysis"]
     assert all(t.status == "FAILED" and (t.failure_reason or "").startswith("deadline exceeded") for t in sql)
-    assert not [c for c in deps.repos.model_calls.list_by_request(rid) if c.stage == "execute"]
+    assert not [c for c in worker_dependencies.repositories.model_calls.list_by_request(rid) if c.stage == "execute"]
 
 
 def test_backoff_is_full_jitter_under_the_cap() -> None:
@@ -799,14 +799,14 @@ git commit -m "feat: guarded model calls with one jittered retry, spend cap and 
 
 **Files:**
 - Create: `src/contextforge/infra/langsmith.py`
-- Modify: `src/contextforge/core/models/base.py` (add `ModelTracer`), `src/contextforge/worker/deps.py`, `tests/conftest.py` (autouse fixture)
+- Modify: `src/contextforge/core/models/base.py` (add `ModelTracer`), `src/contextforge/worker/dependencies.py`, `tests/conftest.py` (autouse fixture)
 - Test: `tests/test_tracing.py`
 
 **Interfaces:**
 - Consumes: `RecordingModelClient(run_id=...)` (Task 2), `Settings`, `prompt_version`.
 - Produces:
   - `base.ModelTracer` Protocol: `wrap(self, inner: ModelClient, request_message_id: str) -> ModelClient`; `current_run_id(self) -> str | None`.
-  - `WorkerDeps.tracer: ModelTracer | None = None` (new field). `model_for` builds the recorder with `run_id=self.tracer.current_run_id` when a tracer is set and returns `self.tracer.wrap(recorder, request_message_id)`; otherwise the bare recorder as before. The span is outside the recorder, so the recorder runs inside it and reads its id.
+  - `WorkerDependencies.tracer: ModelTracer | None = None` (new field). `model_for` builds the recorder with `run_id=self.tracer.current_run_id` when a tracer is set and returns `self.tracer.wrap(recorder, request_message_id)`; otherwise the bare recorder as before. The span is outside the recorder, so the recorder runs inside it and reads its id.
   - `langsmith.LangSmithTracer(client: langsmith.Client | None = None, *, mask: bool = False)` implementing `ModelTracer`. Its wrapped client calls the inner client directly when `langsmith.utils.tracing_is_enabled()` is false; otherwise opens `langsmith.trace(name=f"model.{stage}", run_type="llm", inputs=trace_inputs(request, mask=mask), metadata=trace_metadata(request, request_message_id), client=client)`, ends it with `trace_outputs(response)`, and lets an exception mark the run errored and propagate. `current_run_id()` is `str(langsmith.get_current_run_tree().id)` or None.
   - `trace_metadata(request: ModelRequest, request_message_id: str) -> dict[str, str]`: `requestMessageId`, `thread_id` (= request message id, so LangSmith groups a request's runs as one thread), `stage`, `model`, `promptVersion`, and `taskId` when set.
   - `trace_inputs(request: ModelRequest, *, mask: bool) -> dict[str, Any]` (the single masking hook): `{"system": [...], "messages": [{"role", "content"}], "tools": [names]}`; with `mask`, every system and message text becomes `f"[masked {len(text)} chars]"`.
@@ -847,14 +847,14 @@ def test_metadata_and_the_masking_hook() -> None:
 
 
 def test_model_call_carries_the_run_id_only_while_tracing() -> None:
-    deps = make_deps(ScriptedModel({"plan": [ModelResponse(text="a"), ModelResponse(text="b")]}))
-    deps.tracer = LangSmithTracer(client=MagicMock(spec=langsmith.Client))
-    req = ModelRequest(stage="plan", model=deps.planner_model, system=["s"], messages=[HumanMessage("x")])
+    worker_dependencies = make_deps(ScriptedModel({"plan": [ModelResponse(text="a"), ModelResponse(text="b")]}))
+    worker_dependencies.tracer = LangSmithTracer(client=MagicMock(spec=langsmith.Client))
+    req = ModelRequest(stage="plan", model=worker_dependencies.planner_model, system=["s"], messages=[HumanMessage("x")])
     with langsmith.tracing_context(enabled=False):
-        assert deps.model_for("m1").invoke(req).text == "a"
+        assert worker_dependencies.model_for("m1").invoke(req).text == "a"
     with langsmith.tracing_context(enabled=True):
-        assert deps.model_for("m1").invoke(req).text == "b"
-    run_ids = [c.langsmith_run_id for c in deps.repos.model_calls.list_by_request("m1")]
+        assert worker_dependencies.model_for("m1").invoke(req).text == "b"
+    run_ids = [c.langsmith_run_id for c in worker_dependencies.repositories.model_calls.list_by_request("m1")]
     assert run_ids.count(None) == 1
     uuid.UUID(next(r for r in run_ids if r is not None))
 
@@ -884,7 +884,7 @@ Expected: all pass (3 new); clean.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/contextforge/core/models/base.py src/contextforge/infra/langsmith.py src/contextforge/worker/deps.py tests/conftest.py tests/test_tracing.py
+git add src/contextforge/core/models/base.py src/contextforge/infra/langsmith.py src/contextforge/worker/dependencies.py tests/conftest.py tests/test_tracing.py
 git commit -m "feat: LangSmith spans per model call with the run id on its ModelCall"
 ```
 
@@ -1159,8 +1159,8 @@ git commit -m "feat: rubric judge with per-criterion verdicts and label agreemen
   - `harness.RecordedTool(inner: Tool, uses: list[ToolUse])` implementing `Tool` (same `spec` and `permission`); `run` appends `ToolUse(ctx.task_id, spec.name, permission)` and delegates.
   - `harness.TaskIndex`: `bind(task_ids: Callable[[], list[str]]) -> None`; `ordinal(task_id: str | None) -> int | None` = the task's position in plan order (task ids are created in plan order), None for no task or an unknown id.
   - `harness.CaseRun` (frozen dataclass): `request_message_id: str`, `status: str` (a `RequestStatus` value, or `ERROR` when the run raised), `failure_reason: str | None`, `report: ReportBody | None`, `tasks: list[Task]`, `calls: list[ModelCall]`, `tool_uses: list[ToolUse]`.
-  - `harness.case_deps(model: ModelClient, uses: list[ToolUse], *, tracer: ModelTracer | None = None) -> WorkerDeps`: in-memory repositories, `MemoryBlobStore`, `load_budgets()`, stage models and `price_version` from `config/models.yaml`, `pricing=call_pricing(...)`, `tools={"sql_query": RecordedTool(SqlQueryTool(repos.artifacts, blobs), uses)}`, an `InProcessQueue`, `tracer`.
-  - `harness.seed_case(deps: WorkerDeps, case: EvalCase) -> RequestMessage`: Chat `c1` of user `u1`, an AVAILABLE `dataset` Artifact `case.dataset_id` named after the CSV file with its bytes stored at `dataset_key("c1", dataset_id)`, and an ACCEPTED request Message whose content is `case.request_text()`.
+  - `harness.case_deps(model: ModelClient, uses: list[ToolUse], *, tracer: ModelTracer | None = None) -> WorkerDependencies`: in-memory repositories, `MemoryBlobStore`, `load_budgets()`, stage models and `price_version` from `config/models.yaml`, `pricing=call_pricing(...)`, `tools={"sql_query": RecordedTool(SqlQueryTool(repos.artifacts, blobs), uses)}`, an `InProcessQueue`, `tracer`.
+  - `harness.seed_case(deps: WorkerDependencies, case: EvalCase) -> RequestMessage`: Chat `c1` of user `u1`, an AVAILABLE `dataset` Artifact `case.dataset_id` named after the CSV file with its bytes stored at `dataset_key("c1", dataset_id)`, and an ACCEPTED request Message whose content is `case.request_text()`.
   - `harness.run_case(case: EvalCase, model: ModelClient, *, index: TaskIndex | None = None, tracer: ModelTracer | None = None) -> CaseRun`: builds deps, seeds, binds `index` to the request's task ids, runs `RequestRunner(deps, SqliteSaver(sqlite3.connect(":memory:", check_same_thread=False))).start`, and while the request is WAITING_USER (at most two rounds, the clarification limit) answers the pending interrupt with a `ClarificationResponseMessage` whose content is `case.clarification_answer`. Any exception from the run becomes `status="ERROR"`, `failure_reason=str(exc)`; one case never stops the others.
   - `harness.evaluate_case(case: EvalCase, model: ModelClient, *, index: TaskIndex | None = None, tracer: ModelTracer | None = None) -> CaseResult`: `run_case`, then `run_checks(run.report, case.checks, case.dataset_id, failure=run.failure_reason)`, `check_trace(case.trace, run.calls, run.tasks, run.tool_uses)` and `judge_report(run.report, case.rubric, model, models.stages["evaluate"])` (the judge goes straight to `model`, not through the request's recorder); `calls=len(run.calls)`, `usd=spent_usd(run.calls)`.
   - `score.CaseResult` (frozen dataclass): `case_id`, `status`, `checks`, `trace`, `judge: list[CheckResult]`, `calls: int`, `usd: float`, `judge_agreement: tuple[int, int] | None = None`; property `passed` = status `COMPLETED` and every check, trace assertion and judge item passed.

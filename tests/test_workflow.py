@@ -11,11 +11,11 @@ from contextforge.core.models.errors import ModelError
 from contextforge.core.models.scripted import ScriptedModel
 from contextforge.core.tools.base import ToolContext
 from contextforge.infra.bedrock import converse_payload
-from contextforge.worker.deps import WorkerDeps
+from contextforge.worker.dependencies import WorkerDependencies
 from contextforge.worker.stages.execute import NO_CALLS_REMAIN
 from contextforge.worker.stages.summary import unsupported_terms
 from contextforge.worker.tools.sql_query import SqlQueryTool
-from contextforge.worker.workflow import build_workflow
+from contextforge.worker.workflow import build_research_workflow
 from tests.helpers import (
     clarification,
     make_deps,
@@ -30,14 +30,16 @@ def _cfg(req) -> dict:
     return {"configurable": {"thread_id": req.message_id}}
 
 
-def _start(deps, req) -> None:
-    deps.repos.messages.update_request_status("c1", req.message_id, "ACCEPTED", "RUNNING")
+def _start(worker_dependencies, req) -> None:
+    worker_dependencies.repositories.messages.update_request_status(
+        "c1", req.message_id, "ACCEPTED", "RUNNING"
+    )
 
 
 def test_csv_sql_query_finds_planted_transfer_pairs() -> None:
-    deps = make_deps(ScriptedModel({}))
-    req = seed_chat_with_dataset(deps, chat_id="c1", user_id="u1", dataset_id="a2")
-    ctx = ToolContext(
+    worker_dependencies = make_deps(ScriptedModel({}))
+    req = seed_chat_with_dataset(worker_dependencies, chat_id="c1", user_id="u1", dataset_id="a2")
+    tool_context = ToolContext(
         chat_id="c1",
         user_id="u1",
         request_message_id=req.message_id,
@@ -45,7 +47,7 @@ def test_csv_sql_query_finds_planted_transfer_pairs() -> None:
         tool_call_id="x1",
     )
     rows = (
-        SqlQueryTool(deps.repos.artifacts, deps.blobs)
+        SqlQueryTool(worker_dependencies.repositories.artifacts, worker_dependencies.blobs)
         .run(
             {
                 "dataset_id": "a2",
@@ -55,16 +57,16 @@ def test_csv_sql_query_finds_planted_transfer_pairs() -> None:
                 "AND d.account_id <> c.account_id "
                 "AND abs(date_diff('day', d.txn_date, c.txn_date)) <= 2",
             },
-            ctx,
+            tool_context,
         )
         .rows
     )
     assert rows is not None
     assert {(r["debit_row"], r["credit_row"]) for r in rows} >= {(12, 13), (40, 41), (50, 51)}
     # external access is off once the dataset is loaded: a SELECT cannot read host files
-    leaked = SqlQueryTool(deps.repos.artifacts, deps.blobs).run(
-        {"dataset_id": "a2", "sql": "SELECT count(*) FROM read_text('/etc/hosts')"}, ctx
-    )
+    leaked = SqlQueryTool(
+        worker_dependencies.repositories.artifacts, worker_dependencies.blobs
+    ).run({"dataset_id": "a2", "sql": "SELECT count(*) FROM read_text('/etc/hosts')"}, tool_context)
     assert leaked.status == "error" and leaked.error_class == "code" and leaked.rows is None
 
 
@@ -87,26 +89,29 @@ def test_fixture_request_produces_six_tasks_and_a_report() -> None:
             ModelResponse(structured=t1_result()),
         ],
     }
-    deps = make_deps(
+    worker_dependencies = make_deps(
         ScriptedModel(script), tasks_in_flight=1
     )  # serial, so the script order is deterministic
     requests: list[ModelRequest] = []
-    deps.model.on_request = requests.append  # type: ignore[attr-defined]
-    req = seed_chat_with_dataset(deps, chat_id="c1", user_id="u1", dataset_id="a2")
-    _start(deps, req)
-    out = build_workflow(deps, checkpointer=None).invoke(
+    worker_dependencies.model.on_request = requests.append  # type: ignore[attr-defined]
+    req = seed_chat_with_dataset(worker_dependencies, chat_id="c1", user_id="u1", dataset_id="a2")
+    _start(worker_dependencies, req)
+    out = build_research_workflow(worker_dependencies, checkpointer=None).invoke(
         {"chat_id": "c1", "message_id": req.message_id}, _cfg(req)
     )
     assert out["status"] == "COMPLETED"
-    tasks = deps.repos.tasks.list_by_request(req.message_id)
+    tasks = worker_dependencies.repositories.tasks.list_by_request(req.message_id)
     assert len(tasks) == 6
     assert sorted(t.status for t in tasks) == sorted(["COMPLETED"] * 4 + ["SKIPPED"] * 2)
-    msgs = deps.repos.messages.list_by_chat("c1")
+    msgs = worker_dependencies.repositories.messages.list_by_chat("c1")
     report = [m for m in msgs if m.kind == "report"][0]
     assert report.report.claims and all(c.evidence_refs for c in report.report.claims)
-    assert deps.repos.messages.get("c1", req.message_id).status == "COMPLETED"
+    assert worker_dependencies.repositories.messages.get("c1", req.message_id).status == "COMPLETED"
     # Plan, four task calls, and the report's summary (unscripted, so it fails and falls back).
-    stages = [c.stage for c in deps.repos.model_calls.list_by_request(req.message_id)]
+    stages = [
+        c.stage
+        for c in worker_dependencies.repositories.model_calls.list_by_request(req.message_id)
+    ]
     assert len(stages) == 6 and stages[-1] == "summary"
     # the resolved window reaches the report's coverage, its constraints and every execute call
     period = report.report.coverage["period"]
@@ -141,21 +146,27 @@ def test_request_completes_under_a_small_context_cap() -> None:
     )
     requests: list[ModelRequest] = []
     model.on_request = requests.append
-    deps = make_deps(model, tasks_in_flight=1)  # serial, so one task's turns are consecutive
-    deps.budgets = dataclasses.replace(
-        deps.budgets, cap_input_tokens=3000, response_allowance_tokens=500
+    worker_dependencies = make_deps(
+        model, tasks_in_flight=1
+    )  # serial, so one task's turns are consecutive
+    worker_dependencies.budgets = dataclasses.replace(
+        worker_dependencies.budgets, cap_input_tokens=3000, response_allowance_tokens=500
     )
-    req = seed_chat_with_dataset(deps, chat_id="c1", user_id="u1", dataset_id="a2")
-    _start(deps, req)
-    out = build_workflow(deps, checkpointer=None).invoke(
+    req = seed_chat_with_dataset(worker_dependencies, chat_id="c1", user_id="u1", dataset_id="a2")
+    _start(worker_dependencies, req)
+    out = build_research_workflow(worker_dependencies, checkpointer=None).invoke(
         {"chat_id": "c1", "message_id": req.message_id}, _cfg(req)
     )
     assert out["status"] == "COMPLETED"
-    tasks = deps.repos.tasks.list_by_request(req.message_id)
+    tasks = worker_dependencies.repositories.tasks.list_by_request(req.message_id)
     assert sorted(t.status for t in tasks) == sorted(["COMPLETED"] * 4 + ["SKIPPED"] * 2)
-    report = [m for m in deps.repos.messages.list_by_chat("c1") if m.kind == "report"][0]
+    report = [
+        m
+        for m in worker_dependencies.repositories.messages.list_by_chat("c1")
+        if m.kind == "report"
+    ][0]
     assert report.report.claims and all(c.evidence_refs for c in report.report.claims)
-    calls = deps.repos.model_calls.list_by_request(req.message_id)
+    calls = worker_dependencies.repositories.model_calls.list_by_request(req.message_id)
     assert any(c.stage == "compress" for c in calls)
     first = next(i for i, r in enumerate(requests) if r.stage == "compress")
     # a summarized tool result is summarized together with the call that made it
@@ -186,7 +197,7 @@ def test_independent_tasks_run_in_parallel() -> None:
 
     plan = six_task_plan()
     plan["tasks"][1]["dependsOn"] = []  # t1, t2, t3 all independent
-    deps = make_deps(
+    worker_dependencies = make_deps(
         Pausing(
             {
                 "plan": [ModelResponse(structured=plan)],
@@ -195,9 +206,9 @@ def test_independent_tasks_run_in_parallel() -> None:
         ),
         tasks_in_flight=3,
     )
-    req = seed_chat_with_dataset(deps, chat_id="c1", user_id="u1", dataset_id="a2")
-    _start(deps, req)
-    out = build_workflow(deps, checkpointer=None).invoke(
+    req = seed_chat_with_dataset(worker_dependencies, chat_id="c1", user_id="u1", dataset_id="a2")
+    _start(worker_dependencies, req)
+    out = build_research_workflow(worker_dependencies, checkpointer=None).invoke(
         {"chat_id": "c1", "message_id": req.message_id}, _cfg(req)
     )
     assert out["status"] == "COMPLETED" and gate.broken is False
@@ -208,23 +219,27 @@ def test_cancel_between_waves_stops_the_run() -> None:
         "plan": [ModelResponse(structured=six_task_plan())],
         "execute": [ModelResponse(structured=t1_result())] * 3,
     }
-    deps = make_deps(ScriptedModel(script), tasks_in_flight=1)
-    req = seed_chat_with_dataset(deps, chat_id="c1", user_id="u1", dataset_id="a2")
+    worker_dependencies = make_deps(ScriptedModel(script), tasks_in_flight=1)
+    req = seed_chat_with_dataset(worker_dependencies, chat_id="c1", user_id="u1", dataset_id="a2")
     # the API sets CANCELLED; here the hook fires right after the first task completes
-    deps.repos.tasks.on_save = lambda t: (
-        deps.repos.messages.update_request_status(  # type: ignore[attr-defined]
+    worker_dependencies.repositories.tasks.on_save = lambda t: (
+        worker_dependencies.repositories.messages.update_request_status(  # type: ignore[attr-defined]
             "c1", req.message_id, "RUNNING", "CANCELLED"
         )
         if t.status == "COMPLETED" and t.kind == "sql_analysis"
         else None
     )
-    _start(deps, req)
-    out = build_workflow(deps, checkpointer=None).invoke(
+    _start(worker_dependencies, req)
+    out = build_research_workflow(worker_dependencies, checkpointer=None).invoke(
         {"chat_id": "c1", "message_id": req.message_id}, _cfg(req)
     )
     assert out["status"] == "CANCELLED"
-    assert deps.repos.messages.get("c1", req.message_id).status == "CANCELLED"
-    assert not [m for m in deps.repos.messages.list_by_chat("c1") if m.kind == "report"]
+    assert worker_dependencies.repositories.messages.get("c1", req.message_id).status == "CANCELLED"
+    assert not [
+        m
+        for m in worker_dependencies.repositories.messages.list_by_chat("c1")
+        if m.kind == "report"
+    ]
 
 
 def test_a_task_out_of_tool_calls_returns_the_facts_it_has() -> None:
@@ -253,15 +268,17 @@ def test_a_task_out_of_tool_calls_returns_the_facts_it_has() -> None:
     )
     requests: list[ModelRequest] = []
     model.on_request = requests.append
-    deps = make_deps(model, tasks_in_flight=1)
-    req = seed_chat_with_dataset(deps, chat_id="c1", user_id="u1", dataset_id="a2")
-    _start(deps, req)
-    out = build_workflow(deps, checkpointer=None).invoke(
+    worker_dependencies = make_deps(model, tasks_in_flight=1)
+    req = seed_chat_with_dataset(worker_dependencies, chat_id="c1", user_id="u1", dataset_id="a2")
+    _start(worker_dependencies, req)
+    out = build_research_workflow(worker_dependencies, checkpointer=None).invoke(
         {"chat_id": "c1", "message_id": req.message_id}, _cfg(req)
     )
     assert out["status"] == "COMPLETED"
     sql_tasks = [
-        t for t in deps.repos.tasks.list_by_request(req.message_id) if t.kind == "sql_analysis"
+        t
+        for t in worker_dependencies.repositories.tasks.list_by_request(req.message_id)
+        if t.kind == "sql_analysis"
     ]
     stopped = "stopped at the tool-call budget; 6 pages read"
     for task in sql_tasks:
@@ -272,7 +289,11 @@ def test_a_task_out_of_tool_calls_returns_the_facts_it_has() -> None:
     assert last_calls[0].messages[-1].content == NO_CALLS_REMAIN
     forced = converse_payload(last_calls[0])["toolConfig"]
     assert forced["toolChoice"] == {"tool": {"name": "return_result"}}
-    report = next(m for m in deps.repos.messages.list_by_chat("c1") if m.kind == "report")
+    report = next(
+        m
+        for m in worker_dependencies.repositories.messages.list_by_chat("c1")
+        if m.kind == "report"
+    )
     assert report.report.claims and stopped in report.report.uncertainties
 
 
@@ -289,7 +310,7 @@ def test_no_result_even_at_the_tool_call_cap_fails_the_task_not_the_request() ->
         )
         for i in range(14)
     ]
-    deps = make_deps(
+    worker_dependencies = make_deps(
         ScriptedModel(
             {
                 "plan": [ModelResponse(structured=six_task_plan())],
@@ -298,12 +319,12 @@ def test_no_result_even_at_the_tool_call_cap_fails_the_task_not_the_request() ->
         ),
         tasks_in_flight=1,
     )
-    req = seed_chat_with_dataset(deps, chat_id="c1", user_id="u1", dataset_id="a2")
-    _start(deps, req)
-    out = build_workflow(deps, checkpointer=None).invoke(
+    req = seed_chat_with_dataset(worker_dependencies, chat_id="c1", user_id="u1", dataset_id="a2")
+    _start(worker_dependencies, req)
+    out = build_research_workflow(worker_dependencies, checkpointer=None).invoke(
         {"chat_id": "c1", "message_id": req.message_id}, _cfg(req)
     )
-    tasks = deps.repos.tasks.list_by_request(req.message_id)
+    tasks = worker_dependencies.repositories.tasks.list_by_request(req.message_id)
     failed = [t for t in tasks if t.status == "FAILED"]
     assert (
         out["status"] == "COMPLETED"
@@ -320,7 +341,7 @@ def test_tool_error_is_a_result_the_model_sees() -> None:
         def __init__(self) -> None:
             self.runs = 0
 
-        def run(self, arguments, ctx):
+        def run(self, arguments, tool_context):
             self.runs += 1
             raise RuntimeError("duckdb exploded")
 
@@ -330,7 +351,7 @@ def test_tool_error_is_a_result_the_model_sees() -> None:
         ],
         stop_reason="tool_use",
     )
-    deps = make_deps(
+    worker_dependencies = make_deps(
         ScriptedModel(
             {
                 "plan": [ModelResponse(structured=six_task_plan())],
@@ -339,18 +360,20 @@ def test_tool_error_is_a_result_the_model_sees() -> None:
         ),
         tasks_in_flight=1,
     )
-    deps.tools["sql_query"] = Boom()
-    req = seed_chat_with_dataset(deps, chat_id="c1", user_id="u1", dataset_id="a2")
-    _start(deps, req)
+    worker_dependencies.tools["sql_query"] = Boom()
+    req = seed_chat_with_dataset(worker_dependencies, chat_id="c1", user_id="u1", dataset_id="a2")
+    _start(worker_dependencies, req)
     seen = []
-    deps.model.on_request = lambda r: seen.extend(m.content for m in r.messages if m.type == "tool")  # type: ignore[attr-defined]
-    out = build_workflow(deps, checkpointer=None).invoke(
+    worker_dependencies.model.on_request = lambda r: seen.extend(
+        m.content for m in r.messages if m.type == "tool"
+    )  # type: ignore[attr-defined]
+    out = build_research_workflow(worker_dependencies, checkpointer=None).invoke(
         {"chat_id": "c1", "message_id": req.message_id}, _cfg(req)
     )
     assert out["status"] == "COMPLETED" and any('"error_class": "system"' in c for c in seen)
     # a failed call is never answered "[already done]": repeating it runs the tool again
     retried = Boom()
-    deps = make_deps(
+    worker_dependencies = make_deps(
         ScriptedModel(
             {
                 "plan": [ModelResponse(structured=six_task_plan())],
@@ -359,13 +382,13 @@ def test_tool_error_is_a_result_the_model_sees() -> None:
         ),
         tasks_in_flight=1,
     )
-    deps.tools["sql_query"] = retried
-    req = seed_chat_with_dataset(deps, chat_id="c1", user_id="u1", dataset_id="a2")
-    _start(deps, req)
-    out = build_workflow(deps, checkpointer=None).invoke(
+    worker_dependencies.tools["sql_query"] = retried
+    req = seed_chat_with_dataset(worker_dependencies, chat_id="c1", user_id="u1", dataset_id="a2")
+    _start(worker_dependencies, req)
+    out = build_research_workflow(worker_dependencies, checkpointer=None).invoke(
         {"chat_id": "c1", "message_id": req.message_id}, _cfg(req)
     )
-    t1 = deps.repos.tasks.list_by_request(req.message_id)[0]
+    t1 = worker_dependencies.repositories.tasks.list_by_request(req.message_id)[0]
     assert retried.runs == 2 and t1.status == "COMPLETED" and out["status"] == "COMPLETED"
 
 
@@ -385,13 +408,13 @@ def test_duplicate_tool_call_spends_no_slot() -> None:
     )
     requests: list[ModelRequest] = []
     model.on_request = requests.append
-    deps = make_deps(model, tasks_in_flight=1)
-    req = seed_chat_with_dataset(deps, chat_id="c1", user_id="u1", dataset_id="a2")
-    _start(deps, req)
-    build_workflow(deps, checkpointer=None).invoke(
+    worker_dependencies = make_deps(model, tasks_in_flight=1)
+    req = seed_chat_with_dataset(worker_dependencies, chat_id="c1", user_id="u1", dataset_id="a2")
+    _start(worker_dependencies, req)
+    build_research_workflow(worker_dependencies, checkpointer=None).invoke(
         {"chat_id": "c1", "message_id": req.message_id}, _cfg(req)
     )
-    t1 = deps.repos.tasks.list_by_request(req.message_id)[0]
+    t1 = worker_dependencies.repositories.tasks.list_by_request(req.message_id)[0]
     assert (t1.status, t1.attempt) == ("COMPLETED", 1)
     # the duplicates never counted: one query read, then the no-progress limit ended the loop
     assert t1.result.uncertainties[-1] == "stopped after 3 turns without progress; 1 page read"
@@ -403,7 +426,7 @@ def test_a_dependent_runs_on_what_completed_and_one_with_nothing_fails() -> None
     # t1 returns an invalid result on both of its attempts; t3 needs no t1 and completes. t2
     # needs only t1, so it never runs (I-2); t6 needs t1, t2 and t3, so it runs (F7 ruling 2).
     invalid = ModelResponse(structured={})
-    deps = make_deps(
+    worker_dependencies = make_deps(
         ScriptedModel(
             {
                 "plan": [ModelResponse(structured=six_task_plan())],
@@ -412,12 +435,12 @@ def test_a_dependent_runs_on_what_completed_and_one_with_nothing_fails() -> None
         ),
         tasks_in_flight=1,
     )
-    req = seed_chat_with_dataset(deps, chat_id="c1", user_id="u1", dataset_id="a2")
-    _start(deps, req)
-    out = build_workflow(deps, checkpointer=None).invoke(
+    req = seed_chat_with_dataset(worker_dependencies, chat_id="c1", user_id="u1", dataset_id="a2")
+    _start(worker_dependencies, req)
+    out = build_research_workflow(worker_dependencies, checkpointer=None).invoke(
         {"chat_id": "c1", "message_id": req.message_id}, _cfg(req)
     )
-    t1, t2, t3, _, _, t6 = deps.repos.tasks.list_by_request(req.message_id)
+    t1, t2, t3, _, _, t6 = worker_dependencies.repositories.tasks.list_by_request(req.message_id)
     assert t1.status == "FAILED" and "invalid result" in t1.failure_reason
     assert t2.status == "FAILED" and t2.failure_reason == "dependency failed"
     assert t3.status == "COMPLETED" and out["status"] == "COMPLETED"
@@ -425,7 +448,7 @@ def test_a_dependent_runs_on_what_completed_and_one_with_nothing_fails() -> None
         f"A dependency did not complete ({t1.failure_reason}); not covered: {t1.goal}",
         f"A dependency did not complete (dependency failed); not covered: {t2.goal}",
     ]
-    assert deps.repos.messages.get("c1", req.message_id).status == "COMPLETED"
+    assert worker_dependencies.repositories.messages.get("c1", req.message_id).status == "COMPLETED"
 
 
 WEATHER = "Daily weather in Ajmer and Palanpur over the last two weeks."
@@ -512,25 +535,26 @@ class _F7Agent:
         return str(request.messages[0].content).split("Task goal: ", 1)[1].split("\n", 1)[0]
 
 
-def _run_f7() -> tuple[_F7Agent, WorkerDeps, str]:
-    """The live F7 run on the fixture chat: its agent, its deps and the request id."""
+def _run_f7() -> tuple[_F7Agent, WorkerDependencies, str]:
+    """The live F7 run on the fixture chat: its agent, its worker_dependencies and the request
+    id."""
     agent = _F7Agent()
-    deps = make_deps(agent)
-    req = seed_chat_with_dataset(deps, chat_id="c1", user_id="u1", dataset_id="a2")
-    _start(deps, req)
-    out = build_workflow(deps, checkpointer=None).invoke(
+    worker_dependencies = make_deps(agent)
+    req = seed_chat_with_dataset(worker_dependencies, chat_id="c1", user_id="u1", dataset_id="a2")
+    _start(worker_dependencies, req)
+    out = build_research_workflow(worker_dependencies, checkpointer=None).invoke(
         {"chat_id": "c1", "message_id": req.message_id}, _cfg(req)
     )
     assert out["status"] == "COMPLETED"
-    return agent, deps, req.message_id
+    return agent, worker_dependencies, req.message_id
 
 
 def test_a_failed_task_leaves_a_stated_gap_not_an_unanswered_request() -> None:
     """F7 ruling 2 on the live run: weather failed at its tool budget, the visit task (needing
     only weather) never ran, and the combining task ran on distance and trains, told what is
     missing, instead of failing with "dependency failed"."""
-    agent, deps, request_id = _run_f7()
-    tasks = {t.goal: t for t in deps.repos.tasks.list_by_request(request_id)}
+    agent, worker_dependencies, request_id = _run_f7()
+    tasks = {t.goal: t for t in worker_dependencies.repositories.tasks.list_by_request(request_id)}
     statuses = {goal: (t.status, t.failure_reason) for goal, t in tasks.items()}
     assert statuses == {
         WEATHER: ("FAILED", "tool call budget exhausted"),
@@ -540,15 +564,19 @@ def test_a_failed_task_leaves_a_stated_gap_not_an_unanswered_request() -> None:
         ANSWER: ("COMPLETED", None),
     }
     executes = [r for r in agent.requests if r.stage == "execute"]
-    (brief,) = {str(r.messages[0].content) for r in executes if agent.goal_of(r) == ANSWER}
-    dependencies = brief.split("<dependencies>")[1].split("</dependencies>")[0]
+    (request_state,) = {str(r.messages[0].content) for r in executes if agent.goal_of(r) == ANSWER}
+    dependencies = request_state.split("<dependencies>")[1].split("</dependencies>")[0]
     assert dependencies.splitlines()[1:] == [
         "- Ajmer to Palanpur is approximately 350+ kms.",
         "- Two trains a day run from Ajmer to Palanpur.",
         f"- A dependency did not complete (tool call budget exhausted); not covered: {WEATHER}",
         f"- A dependency did not complete (dependency failed); not covered: {WHEN_TO_VISIT}",
     ]
-    report = next(m for m in deps.repos.messages.list_by_chat("c1") if m.kind == "report")
+    report = next(
+        m
+        for m in worker_dependencies.repositories.messages.list_by_chat("c1")
+        if m.kind == "report"
+    )
     assert "No weather data: the weather task did not complete." in report.report.uncertainties
 
 
@@ -557,8 +585,12 @@ def test_the_report_leads_with_answers_then_names_what_was_not_answered() -> Non
     actual question (the weather, when to visit) unmentioned outside the limitations. Each
     task without a result now names its goal as not answered, after the answers and before
     the limitations."""
-    _, deps, _ = _run_f7()
-    report = next(m for m in deps.repos.messages.list_by_chat("c1") if m.kind == "report")
+    _, worker_dependencies, _ = _run_f7()
+    report = next(
+        m
+        for m in worker_dependencies.repositories.messages.list_by_chat("c1")
+        if m.kind == "report"
+    )
     summary, counts, *paragraphs = report.content.split("\n\n")
     assert summary == (
         "Ajmer to Palanpur is approximately 350+ kms. Two trains a day run from Ajmer to Palanpur."
@@ -632,17 +664,22 @@ class _VisitAgent:
         }[_F7Agent.goal_of(request)]
 
 
-def _visit_report(agent: _VisitAgent) -> tuple[ReportMessage, WorkerDeps]:
-    """The report of the 7 Nov chat's request, run serially with ``agent``, and its deps."""
-    deps = make_deps(agent, tasks_in_flight=1)
-    req = seed_chat_with_dataset(deps, chat_id="c1", user_id="u1", dataset_id="a2")
-    _start(deps, req)
-    out = build_workflow(deps, checkpointer=None).invoke(
+def _visit_report(agent: _VisitAgent) -> tuple[ReportMessage, WorkerDependencies]:
+    """The report of the 7 Nov chat's request, run serially with ``agent``, and its
+    worker_dependencies."""
+    worker_dependencies = make_deps(agent, tasks_in_flight=1)
+    req = seed_chat_with_dataset(worker_dependencies, chat_id="c1", user_id="u1", dataset_id="a2")
+    _start(worker_dependencies, req)
+    out = build_research_workflow(worker_dependencies, checkpointer=None).invoke(
         {"chat_id": "c1", "message_id": req.message_id}, _cfg(req)
     )
     assert out["status"] == "COMPLETED"
-    report = next(m for m in deps.repos.messages.list_by_chat("c1") if m.kind == "report")
-    return report, deps
+    report = next(
+        m
+        for m in worker_dependencies.repositories.messages.list_by_chat("c1")
+        if m.kind == "report"
+    )
+    return report, worker_dependencies
 
 
 SUMMARY = (
@@ -681,14 +718,16 @@ def test_the_summary_covers_every_subject_and_the_assessment_from_one_cheap_call
     answered part and the assessment, written by one summary call on the cheap model that
     reads the report's claims, conclusions and gaps, never page text."""
     agent = _VisitAgent(SUMMARY)
-    report, deps = _visit_report(agent)
+    report, worker_dependencies = _visit_report(agent)
     summary, counts, first = report.content.split("\n\n")[:3]
     assert (summary, counts, first) == (SUMMARY, "2 findings, 2 limitations.", f"1. {AJMER_FACT}")
     (call,) = [r for r in agent.requests if r.stage == "summary"]
     sent = str(call.messages[0].content)
-    assert call.model == deps.model_id(Stage.SUMMARY) and call.task_id is None
+    assert call.model == worker_dependencies.model_id(Stage.SUMMARY) and call.task_id is None
     assert AJMER_FACT in sent and VISIT_CONCLUSION in sent and f"Not answered: {RAIL}" in sent
-    recorded = deps.repos.model_calls.list_by_request(report.request_message_id)
+    recorded = worker_dependencies.repositories.model_calls.list_by_request(
+        report.request_message_id
+    )
     assert [(c.stage, c.outcome) for c in recorded][-1] == ("summary", "COMPLETED")
     assert recorded[-1].context_version.endswith("|prompt:summary.1")
 
@@ -706,15 +745,20 @@ def test_a_summary_naming_what_the_report_does_not_is_replaced_by_its_claims() -
 
 
 def test_scripted_exhaustion_fails_request_with_reason() -> None:
-    deps = make_deps(ScriptedModel({"plan": [ModelResponse(structured=six_task_plan())]}))
-    req = seed_chat_with_dataset(deps, chat_id="c1", user_id="u1", dataset_id="a2")
-    _start(deps, req)
-    out = build_workflow(deps, checkpointer=None).invoke(
+    worker_dependencies = make_deps(
+        ScriptedModel({"plan": [ModelResponse(structured=six_task_plan())]})
+    )
+    req = seed_chat_with_dataset(worker_dependencies, chat_id="c1", user_id="u1", dataset_id="a2")
+    _start(worker_dependencies, req)
+    out = build_research_workflow(worker_dependencies, checkpointer=None).invoke(
         {"chat_id": "c1", "message_id": req.message_id}, _cfg(req)
     )
-    m = deps.repos.messages.get("c1", req.message_id)
+    m = worker_dependencies.repositories.messages.get("c1", req.message_id)
     assert out["status"] == "FAILED" and m.status == "FAILED" and m.failure_reason
-    assert any(c.outcome == "ERROR" for c in deps.repos.model_calls.list_by_request(req.message_id))
+    assert any(
+        c.outcome == "ERROR"
+        for c in worker_dependencies.repositories.model_calls.list_by_request(req.message_id)
+    )
 
 
 def test_report_constraints_keep_the_users_facts_with_provenance_and_drop_plan_rules() -> None:
@@ -729,7 +773,7 @@ def test_report_constraints_keep_the_users_facts_with_provenance_and_drop_plan_r
         "Exclude transfers between the user's own accounts from spending.",
         *leaked,
     ]
-    deps = make_deps(
+    worker_dependencies = make_deps(
         ScriptedModel(
             {
                 "plan": [
@@ -741,12 +785,16 @@ def test_report_constraints_keep_the_users_facts_with_provenance_and_drop_plan_r
         ),
         tasks_in_flight=1,
     )
-    req = seed_chat_with_dataset(deps, chat_id="c1", user_id="u1", dataset_id="a2")
+    req = seed_chat_with_dataset(worker_dependencies, chat_id="c1", user_id="u1", dataset_id="a2")
     status = run_answering_the_question(
-        deps, req, "September and October", answered_at="2026-11-06T09:30:00Z"
+        worker_dependencies, req, "September and October", answered_at="2026-11-06T09:30:00Z"
     )
     assert status == "COMPLETED"
-    report = next(m for m in deps.repos.messages.list_by_chat("c1") if m.kind == "report")
+    report = next(
+        m
+        for m in worker_dependencies.repositories.messages.list_by_chat("c1")
+        if m.kind == "report"
+    )
     kept = {c.text: (c.source, c.date) for c in report.report.constraints}
     assert kept["User answered 'Which months?': September and October"] == (
         "clarification",

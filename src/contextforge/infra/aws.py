@@ -188,6 +188,40 @@ class DynamoMessages:
     def __init__(self, store: DynamoStore) -> None:
         self.store = store
 
+    def reserve_web_tool_call(self, chat_id: str, message_id: str, limit: int) -> int | None:
+        """One conditional counter update, shared by every worker and persistent on restart.
+
+        Old request records have no counter and start at zero. An ambiguous write is not
+        refunded, so a timeout can reduce available work but cannot permit an extra call.
+        """
+        try:
+            response = self.store.client.update_item(
+                TableName=self.store.table,
+                Key=self.store.key(f"CHAT#{chat_id}", f"MSG#{message_id}"),
+                UpdateExpression="SET #count = if_not_exists(#count, :zero) + :one",
+                ConditionExpression=(
+                    "attribute_exists(PK) AND #kind = :kind AND "
+                    "(attribute_not_exists(#count) OR #count < :limit)"
+                ),
+                ExpressionAttributeNames={"#count": "webToolCalls", "#kind": "kind"},
+                ExpressionAttributeValues={
+                    ":zero": {"N": "0"},
+                    ":one": {"N": "1"},
+                    ":limit": {"N": str(limit)},
+                    ":kind": {"S": "request"},
+                },
+                ReturnValues="UPDATED_NEW",
+                ReturnValuesOnConditionCheckFailure="ALL_OLD",
+            )
+            return int(response["Attributes"]["webToolCalls"]["N"])
+        except ClientError as exc:
+            if error_code(exc) != _CONDITION_FAILED:
+                raise
+            stored = self.store.decode(exc.response["Item"]) if exc.response.get("Item") else {}
+            if stored.get("kind") != "request":
+                raise LookupError(f"no request {message_id} in chat {chat_id}") from exc
+            return None
+
     def save(self, message: Message) -> None:
         self.store.put(f"CHAT#{message.chat_id}", f"MSG#{message.message_id}", message)
 

@@ -129,6 +129,8 @@ class RequestMessage(_MessageFields):
     kind: Literal[MessageKind.REQUEST]
     status: RequestStatus
     failure_reason: str | None = None
+    # Durable request-wide search/fetch admissions; never reset by a retry or resume.
+    web_tool_calls: int = Field(default=0, ge=0)
 
 
 class ClarificationMessage(_RequestEntryFields):
