@@ -24,6 +24,7 @@ from contextforge.core.values import ArtifactRef, EvidenceRef
 from contextforge.worker.deps import WorkerDeps
 from contextforge.worker.stages.execute import TaskOutcome
 from contextforge.worker.stages.guards import check_not_cancelled, leave_running
+from contextforge.worker.stages.long_report import attach_if_long
 from contextforge.worker.stages.plan import answer_constraint, is_plan_mechanics, local_today
 
 logger = logging.getLogger(__name__)
@@ -53,6 +54,9 @@ def write_report(
 ) -> str:
     """Save the report, then end the request: COMPLETED when any task completed, else FAILED.
 
+    A report too long for the chat is saved whole as a deliverable Artifact and summarised
+    (``long_report``).
+
     ``cite_uncertainties`` are the cite stage's reasons for the facts it dropped. The report id
     derives from the request, so a re-run overwrites it. Returns the final status; raises
     ``Cancelled`` when the user cancelled meanwhile.
@@ -60,6 +64,8 @@ def write_report(
     with request_context(brief["request_message_id"]):
         check_not_cancelled(deps, brief["chat_id"], brief["request_message_id"])
         report = _report_message(brief, outcomes, cite_uncertainties, _answers(brief, deps))
+        # The deliverable is saved before the Message, so its ref never points at nothing.
+        report = attach_if_long(report, brief["goal"], deps)
         deps.repos.messages.save(report)
         completed = any(o["status"] == TaskStatus.COMPLETED for o in outcomes)
         status = RequestStatus.COMPLETED if completed else RequestStatus.FAILED

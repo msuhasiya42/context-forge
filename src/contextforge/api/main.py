@@ -4,6 +4,7 @@ import asyncio
 import hmac
 import json
 import logging
+import re
 import sqlite3
 import time
 from collections.abc import AsyncIterator
@@ -194,6 +195,21 @@ def create_app(settings: Settings | None = None, *, deps: WorkerDeps | None = No
         chat_id: str, limit: int = Query(50, ge=1, le=100), cursor: str | None = None
     ) -> dict[str, Any]:
         return page(service.artifacts(chat_id), f"artifacts:{chat_id}", limit, cursor)
+
+    @app.get("/chats/{chat_id}/artifacts/{artifact_id}/content", dependencies=[Depends(authorized)])
+    def artifact_content(chat_id: str, artifact_id: str) -> Response:
+        artifact, data = service.artifact_content(chat_id, artifact_id)
+        # attachment and nosniff: a snapshot holds page text, which must never be rendered as
+        # a page of this origin if the URL is opened directly.
+        filename = re.sub(r"[^A-Za-z0-9._-]", "_", artifact.name)
+        return Response(
+            data,
+            media_type=artifact.media_type,
+            headers={
+                "Content-Disposition": f'attachment; filename="{filename}"',
+                "X-Content-Type-Options": "nosniff",
+            },
+        )
 
     return app
 

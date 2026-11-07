@@ -429,7 +429,12 @@ def dynamo_repositories(client: Any, table: str) -> Repositories:
 
 
 # Content types of the blob keys core/storage.py builds.
-_CONTENT_TYPES = {".csv": "text/csv", ".json": "application/json", ".jsonl": "application/x-ndjson"}
+_CONTENT_TYPES = {
+    ".csv": "text/csv",
+    ".json": "application/json",
+    ".jsonl": "application/x-ndjson",
+    ".md": "text/markdown; charset=utf-8",
+}
 
 
 class S3Blobs:

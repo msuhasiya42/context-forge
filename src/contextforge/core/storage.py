@@ -10,6 +10,12 @@ def dataset_key(chat_id: str, artifact_id: str) -> str:
     return f"chats/{chat_id}/datasets/{artifact_id}.csv"
 
 
+def deliverable_key(chat_id: str, artifact_id: str) -> str:
+    """Blob key of a deliverable Artifact (a long report as markdown). Outside the raw_result
+    prefix, so the bucket's 30-day lifecycle rule for raw results never expires it."""
+    return f"chats/{chat_id}/deliverables/{artifact_id}.md"
+
+
 def raw_result_key(chat_id: str, artifact_id: str) -> str:
     """Blob key of a raw_result Artifact: the full tool result rows as JSON lines."""
     return f"raw_result/{chat_id}/{artifact_id}.jsonl"

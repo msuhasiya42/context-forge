@@ -11,7 +11,7 @@ from typing import Any, Protocol
 from pydantic import ValidationError
 
 from contextforge.core.activity import ActivityBus
-from contextforge.core.entities.artifact import Artifact
+from contextforge.core.entities.artifact import Artifact, ArtifactKind, ArtifactStatus
 from contextforge.core.entities.chat import Chat, ChatStatus
 from contextforge.core.entities.message import (
     ClarificationMessage,
@@ -33,8 +33,11 @@ from contextforge.core.services.memory import (
     merged_preferences,
 )
 from contextforge.core.services.submit import submit_request
+from contextforge.core.storage import BlobStore
 
 TERMINAL = {RequestStatus.COMPLETED, RequestStatus.FAILED, RequestStatus.CANCELLED}
+# Kinds whose stored bytes the API serves: a long report, and the web snapshots it cites.
+READABLE_KINDS = {ArtifactKind.DELIVERABLE, ArtifactKind.RAW_RESULT}
 TITLE_CHARS = 60
 NOT_PENDING = "This request is not waiting for an answer to that message."
 
@@ -44,6 +47,7 @@ class ServiceDeps(Protocol):
     imports nothing from ``worker`` (spec 12); ``WorkerDeps`` satisfies it."""
 
     repos: Repositories
+    blobs: BlobStore
     queue: Queue
     activity: ActivityBus
 
@@ -169,6 +173,23 @@ class Application:
     def artifacts(self, chat_id: str) -> list[Artifact]:
         self.chat(chat_id)
         return self.deps.repos.artifacts.list_by_chat(chat_id)
+
+    def artifact_content(self, chat_id: str, artifact_id: str) -> tuple[Artifact, bytes]:
+        """The Artifact and its stored bytes; 404 unless it is an AVAILABLE deliverable or
+        raw_result of this user's chat whose bytes are still stored (a raw result expires)."""
+        self.chat(chat_id)
+        artifact = self.deps.repos.artifacts.get(chat_id, artifact_id)
+        if (
+            artifact is None
+            or artifact.user_id != self.user_id
+            or artifact.kind not in READABLE_KINDS
+            or artifact.status != ArtifactStatus.AVAILABLE
+        ):
+            raise ServiceError(404, "not_found", "Artifact not found.")
+        try:
+            return artifact, self.deps.blobs.get(artifact.storage_ref)
+        except LookupError as gone:
+            raise ServiceError(404, "not_found", "Artifact content is no longer stored.") from gone
 
     def request(self, chat_id: str, message_id: str) -> RequestMessage:
         self.chat(chat_id)

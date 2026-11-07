@@ -158,6 +158,52 @@ def test_connected_run_takes_the_production_call_path_with_the_users_memory(tmp_
     assert all(c.context_version.startswith(f"mem:{memory['version']}|") for c in calls)
 
 
+def test_a_long_report_becomes_a_deliverable_that_the_content_route_serves(tmp_path):
+    """F5 Part B: a report text over 1,500 characters is saved whole as a markdown deliverable;
+    the chat keeps its first paragraph and a pointer, and only deliverables and raw results
+    are served."""
+    long_result = t1_result()
+    for fact in long_result["facts"]:
+        fact["text"] += " The statement rows give the detail." * 12
+    deps = make_deps(
+        ScriptedModel(
+            {
+                "plan": [ModelResponse(structured=six_task_plan())],
+                "execute": [ModelResponse(structured=long_result)] * 3,
+            }
+        ),
+        tasks_in_flight=1,
+    )
+    seed_chat_with_dataset(deps, chat_id="c1", user_id="u1", dataset_id="a2")
+    with TestClient(create_app(_settings(tmp_path), deps=deps)) as client:
+        request_id = client.post(
+            "/chats/c1/requests", json={"content": "Compare"}, headers={"Idempotency-Key": "long"}
+        ).json()["messageId"]
+        assert _until(client, f"/chats/c1/requests/{request_id}", "COMPLETED", "FAILED") == (
+            "COMPLETED"
+        )
+        items = client.get("/chats/c1/messages").json()["items"]
+        report = next(m for m in items if m["kind"] == "report")
+        (ref,) = report["report"]["deliverables"]
+        served = client.get(f"/chats/c1/artifacts/{ref['artifactId']}/content")
+        dataset = client.get("/chats/c1/artifacts/a2/content")
+        missing = client.get("/chats/c1/artifacts/none/content")
+    claims = report["report"]["claims"]
+    assert ref["role"] == "output" and len(claims) == 6
+    assert len(report["content"]) < 1500 and report["content"].startswith(claims[0]["text"])
+    assert "Full report attached: 6 findings" in report["content"]
+    assert served.status_code == 200 and served.headers["content-type"].startswith("text/markdown")
+    assert served.headers["x-content-type-options"] == "nosniff"
+    body = served.text
+    assert body.startswith("# Explain how October 2026 spending differs from September 2026.")
+    assert all(claim["text"] in body for claim in claims)
+    assert "Limitations:" in body and "## Evidence" in body and "## Coverage" in body
+    artifact = deps.repos.artifacts.get("c1", ref["artifactId"])
+    assert artifact.kind == "deliverable" and artifact.name == f"report-{request_id}.md"
+    assert (dataset.status_code, missing.status_code) == (404, 404)
+    assert dataset.json() == {"error": {"code": "not_found", "message": "Artifact not found."}}
+
+
 def test_two_clarifications_each_close_the_stream_and_resume_the_same_request(tmp_path):
     deps = make_deps(
         ScriptedModel(
