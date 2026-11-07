@@ -65,7 +65,8 @@ class ReportConstraint(Entity):
     """A constraint the request ran under, carried into the next request's prior context."""
 
     text: str
-    # Where it came from: "request", a clarification message id, or a standing instruction.
+    # Where it came from: "request" (the request text) or "clarification" (the user's answer to
+    # a question). Standing instructions reach the model through the memory file, not here.
     source: str
     date: str
 

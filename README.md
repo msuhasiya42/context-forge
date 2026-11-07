@@ -27,7 +27,7 @@ uv run ruff format --check .
 uv run mypy src
 ```
 
-Copy `.env.example` to `.env` for local settings. Phase 1 needs no credentials: the tests use the fake model and no AWS; `LANGSMITH_API_KEY` is only for tracing from phase 2.
+Copy `.env.example` to `.env` for local settings; its comments explain each one. The tests need no credentials: they use a scripted model, no network and no AWS. Tracing is off unless `CONTEXTFORGE_MODEL_TRACING=true` and `LANGSMITH_API_KEY` are set, and sends metadata only unless `CONTEXTFORGE_TRACE_CONTENT=true`. Never set `LANGSMITH_TRACING`: it is the LangSmith SDK's global switch and would send LangGraph's full state, page text included.
 
 ## Web-first development
 
@@ -40,7 +40,7 @@ uv run contextforge-api
 ```
 
 The API binds to `http://127.0.0.1:8000`; interactive API docs are at `/docs`.
-Configure the existing AWS CLI profile in `.env`. Model defaults are Nova Pro/Lite through Bedrock; web search defaults to DuckDuckGo. LangSmith is optional. Application records default to memory and graph checkpoints to local SQLite. `CONTEXTFORGE_BACKEND=aws` selects the implemented DynamoDB/S3/SQS adapters; the cloud graph checkpointer is still pending.
+Configure the existing AWS CLI profile in `.env`. Model defaults are Nova Pro/Lite through Bedrock (stage models and prices in `config/models.yaml`); each request is capped at `CONTEXTFORGE_REQUEST_MAX_USD`, with every call priced from its token usage. Web search defaults to DuckDuckGo. LangSmith tracing is optional. Application records default to memory and graph checkpoints to local SQLite. `CONTEXTFORGE_BACKEND=aws` selects the implemented DynamoDB/S3/SQS adapters; the cloud graph checkpointer is still pending.
 
 Connect the sibling frontend with `VITE_API_BASE_URL=http://localhost:8000 npm run dev`. The tested SSE/reply/memory UI changes are delivered as [a patch](patches/frontend-web-first.patch), because that repository was outside this session's writable workspace. Apply instructions and remaining work are in the latest handoff.
 
