@@ -41,6 +41,18 @@ _PAGE_TYPES = frozenset({"text/html", "text/plain", "application/xhtml+xml"})
 _MAX_HOPS = 4  # the first request and up to three redirects
 _DEADLINE_SECONDS = 20.0
 _NDJSON = "application/x-ndjson"
+# Live run 1: three tasks searching at once got DuckDuckGo's bot check after about six
+# queries in ten seconds, so its queries are spaced out and a failed one is retried once.
+_SEARCH_INTERVAL_SECONDS = 1.5
+_RETRY_DELAY_SECONDS = 3.0
+_NO_RESULTS = (
+    "Search returned no usable sources; it may be unavailable or rate limited. "
+    "No answer was verified."
+)
+_BOT_CHECK = (
+    "DuckDuckGo answered with its bot check (HTTP 202) instead of results: searches from this "
+    "address are being rate limited. No answer was verified."
+)
 
 
 class WebUnavailable(Exception):
@@ -63,32 +75,69 @@ class PublicWebClient:
         max_chars: int = 12_000,
         deadline_seconds: float = _DEADLINE_SECONDS,
         resolver: Callable[[str], list[str]] = resolve_host,
+        search_interval: float = _SEARCH_INTERVAL_SECONDS,
+        retry_delay: float = _RETRY_DELAY_SECONDS,
+        sleep: Callable[[float], None] = time.sleep,
     ) -> None:
         self.client = client or httpx.Client(
             timeout=timeout, follow_redirects=False, trust_env=False
         )
+        # ``api_key`` is Serper's: the provider when ``provider`` is "serper", else the fallback.
         self.provider, self.api_key, self.limit = provider, api_key, limit
         self.max_bytes, self.max_chars, self.resolver = max_bytes, max_chars, resolver
         self.deadline_seconds = deadline_seconds
+        self.search_interval, self.retry_delay, self.sleep = search_interval, retry_delay, sleep
+        self._slots = threading.Lock()
+        self._next_slot = 0.0
 
     def search(self, query: str) -> list[dict[str, str]]:
-        """Up to ``limit`` hits as ``{title, url, snippet}``, one per URL."""
+        """Up to ``limit`` hits as ``{title, url, snippet}``, one per URL.
+
+        On DuckDuckGo a failed search (its bot check, a network or HTTP error, no hits) is
+        tried once more after ``retry_delay``, then on Serper when a key is set. The last
+        failure is raised when every try fails.
+        """
         if not query.strip() or len(query) > 1000:
             raise WebRefusal("bad_query", "A search query has 1 to 1000 characters.")
-        rows = _within(self.deadline_seconds, partial(self._search, query))
-        if not rows:
-            raise WebUnavailable(
-                "Search returned no usable sources; it may be unavailable or rate limited. "
-                "No answer was verified."
-            )
-        return rows
+        failure: Exception = WebUnavailable(_NO_RESULTS)
+        for provider, delay in self._search_plan():
+            if delay:
+                self.sleep(delay)
+            if provider == "duckduckgo":
+                self._wait_for_slot()
+            try:
+                rows = _within(self.deadline_seconds, partial(self._search, provider, query))
+            except (WebUnavailable, httpx.HTTPError) as exc:
+                failure = exc
+                continue
+            if rows:
+                return rows
+            failure = WebUnavailable(_NO_RESULTS)
+        raise failure
 
     def fetch(self, url: str) -> dict[str, Any]:
         """The page at ``url`` (after redirects) as ``{url, text, truncated, retrievedAt}``."""
         return _within(self.deadline_seconds, partial(self._fetch, url))
 
-    def _search(self, query: str, deadline: float) -> list[dict[str, str]]:
+    def _search_plan(self) -> list[tuple[str, float]]:
+        """The providers to try in order, each with the wait before it."""
         if self.provider == "serper":
+            return [("serper", 0.0)]
+        plan = [("duckduckgo", 0.0), ("duckduckgo", self.retry_delay)]
+        return [*plan, ("serper", 0.0)] if self.api_key else plan
+
+    def _wait_for_slot(self) -> None:
+        """Wait until ``search_interval`` after the previous DuckDuckGo query, whichever
+        thread sent it. The slot is taken under the lock; the wait happens outside it."""
+        with self._slots:
+            now = time.monotonic()
+            wait = self._next_slot - now
+            self._next_slot = max(now, self._next_slot) + self.search_interval
+        if wait > 0:
+            self.sleep(wait)
+
+    def _search(self, provider: str, query: str, deadline: float) -> list[dict[str, str]]:
+        if provider == "serper":
             if not self.api_key:
                 raise WebUnavailable("Google search requires SERPER_API_KEY.")
             request = self.client.build_request(
@@ -97,23 +146,29 @@ class PublicWebClient:
                 headers={**_HEADERS, "X-API-KEY": self.api_key},
                 json={"q": query, "num": self.limit},
             )
-            rows = _serper_rows(self._read(request, deadline))
+            rows = _serper_rows(self._read(request, deadline)[1])
         else:
             request = self.client.build_request(
                 "GET", "https://html.duckduckgo.com/html/", params={"q": query}, headers=_HEADERS
             )
-            rows = _duckduckgo_rows(self._read(request, deadline).decode("utf-8", "replace"))
+            status, body = self._read(request, deadline)
+            html = body.decode("utf-8", "replace")
+            rows = _duckduckgo_rows(html)
+            # The bot check comes as 202 with an "anomaly" page and no hits.
+            if not rows and (status == 202 or "anomaly" in html):
+                raise WebUnavailable(_BOT_CHECK)
         unique: dict[str, dict[str, str]] = {}
         for row in rows:
             if urlsplit(row["url"]).scheme in {"http", "https"}:
                 unique.setdefault(row["url"], row)
         return list(unique.values())[: self.limit]
 
-    def _read(self, request: httpx.Request, deadline: float) -> bytes:
+    def _read(self, request: httpx.Request, deadline: float) -> tuple[int, bytes]:
+        """The response's status and body, read under the byte cap and the deadline."""
         response = self.client.send(request, stream=True)
         try:
             response.raise_for_status()
-            return _body(response, self.max_bytes, deadline)
+            return response.status_code, _body(response, self.max_bytes, deadline)
         finally:
             response.close()
 

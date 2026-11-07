@@ -20,7 +20,13 @@ from contextforge.core.models.base import ModelRequest, ModelResponse, ToolCall
 from contextforge.core.models.scripted import ScriptedModel
 from contextforge.core.storage import raw_result_key
 from contextforge.core.tools.base import ToolContext, ToolResult
-from contextforge.infra.web import FetchURLTool, PublicWebClient, WebSearchTool, web_tools
+from contextforge.infra.web import (
+    FetchURLTool,
+    PublicWebClient,
+    WebSearchTool,
+    WebUnavailable,
+    web_tools,
+)
 from contextforge.infra.web_guard import SeenUrls, WebRefusal
 from contextforge.worker.deps import WorkerDeps
 from contextforge.worker.stages.cite import check_citations
@@ -45,7 +51,10 @@ def _ctx(call_id: str = "q1") -> ToolContext:
 
 
 def _web(handler: Callable[[httpx.Request], httpx.Response], **options: Any) -> PublicWebClient:
+    """A client over ``handler``; searches are not paced or backed off unless a test asks."""
     options.setdefault("resolver", lambda host: [PUBLIC_IP])
+    options.setdefault("search_interval", 0.0)
+    options.setdefault("retry_delay", 0.0)
     return PublicWebClient(httpx.Client(transport=httpx.MockTransport(handler)), **options)
 
 
@@ -246,6 +255,56 @@ def test_search_keeps_real_hits_and_skips_ads_and_linkless_hits():
     )
     tool = WebSearchTool(oversized, deps.repos.artifacts, deps.blobs, SeenUrls(lambda ctx: ""))
     assert _refused(tool.run({"query": "python"}, _ctx()), "too_large")
+
+
+# What DuckDuckGo sent every query in live run 1 once it started rate limiting this address.
+BOT_CHECK = httpx.Response(202, text="<html><div class='anomaly-modal'>Unfortunately, bots</div>")
+
+
+def test_a_duckduckgo_bot_check_is_retried_once_then_falls_back_to_serper():
+    """Live run 1: after a few parallel searches DuckDuckGo answered 202 with its bot check and
+    every later search failed as "no usable sources". Now the bot check is named, retried once
+    after a backoff, and Serper takes over when a key is set."""
+    asked: list[str] = []
+    blocked_for = [1]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        asked.append(request.url.host)
+        if request.url.host == "google.serper.dev":
+            return httpx.Response(200, json={"organic": [{"title": "T", "link": DOCS_URL}]})
+        if blocked_for[0] > 0:
+            blocked_for[0] -= 1
+            return BOT_CHECK
+        return httpx.Response(200, text=_search_page((DOCS_URL, "What's New", "Changes.")))
+
+    waits: list[float] = []
+    web = _web(handler, retry_delay=3.0, sleep=waits.append)
+    assert [row["url"] for row in web.search("python")] == [DOCS_URL]
+    assert waits == [3.0] and asked == ["html.duckduckgo.com"] * 2
+
+    blocked_for[0], asked[:] = 10, []
+    with pytest.raises(WebUnavailable, match=r"bot check \(HTTP 202\)"):
+        _web(handler).search("python")
+    assert asked == ["html.duckduckgo.com"] * 2
+
+    blocked_for[0], asked[:] = 10, []
+    serper = _web(handler, api_key="test-key")
+    assert [row["url"] for row in serper.search("python")] == [DOCS_URL]
+    assert asked == ["html.duckduckgo.com", "html.duckduckgo.com", "google.serper.dev"]
+
+
+def test_duckduckgo_searches_are_spaced_out_across_tasks():
+    """Parallel tasks searching at once tripped DuckDuckGo's rate limit; each search waits
+    for its slot, ``search_interval`` after the one before."""
+    waits: list[float] = []
+    web = _web(
+        lambda request: httpx.Response(200, text=_search_page((DOCS_URL, "New", "Changes."))),
+        search_interval=2.0,
+        sleep=waits.append,
+    )
+    for _ in range(3):
+        web.search("python")
+    assert len(waits) == 2 and all(1.5 < wait <= 4.0 for wait in waits)
 
 
 def test_cite_keeps_only_facts_quoting_their_snapshot_by_url():
