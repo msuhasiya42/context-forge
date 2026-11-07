@@ -1,4 +1,10 @@
-"""DynamoDB/S3/SQS adapters. Existing dev resources are used; none are provisioned here."""
+"""DynamoDB/S3/SQS adapters. Existing dev resources are used; none are provisioned here.
+
+Each adapter keeps the contract of its in-memory reference (``core/repositories/memory.py``,
+``core/storage.py``): a missing record is a ``LookupError``, a status that moved on is a
+``StaleStatusError``, and rules both backends answer the same way live in
+``core/repositories/shared.py``.
+"""
 
 import hashlib
 import json
@@ -8,12 +14,15 @@ from decimal import Decimal
 from typing import Any
 
 from boto3.dynamodb.types import TypeDeserializer, TypeSerializer  # type: ignore[import-untyped]
+from botocore.exceptions import ClientError  # type: ignore[import-untyped]
 
+from contextforge.core.entities import Entity
 from contextforge.core.entities.artifact import Artifact, ArtifactStatus
 from contextforge.core.entities.chat import Chat
 from contextforge.core.entities.message import (
     Message,
     MessageAdapter,
+    MessageKind,
     RequestMessage,
     RequestStatus,
 )
@@ -23,11 +32,43 @@ from contextforge.core.entities.user import User
 from contextforge.core.ids import now_iso
 from contextforge.core.queue import WorkMessage
 from contextforge.core.repositories.base import StaleStatusError
-from contextforge.core.repositories.memory import Repositories, _sum_known_usage
+from contextforge.core.repositories.memory import Repositories
+from contextforge.core.repositories.shared import sum_known_usage, unanswered
 from contextforge.core.values import Usage
+
+# DynamoDB's item limit. Sizes are measured on the JSON encoding, which overstates DynamoDB's own
+# count, so the guard trips before DynamoDB would.
+MAX_ITEM_BYTES = 400 * 1024
+# Attributes that index an item rather than describe the entity; reads drop them.
+_INDEX_ATTRIBUTES = frozenset({"PK", "SK", "GSI1PK", "GSI1SK"})
+_CONDITION_FAILED = "ConditionalCheckFailedException"
+
+
+def _error_code(exc: Exception) -> str | None:
+    """The service error code of a ``ClientError``; None for anything else.
+
+    ``BotoCoreError`` subclasses (read timeouts, closed connections) carry no service response,
+    so they must never be read as one: callers catch ``ClientError`` only and let them propagate.
+    """
+    if isinstance(exc, ClientError):
+        return str(exc.response.get("Error", {}).get("Code", "")) or None
+    return None
+
+
+class ItemTooLargeError(ValueError):
+    """An item, or the fields an update writes, over the item limit; refused before any call."""
+
+    def __init__(self, pk: str, sk: str, size_bytes: int) -> None:
+        super().__init__(
+            f"{pk} {sk} is {size_bytes} bytes, over the {MAX_ITEM_BYTES}-byte DynamoDB item "
+            "limit; offload large content to S3."
+        )
+        self.key = {"PK": pk, "SK": sk}
+        self.size_bytes = size_bytes
 
 
 def _plain(value: Any) -> Any:
+    """Deserialised DynamoDB numbers (Decimal) back to int when integral, float otherwise."""
     return json.loads(json.dumps(value, default=lambda x: int(x) if x == int(x) else float(x)))
 
 
@@ -36,11 +77,20 @@ class DynamoStore:
         self.client, self.table = client, table
         self.serializer, self.deserializer = TypeSerializer(), TypeDeserializer()
 
-    def item(self, pk: str, sk: str, data: dict[str, Any]) -> dict[str, Any]:
-        plain = json.loads(json.dumps({"PK": pk, "SK": sk, **data}), parse_float=Decimal)
-        if len(json.dumps(data).encode()) > 300_000:
-            raise ValueError("Record exceeds the operational record budget; offload large content.")
+    def _encode(self, pk: str, sk: str, attributes: dict[str, Any]) -> dict[str, Any]:
+        """Serialise attributes for DynamoDB, refusing them over the item limit.
+
+        boto3 rejects Python floats, so one JSON pass turns every float into a Decimal.
+        """
+        text = json.dumps(attributes)
+        size = len(text.encode())
+        if size > MAX_ITEM_BYTES:
+            raise ItemTooLargeError(pk, sk, size)
+        plain = json.loads(text, parse_float=Decimal)
         return {k: self.serializer.serialize(v) for k, v in plain.items()}
+
+    def item(self, pk: str, sk: str, data: dict[str, Any]) -> dict[str, Any]:
+        return self._encode(pk, sk, {"PK": pk, "SK": sk, **data})
 
     def key(self, pk: str, sk: str) -> dict[str, Any]:
         return {"PK": {"S": pk}, "SK": {"S": sk}}
@@ -51,7 +101,7 @@ class DynamoStore:
                 {
                     k: self.deserializer.deserialize(v)
                     for k, v in item.items()
-                    if k not in {"PK", "SK", "GSI1PK", "GSI1SK"}
+                    if k not in _INDEX_ATTRIBUTES
                 }
             )
         )
@@ -62,11 +112,9 @@ class DynamoStore:
         ).get("Item")
         return self.decode(item) if item else None
 
-    def put(self, pk: str, sk: str, entity: Any) -> None:
-        self.client.put_item(
-            TableName=self.table,
-            Item=self.item(pk, sk, entity.model_dump(mode="json", by_alias=True)),
-        )
+    def put(self, pk: str, sk: str, entity: Entity, extra: dict[str, str] | None = None) -> None:
+        data = entity.model_dump(mode="json", by_alias=True) | (extra or {})
+        self.client.put_item(TableName=self.table, Item=self.item(pk, sk, data))
 
     def query(self, pk: str, prefix: str) -> list[dict[str, Any]]:
         params: dict[str, Any] = {
@@ -83,39 +131,63 @@ class DynamoStore:
                 return rows
             params["ExclusiveStartKey"] = response["LastEvaluatedKey"]
 
-    def update(
-        self, pk: str, sk: str, fields: dict[str, Any], expected: str | None = None
+    def update_status(
+        self,
+        pk: str,
+        sk: str,
+        changes: dict[str, Any],
+        expected: str,
+        kind: str | None = None,
     ) -> dict[str, Any]:
-        names = {f"#f{i}": k for i, k in enumerate(fields)}
-        values = {
-            f":v{i}": self.serializer.serialize(json.loads(json.dumps(v), parse_float=Decimal))
-            for i, v in enumerate(fields.values())
-        }
-        params: dict[str, Any] = {
-            "TableName": self.table,
-            "Key": self.key(pk, sk),
-            "UpdateExpression": "SET " + ", ".join(f"#f{i} = :v{i}" for i in range(len(fields))),
-            "ExpressionAttributeNames": names,
-            "ExpressionAttributeValues": values,
-            "ReturnValues": "ALL_NEW",
-        }
-        params["ConditionExpression"] = "attribute_exists(PK)"
-        if expected is not None:
-            names["#status"] = "status"
-            values[":expected"] = {"S": expected}
-            params["ConditionExpression"] += " AND #status = :expected"
+        """Apply ``changes`` only while the stored status is ``expected`` (and kind is ``kind``).
+
+        A missing record, or one of another kind, raises ``LookupError``; a record whose status
+        moved on raises ``StaleStatusError``. The failed write returns the stored item, so telling
+        the two apart needs no second read.
+        """
+        guards = {"status": expected} | ({"kind": kind} if kind is not None else {})
         try:
-            return self.decode(self.client.update_item(**params)["Attributes"])
-        except Exception as exc:
-            if (
-                getattr(exc, "response", {}).get("Error", {}).get("Code")
-                == "ConditionalCheckFailedException"
-            ):
-                actual = self.get(pk, sk)
-                raise StaleStatusError(
-                    expected or "existing", actual.get("status", "missing") if actual else "missing"
-                ) from exc
-            raise
+            return self._update(pk, sk, changes, guards)
+        except ClientError as exc:
+            if _error_code(exc) != _CONDITION_FAILED:
+                raise
+            stored = self.decode(exc.response["Item"]) if exc.response.get("Item") else None
+            if stored is None or (kind is not None and stored.get("kind") != kind):
+                raise LookupError(f"no {kind or 'record'} at {pk} {sk}") from exc
+            raise StaleStatusError(expected, str(stored.get("status"))) from exc
+
+    def update_if_exists(self, pk: str, sk: str, changes: dict[str, Any]) -> None:
+        """Apply ``changes`` to an existing record; do nothing when there is none."""
+        try:
+            self._update(pk, sk, changes, guards={})
+        except ClientError as exc:
+            if _error_code(exc) != _CONDITION_FAILED:
+                raise
+
+    def _update(
+        self, pk: str, sk: str, changes: dict[str, Any], guards: dict[str, str]
+    ) -> dict[str, Any]:
+        # Every name is a placeholder: status, name and result are DynamoDB reserved words.
+        encoded = self._encode(pk, sk, changes)
+        names = {f"#f{i}": name for i, name in enumerate(encoded)}
+        values = {f":v{i}": value for i, value in enumerate(encoded.values())}
+        # attribute_exists(PK) stops UpdateItem from creating a record that is not there.
+        conditions = ["attribute_exists(PK)"]
+        for name, value in guards.items():
+            names[f"#{name}"] = name
+            values[f":expected_{name}"] = {"S": str(value)}
+            conditions.append(f"#{name} = :expected_{name}")
+        response = self.client.update_item(
+            TableName=self.table,
+            Key=self.key(pk, sk),
+            UpdateExpression="SET " + ", ".join(f"#f{i} = :v{i}" for i in range(len(encoded))),
+            ConditionExpression=" AND ".join(conditions),
+            ExpressionAttributeNames=names,
+            ExpressionAttributeValues=values,
+            ReturnValues="ALL_NEW",
+            ReturnValuesOnConditionCheckFailure="ALL_OLD",
+        )
+        return self.decode(response["Attributes"])
 
 
 class DynamoMessages:
@@ -142,11 +214,17 @@ class DynamoMessages:
         new: RequestStatus,
         failure_reason: str | None = None,
     ) -> RequestMessage:
-        fields: dict[str, Any] = {"status": new, "updatedAt": now_iso()}
+        changes: dict[str, Any] = {"status": new, "updatedAt": now_iso()}
         if failure_reason is not None:
-            fields["failureReason"] = failure_reason
+            changes["failureReason"] = failure_reason
         return RequestMessage.model_validate(
-            self.store.update(f"CHAT#{chat_id}", f"MSG#{message_id}", fields, str(expected))
+            self.store.update_status(
+                f"CHAT#{chat_id}",
+                f"MSG#{message_id}",
+                changes,
+                str(expected),
+                kind=MessageKind.REQUEST,
+            )
         )
 
     def create_request(self, client_key: str, message: RequestMessage) -> RequestMessage:
@@ -179,11 +257,8 @@ class DynamoMessages:
                 ]
             )
             return message
-        except Exception as exc:
-            if (
-                getattr(exc, "response", {}).get("Error", {}).get("Code")
-                != "TransactionCanceledException"
-            ):
+        except ClientError as exc:
+            if not _key_already_used(exc):
                 raise
             existing = self.store.get(pk, "REQ")
             if existing is None:
@@ -194,18 +269,25 @@ class DynamoMessages:
             return saved
 
     def pending_for_request(self, chat_id: str, request_message_id: str) -> list[Message]:
-        rows = self.list_by_chat(chat_id)
-        answered = {getattr(m, "in_reply_to_message_id", None) for m in rows}
-        return [
-            m
-            for m in rows
-            if m.kind in {"clarification", "proposed_action"}
-            and getattr(m, "request_message_id", None) == request_message_id
-            and m.message_id not in answered
-        ]
+        return unanswered(self.list_by_chat(chat_id), request_message_id)
+
+
+def _key_already_used(exc: ClientError) -> bool:
+    """Whether a create_request transaction failed only because its idempotency key exists.
+
+    The idempotency Put is the first item, so its cancellation reason comes first. Any other
+    reason (a transaction conflict, a throttle, a validation error) is a real failure.
+    """
+    if _error_code(exc) != "TransactionCanceledException":
+        return False
+    reasons = exc.response.get("CancellationReasons") or [{}]
+    return bool(reasons[0].get("Code") == "ConditionalCheckFailed")
 
 
 class DynamoTasks:
+    def __init__(self, store: DynamoStore) -> None:
+        self.store = store
+
     def save_all(self, tasks: list[Task]) -> None:
         if not tasks:
             return
@@ -224,9 +306,6 @@ class DynamoTasks:
                 for t in tasks
             ]
         )
-
-    def __init__(self, store: DynamoStore) -> None:
-        self.store = store
 
     def save(self, task: Task) -> None:
         self.store.put(f"REQ#{task.request_message_id}", f"TASK#{task.task_id}", task)
@@ -250,13 +329,15 @@ class DynamoTasks:
         result: TaskResult | None = None,
         failure_reason: str | None = None,
     ) -> Task:
-        fields: dict[str, Any] = {"status": new, "updatedAt": now_iso()}
+        changes: dict[str, Any] = {"status": new, "updatedAt": now_iso()}
         if result is not None:
-            fields["result"] = result.model_dump(mode="json", by_alias=True)
+            changes["result"] = result.model_dump(mode="json", by_alias=True)
         if failure_reason is not None:
-            fields["failureReason"] = failure_reason
+            changes["failureReason"] = failure_reason
         return Task.model_validate(
-            self.store.update(f"REQ#{request_message_id}", f"TASK#{task_id}", fields, str(expected))
+            self.store.update_status(
+                f"REQ#{request_message_id}", f"TASK#{task_id}", changes, str(expected)
+            )
         )
 
 
@@ -274,7 +355,7 @@ class DynamoCalls:
         ]
 
     def sum_usage(self, request_message_id: str) -> Usage | None:
-        return _sum_known_usage(c.usage for c in self.list_by_request(request_message_id))
+        return sum_known_usage(c.usage for c in self.list_by_request(request_message_id))
 
 
 class DynamoArtifacts:
@@ -282,7 +363,9 @@ class DynamoArtifacts:
         self.store = store
 
     def save(self, artifact: Artifact) -> None:
-        self.store.put(f"CHAT#{artifact.chat_id}", f"ART#{artifact.artifact_id}", artifact)
+        # Spec 7.3: the sparse GSI1 holds Artifact items only, keyed by owner, for pattern 7.
+        index = {"GSI1PK": f"USER#{artifact.user_id}", "GSI1SK": f"ART#{artifact.artifact_id}"}
+        self.store.put(f"CHAT#{artifact.chat_id}", f"ART#{artifact.artifact_id}", artifact, index)
 
     def get(self, chat_id: str, artifact_id: str) -> Artifact | None:
         raw = self.store.get(f"CHAT#{chat_id}", f"ART#{artifact_id}")
@@ -295,7 +378,7 @@ class DynamoArtifacts:
         self, chat_id: str, artifact_id: str, expected: ArtifactStatus, new: ArtifactStatus
     ) -> Artifact:
         return Artifact.model_validate(
-            self.store.update(
+            self.store.update_status(
                 f"CHAT#{chat_id}", f"ART#{artifact_id}", {"status": new}, str(expected)
             )
         )
@@ -320,7 +403,7 @@ class DynamoChats:
         )
 
     def touch(self, user_id: str, chat_id: str, status: RequestStatus | None) -> None:
-        self.store.update(
+        self.store.update_if_exists(
             f"USER#{user_id}",
             f"CHAT#{chat_id}",
             {"updatedAt": now_iso(), "lastRequestStatus": status},

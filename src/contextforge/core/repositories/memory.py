@@ -9,18 +9,14 @@ mypy (tests, decoded JSON) may pass the plain string, and the stored field must 
 """
 
 import threading
-from collections.abc import Callable, Iterable
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
 from contextforge.core.entities.artifact import Artifact, ArtifactStatus
 from contextforge.core.entities.chat import Chat
 from contextforge.core.entities.message import (
-    ActionResponseMessage,
-    ClarificationMessage,
-    ClarificationResponseMessage,
     Message,
-    ProposedActionMessage,
     RequestMessage,
     RequestStatus,
 )
@@ -37,6 +33,7 @@ from contextforge.core.repositories.base import (
     TaskRepository,
     UserRepository,
 )
+from contextforge.core.repositories.shared import sum_known_usage, unanswered
 from contextforge.core.values import Usage
 
 
@@ -90,18 +87,7 @@ class InMemoryMessages:
     def pending_for_request(self, chat_id: str, request_message_id: str) -> list[Message]:
         with self._lock:
             in_chat = self._in_chat(chat_id)
-        answered = {
-            m.in_reply_to_message_id
-            for m in in_chat
-            if isinstance(m, ClarificationResponseMessage | ActionResponseMessage)
-        }
-        return [
-            m
-            for m in in_chat
-            if isinstance(m, ClarificationMessage | ProposedActionMessage)
-            and m.request_message_id == request_message_id
-            and m.message_id not in answered
-        ]
+        return unanswered(in_chat, request_message_id)
 
     def _in_chat(self, chat_id: str) -> list[Message]:
         """Caller holds the lock."""
@@ -197,7 +183,7 @@ class InMemoryModelCalls:
             )
 
     def sum_usage(self, request_message_id: str) -> Usage | None:
-        return _sum_known_usage(c.usage for c in self.list_by_request(request_message_id))
+        return sum_known_usage(c.usage for c in self.list_by_request(request_message_id))
 
 
 class InMemoryArtifacts:
@@ -300,22 +286,3 @@ class Repositories:
             artifacts=InMemoryArtifacts(),
             chats=InMemoryChats(),
         )
-
-
-def _sum_known_usage(usages: Iterable[Usage | None]) -> Usage | None:
-    """Sum the usages that were reported; None when none were, because unknown is not zero."""
-    known = [u for u in usages if u is not None]
-    if not known:
-        return None
-    return Usage(
-        input_tokens=sum(u.input_tokens for u in known),
-        output_tokens=sum(u.output_tokens for u in known),
-        cache_read_tokens=_sum_reported([u.cache_read_tokens for u in known]),
-        cache_write_tokens=_sum_reported([u.cache_write_tokens for u in known]),
-        thinking_tokens=_sum_reported([u.thinking_tokens for u in known]),
-    )
-
-
-def _sum_reported(values: list[int | None]) -> int | None:
-    reported = [v for v in values if v is not None]
-    return sum(reported) if reported else None
