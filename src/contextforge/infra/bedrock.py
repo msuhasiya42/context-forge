@@ -1,17 +1,22 @@
 """Bedrock Converse mapping. Tools and structured results use native tool blocks."""
 
 import json
+import logging
 from collections.abc import Mapping
+from enum import StrEnum
 from typing import Any
 
 from botocore.exceptions import BotoCoreError, ClientError  # type: ignore[import-untyped]
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
+from pydantic import BaseModel
 
 from contextforge.core.entities.model_call import Stage
 from contextforge.core.models.base import ModelRequest, ModelResponse, ToolCall
 from contextforge.core.models.errors import ModelError, ModelMalformed, ModelRejected
 from contextforge.core.values import Usage
-from contextforge.infra.boto_errors import map_boto_error
+from contextforge.infra.boto_errors import error_code, map_boto_error
+
+logger = logging.getLogger(__name__)
 
 RESULT_TOOL = "return_result"
 _REJECTED_STOPS = {"content_filtered", "guardrail_intervened"}
@@ -21,32 +26,83 @@ _MALFORMED_STOPS = {"malformed_model_output", "malformed_tool_use"}
 _HISTORY_TAG = "untrusted_history"
 
 
-def converse_payload(request: ModelRequest) -> dict[str, Any]:
-    """The Converse request. Tools are sorted by name so the tool block, part of the cache key,
-    is the same whatever order the caller listed them in; the result tool comes last."""
+class Dropped(StrEnum):
+    """A request field a model refused. Bedrock refuses a field the model lacks with a
+    ValidationException naming it, before any inference, so the refused call costs nothing."""
+
+    TEMPERATURE = "temperature"
+    # The forced result tool: the model is still offered the tool and may answer in JSON text
+    # instead, which ``parse_response`` reads.
+    TOOL_CHOICE = "toolChoice"
+    # Tools altogether: the result schema goes in the prompt and the JSON is read from the text.
+    TOOLS = "tools"
+
+
+def converse_payload(
+    request: ModelRequest, dropped: frozenset[Dropped] = frozenset()
+) -> dict[str, Any]:
+    """The Converse request, without the fields in ``dropped``. Tools are sorted by name so the
+    tool block, part of the cache key, is the same whatever order the caller listed them in; the
+    result tool comes last. Only a call that asks for a result and offers no tools of its own
+    can drop the forced result tool or tools."""
+    result_only = request.output_schema is not None and not request.tools
+    schema_in_prompt = result_only and Dropped.TOOLS in dropped
     tools = [
         _tool_spec(t.name, t.description, t.input_schema)
         for t in sorted(request.tools, key=lambda t: t.name)
     ]
-    if request.output_schema is not None:
+    if request.output_schema is not None and not schema_in_prompt:
         schema = request.output_schema.model_json_schema(by_alias=True)
         tools.append(
             _tool_spec(
                 RESULT_TOOL, "Return the final structured result after completing the task.", schema
             )
         )
+    inference: dict[str, Any] = {"maxTokens": request.max_tokens}
+    if Dropped.TEMPERATURE not in dropped:
+        inference["temperature"] = 0
     payload: dict[str, Any] = {
         "modelId": request.model,
         "messages": _messages(request),
-        "inferenceConfig": {"maxTokens": request.max_tokens, "temperature": 0},
+        "inferenceConfig": inference,
     }
-    if request.system:
-        payload["system"] = [{"text": text} for text in request.system if text]
+    system = [{"text": text} for text in request.system if text]
+    if schema_in_prompt and request.output_schema is not None:
+        system.append({"text": _schema_instruction(request.output_schema)})
+    if system:
+        payload["system"] = system
     if tools:
         payload["toolConfig"] = {"tools": tools}
-        if request.output_schema is not None and not request.tools:
+        if result_only and Dropped.TOOL_CHOICE not in dropped:
             payload["toolConfig"]["toolChoice"] = {"tool": {"name": RESULT_TOOL}}
     return payload
+
+
+def _schema_instruction(output_schema: type[BaseModel]) -> str:
+    """The result tool's schema as an instruction, for a model that takes no tools."""
+    schema = json.dumps(nova_schema(output_schema.model_json_schema(by_alias=True)))
+    return (
+        f"The {RESULT_TOOL} tool is not available. Reply with only the JSON object you would "
+        f"pass to it, and no other text. Its JSON schema: {schema}"
+    )
+
+
+def _refused_field(exc: ClientError, request: ModelRequest) -> Dropped | None:
+    """The field Bedrock says ``request.model`` does not support, when the request can do
+    without it; None for any other failure."""
+    if error_code(exc) != "ValidationException":
+        return None
+    message = str(exc.response.get("Error", {}).get("Message", "")).lower()
+    if "support" not in message:
+        return None
+    if "temperature" in message:
+        return Dropped.TEMPERATURE
+    if request.output_schema is None or request.tools:
+        return None
+    # "toolConfig.toolChoice.tool field" names toolConfig too, so toolChoice is checked first.
+    if "toolchoice" in message:
+        return Dropped.TOOL_CHOICE
+    return Dropped.TOOLS if "tool" in message else None
 
 
 def nova_schema(schema: dict[str, Any]) -> dict[str, Any]:
@@ -143,25 +199,36 @@ class BedrockModel:
     """A ModelClient over the bedrock-runtime Converse API.
 
     ``runtime`` serves every stage that ``by_stage`` does not name. Each client carries its own
-    read timeout, so the strong-model stages can wait longer than the cheap ones.
+    read timeout, so the strong-model stages can wait longer than the cheap ones. A field a model
+    refuses (``Dropped``) is dropped and the call sent again; the drop is kept for that model.
     """
 
     def __init__(self, runtime: Any, *, by_stage: Mapping[Stage, Any] | None = None) -> None:
         self._runtime = runtime
         self._by_stage = dict(by_stage or {})
+        self._dropped: dict[str, frozenset[Dropped]] = {}
 
     def invoke(self, request: ModelRequest) -> ModelResponse:
-        try:
-            payload = converse_payload(request)
-        except (KeyError, TypeError, ValueError) as exc:
-            raise ModelError(
-                f"Could not build the Bedrock request for {request.stage}: {exc}"
-            ) from exc
-        try:
-            raw = self.runtime_for(request.stage).converse(**payload)
-        except (ClientError, BotoCoreError) as exc:
-            raise map_boto_error(exc) from exc
-        return parse_response(raw, expects_result=request.output_schema is not None)
+        while True:
+            dropped = self._dropped.get(request.model, frozenset())
+            try:
+                payload = converse_payload(request, dropped)
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ModelError(
+                    f"Could not build the Bedrock request for {request.stage}: {exc}"
+                ) from exc
+            try:
+                raw = self.runtime_for(request.stage).converse(**payload)
+            except ClientError as exc:
+                field = _refused_field(exc, request)
+                if field is None or field in dropped:
+                    raise map_boto_error(exc) from exc
+                logger.warning("%s refused %s; sending the call without it", request.model, field)
+                self._dropped[request.model] = dropped | {field}
+                continue
+            except BotoCoreError as exc:
+                raise map_boto_error(exc) from exc
+            return parse_response(raw, expects_result=request.output_schema is not None)
 
     def runtime_for(self, stage: Stage) -> Any:
         """The bedrock-runtime client that serves ``stage``."""
@@ -188,6 +255,8 @@ def _response(raw: dict[str, Any], *, expects_result: bool) -> ModelResponse:
     text_parts: list[str] = []
     calls: list[ToolCall] = []
     structured = None
+    # A reasoning block (reasoningContent, or SDK_UNKNOWN_MEMBER to a botocore that predates it)
+    # has neither key and is skipped: the answer is in the text and tool blocks after it.
     for block in raw.get("output", {}).get("message", {}).get("content", []):
         if "text" in block:
             text_parts.append(block["text"])
