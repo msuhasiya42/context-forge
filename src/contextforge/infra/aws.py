@@ -37,6 +37,7 @@ from contextforge.core.repositories.base import StaleStatusError
 from contextforge.core.repositories.memory import Repositories
 from contextforge.core.repositories.shared import sum_known_usage, unanswered
 from contextforge.core.values import Usage
+from contextforge.infra.boto_errors import error_code
 
 logger = logging.getLogger(__name__)
 
@@ -46,17 +47,6 @@ MAX_ITEM_BYTES = 400 * 1024
 # Attributes that index an item rather than describe the entity; reads drop them.
 _INDEX_ATTRIBUTES = frozenset({"PK", "SK", "GSI1PK", "GSI1SK"})
 _CONDITION_FAILED = "ConditionalCheckFailedException"
-
-
-def _error_code(exc: Exception) -> str | None:
-    """The service error code of a ``ClientError``; None for anything else.
-
-    ``BotoCoreError`` subclasses (read timeouts, closed connections) carry no service response,
-    so they must never be read as one: callers catch ``ClientError`` only and let them propagate.
-    """
-    if isinstance(exc, ClientError):
-        return str(exc.response.get("Error", {}).get("Code", "")) or None
-    return None
 
 
 class ItemTooLargeError(ValueError):
@@ -153,7 +143,7 @@ class DynamoStore:
         try:
             return self._update(pk, sk, changes, guards)
         except ClientError as exc:
-            if _error_code(exc) != _CONDITION_FAILED:
+            if error_code(exc) != _CONDITION_FAILED:
                 raise
             stored = self.decode(exc.response["Item"]) if exc.response.get("Item") else None
             if stored is None or (kind is not None and stored.get("kind") != kind):
@@ -165,7 +155,7 @@ class DynamoStore:
         try:
             self._update(pk, sk, changes, guards={})
         except ClientError as exc:
-            if _error_code(exc) != _CONDITION_FAILED:
+            if error_code(exc) != _CONDITION_FAILED:
                 raise
 
     def _update(
@@ -282,7 +272,7 @@ def _key_already_used(exc: ClientError) -> bool:
     The idempotency Put is the first item, so its cancellation reason comes first. Any other
     reason (a transaction conflict, a throttle, a validation error) is a real failure.
     """
-    if _error_code(exc) != "TransactionCanceledException":
+    if error_code(exc) != "TransactionCanceledException":
         return False
     reasons = exc.response.get("CancellationReasons") or [{}]
     return bool(reasons[0].get("Code") == "ConditionalCheckFailed")
@@ -459,7 +449,7 @@ class S3Blobs:
             response = self.client.get_object(Bucket=self.bucket, Key=ref[len(prefix) :])
         except ClientError as exc:
             # A raw_result blob expires under the bucket's 30-day lifecycle rule.
-            if _error_code(exc) == "NoSuchKey":
+            if error_code(exc) == "NoSuchKey":
                 raise LookupError(f"no blob stored at {ref!r}") from exc
             raise
         body = response["Body"]
@@ -536,7 +526,7 @@ class SqsQueue:
         try:
             self.client.delete_message(QueueUrl=self.url, ReceiptHandle=msg.receipt)
         except ClientError as exc:
-            if _error_code(exc) in {"ReceiptHandleIsInvalid", "InvalidParameterValue"}:
+            if error_code(exc) in {"ReceiptHandleIsInvalid", "InvalidParameterValue"}:
                 raise QueueError(
                     f"Cannot ack work for request {msg.message_id}: its receipt expired after "
                     f"{self.visibility_timeout_seconds} s, so SQS will deliver it again."

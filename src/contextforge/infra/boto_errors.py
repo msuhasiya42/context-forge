@@ -1,4 +1,5 @@
-"""One mapping from botocore failures to the model error classes.
+"""botocore failures: the AWS error code every adapter reads, and one mapping to the model
+error classes for Bedrock.
 
 The AWS error code is read only from a ``ClientError``. botocore's transport errors (a read
 timeout, a closed connection) carry no service response, so they are mapped by type.
@@ -31,7 +32,11 @@ _FIX_FIRST = {
 
 
 def error_code(exc: BaseException) -> str:
-    """The AWS error code of a ``ClientError``; empty for any other exception."""
+    """The AWS error code of a ``ClientError``; empty for any other exception.
+
+    A ``BotoCoreError`` (a read timeout, a closed connection) carries no service response, so
+    an adapter catches ``ClientError`` only and lets those propagate as themselves.
+    """
     if isinstance(exc, ClientError):
         return str(exc.response.get("Error", {}).get("Code", ""))
     return ""
