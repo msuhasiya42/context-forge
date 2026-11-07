@@ -9,6 +9,7 @@ from contextforge.core.models.base import ModelResponse
 from contextforge.core.models.scripted import ScriptedModel
 from contextforge.core.settings import Settings
 from contextforge.worker.runner import RequestRunner
+from contextforge.worker.stages.plan import FORCED_PLAN, NOT_ASKED
 from tests.helpers import clarification, make_deps, seed_chat_with_dataset, six_task_plan, t1_result
 
 
@@ -82,11 +83,14 @@ def test_clarification_interrupt_then_resume_completes(tmp_path) -> None:
     assert len(plans) == 2  # the first planner call was restored, not re-paid
 
 
-def test_two_clarifications_then_plan(tmp_path) -> None:
+def test_a_repeated_question_is_never_asked_again(tmp_path) -> None:
+    """Live run 2: the planner asked for the period, got the answer, and asked it again. One
+    question per request: a second one is not put to the user; the planner is told to plan on
+    the most likely reading and the report says what was assumed."""
     db = tmp_path / "ckpt.sqlite"
     script = {
         "plan": [
-            ModelResponse(structured=clarification("Which accounts?")),
+            ModelResponse(structured=clarification("Which months?")),
             ModelResponse(structured=clarification("Which months?")),
             ModelResponse(structured=six_task_plan()),
         ],
@@ -97,24 +101,18 @@ def test_two_clarifications_then_plan(tmp_path) -> None:
     deps.model.on_request = requests.append
     req = seed_chat_with_dataset(deps, chat_id="c1", user_id="u1", dataset_id="a2")
     RequestRunner(deps, _saver(db)).start("c1", req.message_id)
-    for i in range(2):
-        pending = [m for m in deps.repos.messages.pending_for_request("c1", req.message_id)]
-        assert len(pending) == 1
-        out = RequestRunner(deps, _saver(db)).resume(
-            "c1",
-            req.message_id,
-            _reply(req, pending[0].message_id, f"answer {i}", message_id=f"m{i + 3}"),
-        )
-        assert out.started
+    [pending] = deps.repos.messages.pending_for_request("c1", req.message_id)
+    out = RequestRunner(deps, _saver(db)).resume(
+        "c1", req.message_id, _reply(req, pending.message_id, "answer 0", message_id="m3")
+    )
+    assert out.started and out.status == "COMPLETED"
     planner_calls = [r for r in requests if r.stage == "plan"]
     assert "answer 0" in planner_calls[1].messages[0].content
-    assert all(
-        answer in planner_calls[2].messages[0].content for answer in ("answer 0", "answer 1")
-    )
-    assert deps.repos.messages.get("c1", req.message_id).status == "COMPLETED"
-    assert (
-        len([m for m in deps.repos.messages.list_by_chat("c1") if m.kind == "clarification"]) == 2
-    )
+    assert FORCED_PLAN.format(question="Which months?") in planner_calls[2].messages[0].content
+    chat = deps.repos.messages.list_by_chat("c1")
+    assert len([m for m in chat if m.kind == "clarification"]) == 1
+    [report] = [m for m in chat if m.kind == "report"]
+    assert NOT_ASKED.format(question="Which months?") in report.report.uncertainties
 
 
 def test_resume_with_wrong_target_is_refused(tmp_path) -> None:

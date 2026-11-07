@@ -64,6 +64,8 @@ class RequestState(TypedDict):
     open_questions: list[OpenQuestion]
     next_action: str
     period: NotRequired[dict[str, str] | None]
+    # Questions the planner wanted but may not ask, each with the reading it planned on.
+    assumptions: NotRequired[list[str]]
     memory: MemorySnapshot
 
 

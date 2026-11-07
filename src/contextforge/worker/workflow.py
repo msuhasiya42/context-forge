@@ -160,9 +160,12 @@ def _with_plan(brief: RequestState, planned: PlanResult) -> RequestState:
     period = planned["period"]
     if period is not None:
         constraints.append(f"Period: {period['start']} to {period['end']}")
+    assumption = planned.get("assumption")
+    assumed = [assumption] if assumption else []
     return {
         **_with_constraints(brief, constraints),
         "period": period,
+        "assumptions": [*brief.get("assumptions", []), *assumed],
         "goal": planned["goal"],
         "open_questions": [*brief["open_questions"], *new_questions],
         "next_action": planned["next_action"],

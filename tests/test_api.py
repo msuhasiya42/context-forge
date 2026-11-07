@@ -204,7 +204,9 @@ def test_a_long_report_becomes_a_deliverable_that_the_content_route_serves(tmp_p
     assert dataset.json() == {"error": {"code": "not_found", "message": "Artifact not found."}}
 
 
-def test_two_clarifications_each_close_the_stream_and_resume_the_same_request(tmp_path):
+def test_one_clarification_closes_the_stream_and_a_second_is_not_asked(tmp_path):
+    """The one question closes the stream and its answer resumes the same request; the
+    planner's second question is not asked (it plans instead and the report says so)."""
     deps = make_deps(
         ScriptedModel(
             {
@@ -226,7 +228,7 @@ def test_two_clarifications_each_close_the_stream_and_resume_the_same_request(tm
             headers={"Idempotency-Key": "clarify"},
         ).json()
         path = f"/chats/c1/requests/{request['messageId']}"
-        for question, answer in [("Which months?", "September"), ("Which accounts?", "ACC-1")]:
+        for question, answer in [("Which months?", "September")]:
             events = _events(client.get(path + "/events").text)
             assert events[-1][0] == "request" and events[-1][1]["status"] == "WAITING_USER"
             [asked] = [
@@ -255,7 +257,9 @@ def test_two_clarifications_each_close_the_stream_and_resume_the_same_request(tm
             assert again.status_code == 409 and again.json()["error"]["code"] == "not_pending"
         events = _events(client.get(path + "/events").text)
         assert events[-1][1]["status"] == "COMPLETED"
-        assert any(k == "message" and r["kind"] == "report" for k, r in events)
+        [report] = [r for k, r in events if k == "message" and r["kind"] == "report"]
+        assert "Not asked: 'Which accounts?'" in report["content"]
+        assert not [r for k, r in events if k == "message" and r["content"] == "Which accounts?"]
 
 
 def test_waiting_stream_stays_open_until_the_new_question_exists(tmp_path):

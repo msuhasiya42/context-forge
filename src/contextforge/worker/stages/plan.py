@@ -45,9 +45,14 @@ from contextforge.worker.stages.sources import available_artifacts, source_line
 
 logger = logging.getLogger(__name__)
 
-# Attempts 0 and 1 may each ask one question; from attempt 2 the planner must plan.
-MAX_CLARIFICATIONS = 2
+# One question per request at most, and only about the chat's own sources: a public web
+# question is planned on its most likely reading (live: the planner asked for "the period" of
+# "this week", then asked it again after the answer).
+MAX_CLARIFICATIONS = 1
 NO_MORE_QUESTIONS = "Do not ask another question; plan with stated assumptions"
+FORCED_PLAN = "You may not ask '{question}' or any other question. Plan on its most likely reading."
+NOT_ASKED = "Not asked: '{question}'. Planned on its most likely reading."
+NO_PERIOD = "none stated; use the most recent information available"
 # A constraint naming these is the planner restating its own output rules (live finding L-2),
 # not something the user stated; the report drops it so no later request inherits it.
 _PLAN_MECHANICS = re.compile(
@@ -78,6 +83,8 @@ class PlanResult(TypedDict):
     tasks: list[dict[str, Any]]
     pending: PendingInterrupt | None
     period: dict[str, str] | None
+    # Set when the planner wanted a question it may not ask; the report lists it.
+    assumption: str | None
 
 
 def clarification_id(request_message_id: str, attempt: int) -> str:
@@ -90,9 +97,12 @@ def plan_stage(
 ) -> PlanResult:
     """Ask the planner for a plan or one clarification; ``attempt`` counts questions answered.
 
-    A clarification is saved as a Message and moves the request RUNNING -> WAITING_USER. Raises
-    ``PlanFailed`` on a third question, a second invalid plan, an exhausted call budget or a
-    failed model call; ``Cancelled`` propagates. ``today`` defaults to the user's local date.
+    A clarification is saved as a Message and moves the request RUNNING -> WAITING_USER. A
+    question the planner may not ask (``_may_ask``) is never put to the user: the planner is
+    called once more, told to plan on the most likely reading, and the result's ``assumption``
+    names the question. Raises ``PlanFailed`` when it asks even then, on a second invalid plan,
+    an exhausted call budget or a failed model call; ``Cancelled`` propagates. ``today``
+    defaults to the user's local date.
     """
     with request_context(brief["request_message_id"]):
         request = load_request(deps.repos.messages, brief["chat_id"], brief["request_message_id"])
@@ -101,9 +111,20 @@ def plan_stage(
         resolved = resolve_context(
             request.content, artifacts, today=today or local_today(timezone), timezone=timezone
         )
-        inputs = _planner_inputs(brief, attempt, deps, request, artifacts, resolved)
+        may_ask = _may_ask(attempt, artifacts)
+        inputs = _planner_inputs(brief, may_ask, deps, request, artifacts, resolved)
         output = _plan_or_fail(brief, inputs, deps)
         logger.info("planner returned a %s", output.kind)
+        assumption = None
+        if output.kind == "clarification" and not may_ask:
+            logger.warning("planner asked a question it may not ask; planning instead")
+            assumption = NOT_ASKED.format(question=output.question)
+            told = FORCED_PLAN.format(question=output.question)
+            output = _plan_or_fail(
+                brief, replace(inputs, constraints=[*inputs.constraints, told]), deps
+            )
+            if output.kind == "clarification":
+                raise PlanFailed("planner asked a question after being told to plan")
         pending = None if output.kind == "plan" else _ask_user(brief, attempt, output, deps)
         return PlanResult(
             kind=output.kind,
@@ -116,7 +137,14 @@ def plan_stage(
             period={"start": resolved.period_start, "end": resolved.period_end}
             if resolved.period_start and resolved.period_end
             else None,
+            assumption=assumption,
         )
+
+
+def _may_ask(attempt: int, artifacts: list[Artifact]) -> bool:
+    """Whether the planner may put a question to the user: only the first time, and only in a
+    chat with sources of its own to ask about; a public web question is never asked about."""
+    return attempt < MAX_CLARIFICATIONS and bool(artifacts)
 
 
 def plan_gate(brief: RequestState, planned: PlanResult, deps: WorkerDeps) -> list[PlanEntry]:
@@ -160,7 +188,7 @@ def is_plan_mechanics(constraint: str) -> bool:
 
 def _planner_inputs(
     brief: RequestState,
-    attempt: int,
+    may_ask: bool,
     deps: WorkerDeps,
     request: RequestMessage,
     artifacts: list[Artifact],
@@ -175,7 +203,7 @@ def _planner_inputs(
         chat_id=brief["chat_id"],
         request=request,
         preferences=brief["memory"]["preferences"],
-        constraints=_planner_constraints(brief, attempt, resolved),
+        constraints=_planner_constraints(brief, may_ask, resolved),
         facts=[],
         open_questions=[],
         next_action="",
@@ -189,11 +217,13 @@ def _planner_inputs(
     )
 
 
-def _planner_constraints(brief: RequestState, attempt: int, resolved: ResolvedContext) -> list[str]:
+def _planner_constraints(
+    brief: RequestState, may_ask: bool, resolved: ResolvedContext
+) -> list[str]:
     constraints = list(brief["constraints"])
     if resolved.period is not None:
         constraints.append(f"Period: {resolved.period}")
-    if attempt >= MAX_CLARIFICATIONS:
+    if not may_ask:
         constraints.append(NO_MORE_QUESTIONS)
     return constraints
 
@@ -203,20 +233,29 @@ def _context_block(resolved: ResolvedContext) -> str:
     return "\n".join(
         [
             f"today: {resolved.today} ({resolved.timezone})",
-            f"period: {resolved.period or 'not stated in the request'}",
+            f"period: {resolved.period or NO_PERIOD}",
             *(f"{s.artifact_id} index={s.index_status}" for s in resolved.sources),
         ]
     )
 
 
 def _prior_messages(deps: WorkerDeps, request: RequestMessage) -> list[Message]:
-    """The chat's two newest reports from before ``request``, oldest first."""
+    """The chat's two newest reports from before ``request``, oldest first, each after the
+    request it answered: a short follow-up ("Try again.") needs the question, not only the
+    claims."""
     in_chat = deps.repos.messages.list_by_chat(request.chat_id)
-    others: list[Message] = [
+    reports = [
         m for m in in_chat if isinstance(m, ReportMessage) and m.created_at < request.created_at
     ]
     # Not message_id order alone: a clarification's derived id does not sort by time.
-    return sorted(others, key=lambda m: (m.created_at, m.message_id))[-2:]
+    newest = sorted(reports, key=lambda m: (m.created_at, m.message_id))[-2:]
+    asked = {m.message_id: m for m in in_chat if isinstance(m, RequestMessage)}
+    prior: list[Message] = []
+    for report in newest:
+        if report.request_message_id in asked:
+            prior.append(asked[report.request_message_id])
+        prior.append(report)
+    return prior
 
 
 def _plan_or_fail(brief: RequestState, inputs: ContextInputs, deps: WorkerDeps) -> PlannerOutput:
@@ -272,8 +311,6 @@ def _ask_user(
     The status moves first so a request cancelled during the planner call never gets a question.
     A crash between the two heals on re-run: WAITING_USER is accepted and the id is derived.
     """
-    if attempt >= MAX_CLARIFICATIONS:
-        raise PlanFailed("planner asked a third question")
     if not output.question:
         raise PlanFailed("planner asked without a question")
     leave_running(deps, brief["chat_id"], brief["request_message_id"], RequestStatus.WAITING_USER)

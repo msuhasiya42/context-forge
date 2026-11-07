@@ -9,7 +9,7 @@ from contextforge.core.models.scripted import ScriptedModel
 from contextforge.core.services.memory import memory_snapshot
 from contextforge.worker.stages.guards import Cancelled
 from contextforge.worker.stages.plan import PlanFailed, clarification_id, plan_gate, plan_stage
-from tests.helpers import initial_brief, make_deps, seed_chat_with_dataset
+from tests.helpers import clarification, initial_brief, make_deps, seed_chat_with_dataset
 
 
 def _plan(ids: list[str]) -> dict:
@@ -145,21 +145,30 @@ def test_planner_is_retried_once_with_its_errors() -> None:
     )
 
 
-def test_resolver_turns_months_into_a_window() -> None:
+@pytest.mark.parametrize(
+    ("text", "window"),
+    [
+        ("Compare October spending with September", ("2026-09-01", "2026-10-31")),
+        ("What changed last month?", ("2026-10-01", "2026-10-31")),
+        ("Totals over the last 3 months", ("2026-08-01", "2026-10-31")),
+        # Relative windows resolve from today, Saturday 7 November 2026 (F5: the planner
+        # asked the user for the period of "this week").
+        ("Compare the US and Indian stock markets this week.", ("2026-11-02", "2026-11-07")),
+        ("How did markets do last week?", ("2026-10-26", "2026-11-01")),
+        ("What moved the Nifty over the past week?", ("2026-11-01", "2026-11-07")),
+        ("News from the past 3 days", ("2026-11-05", "2026-11-07")),
+        ("What happened today?", ("2026-11-07", "2026-11-07")),
+        ("And yesterday?", ("2026-11-06", "2026-11-06")),
+        ("Compare the US and Indian stock markets.", (None, None)),
+    ],
+)
+def test_resolver_turns_the_named_window_into_dates(text, window) -> None:
     from datetime import date
 
     from contextforge.core.context.resolver import resolve_context
 
-    r = resolve_context(
-        "Compare October spending with September",
-        [],
-        today=date(2026, 11, 7),
-        timezone="Asia/Kolkata",
-    )
-    assert (r.period_start, r.period_end) == (
-        "2026-09-01",
-        "2026-10-31",
-    ) and r.today == "2026-11-07"
+    r = resolve_context(text, [], today=date(2026, 11, 7), timezone="Asia/Kolkata")
+    assert (r.period_start, r.period_end) == window and r.today == "2026-11-07"
 
 
 def test_call_budget_stops_the_planner() -> None:
@@ -196,3 +205,84 @@ def test_planner_runs_on_the_briefs_memory_snapshot() -> None:
     )
     [call] = deps.repos.model_calls.list_by_request(req.message_id)
     assert call.context_version.startswith(f"mem:{memory['version']}|")
+
+
+def test_a_web_question_is_never_asked_about_and_a_follow_up_sees_the_earlier_question():
+    """Live: in a chat with no uploads the planner asked for the period of "this week", and the
+    follow-up "Try again." was planned without knowing what to try again. A web question is
+    planned on its most likely reading; prior context holds the earlier request and report."""
+    from contextforge.core.entities.chat import Chat
+    from contextforge.core.entities.message import ReportBody, ReportMessage, RequestMessage
+    from contextforge.worker.stages.plan import NO_MORE_QUESTIONS, NO_PERIOD, NOT_ASKED
+
+    web_plan = {
+        **_plan([]),
+        "tasks": [
+            {"ref": "t1", "kind": "web_search", "goal": "US", "inputArtifactIds": []},
+            {"ref": "t2", "kind": "web_search", "goal": "India", "inputArtifactIds": []},
+        ],
+    }
+    model = ScriptedModel(
+        {
+            "plan": [
+                ModelResponse(structured=clarification("For which period?")),
+                ModelResponse(structured=web_plan),
+            ]
+        }
+    )
+    seen: list = []
+    model.on_request = seen.append
+    deps = make_deps(model)
+    earlier, later = "2026-11-07T10:00:00Z", "2026-11-07T11:00:00Z"
+    deps.repos.chats.save(
+        Chat(
+            chat_id="c1",
+            user_id="u1",
+            title="t",
+            status="ACTIVE",
+            created_at=earlier,
+            updated_at=earlier,
+        )
+    )
+    fields = {"chat_id": "c1", "user_id": "u1", "updated_at": earlier}
+    question = "Compare the US stock market and the Indian stock market this week."
+    for message in (
+        RequestMessage(
+            message_id="r0",
+            sender="user",
+            kind="request",
+            content=question,
+            status="COMPLETED",
+            created_at=earlier,
+            **fields,
+        ),
+        ReportMessage(
+            message_id="p0",
+            sender="assistant",
+            kind="report",
+            content="Sensex rose.",
+            request_message_id="r0",
+            created_at=earlier,
+            report=ReportBody(claims=[], inputs_consulted=[], uncertainties=[], coverage={}),
+            **fields,
+        ),
+        RequestMessage(
+            message_id="r1",
+            sender="user",
+            kind="request",
+            content="Try again.",
+            status="RUNNING",
+            created_at=later,
+            **fields,
+        ),
+    ):
+        deps.repos.messages.save(message)
+    brief = initial_brief(deps.repos.messages.get("c1", "r1"))
+
+    planned = plan_stage(brief, 0, deps)
+    assert planned["kind"] == "plan" and planned["pending"] is None
+    assert planned["assumption"] == NOT_ASKED.format(question="For which period?")
+    first = seen[0].messages[0].content
+    assert f"period: {NO_PERIOD}" in first and NO_MORE_QUESTIONS in first
+    assert f"request: {question}" in first.split("<prior_context>")[1]
+    assert deps.repos.messages.get("c1", "r1").status == "RUNNING"

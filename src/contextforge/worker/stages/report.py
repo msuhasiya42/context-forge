@@ -94,7 +94,8 @@ def _report_message(
     report_id = derived_id(f"{request_message_id}:report")
     claims = _claims(report_id, brief["facts"])
     withheld = [WITHHELD_ANSWER.format(question=a.question) for a in answers if not a.constraint]
-    uncertainties = [*withheld, *_uncertainties(outcomes, cite_uncertainties)]
+    assumed = brief.get("assumptions", [])
+    uncertainties = [*withheld, *assumed, *_uncertainties(outcomes, cite_uncertainties)]
     now = now_iso()
     return ReportMessage(
         message_id=report_id,
