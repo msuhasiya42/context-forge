@@ -261,16 +261,20 @@ def test_search_keeps_real_hits_and_skips_ads_and_linkless_hits():
 BOT_CHECK = httpx.Response(202, text="<html><div class='anomaly-modal'>Unfortunately, bots</div>")
 
 
-def test_a_duckduckgo_bot_check_is_retried_once_then_falls_back_to_serper():
+def test_a_failed_search_is_retried_once_then_tried_on_the_other_provider():
     """Live run 1: after a few parallel searches DuckDuckGo answered 202 with its bot check and
     every later search failed as "no usable sources". Now the bot check is named, retried once
-    after a backoff, and Serper takes over when a key is set."""
+    after a backoff, and the other provider takes over: Serper when its key is set, or
+    DuckDuckGo when Serper is the configured provider and is down."""
     asked: list[str] = []
     blocked_for = [1]
+    serper_down = [False]
 
     def handler(request: httpx.Request) -> httpx.Response:
         asked.append(request.url.host)
         if request.url.host == "google.serper.dev":
+            if serper_down[0]:
+                return httpx.Response(503)
             return httpx.Response(200, json={"organic": [{"title": "T", "link": DOCS_URL}]})
         if blocked_for[0] > 0:
             blocked_for[0] -= 1
@@ -288,9 +292,14 @@ def test_a_duckduckgo_bot_check_is_retried_once_then_falls_back_to_serper():
     assert asked == ["html.duckduckgo.com"] * 2
 
     blocked_for[0], asked[:] = 10, []
-    serper = _web(handler, api_key="test-key")
-    assert [row["url"] for row in serper.search("python")] == [DOCS_URL]
+    with_key = _web(handler, api_key="test-key")
+    assert [row["url"] for row in with_key.search("python")] == [DOCS_URL]
     assert asked == ["html.duckduckgo.com", "html.duckduckgo.com", "google.serper.dev"]
+
+    blocked_for[0], serper_down[0], asked[:] = 0, True, []
+    serper_first = _web(handler, provider="serper", api_key="test-key")
+    assert [row["url"] for row in serper_first.search("python")] == [DOCS_URL]
+    assert asked == ["google.serper.dev", "google.serper.dev", "html.duckduckgo.com"]
 
 
 def test_duckduckgo_searches_are_spaced_out_across_tasks():

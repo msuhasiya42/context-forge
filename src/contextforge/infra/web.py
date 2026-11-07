@@ -93,9 +93,9 @@ class PublicWebClient:
     def search(self, query: str) -> list[dict[str, str]]:
         """Up to ``limit`` hits as ``{title, url, snippet}``, one per URL.
 
-        On DuckDuckGo a failed search (its bot check, a network or HTTP error, no hits) is
-        tried once more after ``retry_delay``, then on Serper when a key is set. The last
-        failure is raised when every try fails.
+        A failed search (DuckDuckGo's bot check, a network or HTTP error, no hits) is tried
+        once more after ``retry_delay``, then on the other provider (``_search_plan``). The
+        last failure is raised when every try fails.
         """
         if not query.strip() or len(query) > 1000:
             raise WebRefusal("bad_query", "A search query has 1 to 1000 characters.")
@@ -120,11 +120,14 @@ class PublicWebClient:
         return _within(self.deadline_seconds, partial(self._fetch, url))
 
     def _search_plan(self) -> list[tuple[str, float]]:
-        """The providers to try in order, each with the wait before it."""
-        if self.provider == "serper":
-            return [("serper", 0.0)]
-        plan = [("duckduckgo", 0.0), ("duckduckgo", self.retry_delay)]
-        return [*plan, ("serper", 0.0)] if self.api_key else plan
+        """The providers to try in order, each with the wait before it: the configured one,
+        the same again after ``retry_delay``, then the other one. Serper is a fallback only
+        when its key is set; DuckDuckGo needs none."""
+        primary, fallback = (
+            ("serper", "duckduckgo") if self.provider == "serper" else ("duckduckgo", "serper")
+        )
+        plan = [(primary, 0.0), (primary, self.retry_delay)]
+        return [*plan, (fallback, 0.0)] if fallback == "duckduckgo" or self.api_key else plan
 
     def _wait_for_slot(self) -> None:
         """Wait until ``search_interval`` after the previous DuckDuckGo query, whichever
