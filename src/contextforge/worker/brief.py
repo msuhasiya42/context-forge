@@ -17,7 +17,6 @@ def initial_brief(request: RequestMessage) -> RequestState:
     """Identity from ``request``; every brief field empty until the plan stage fills it."""
     return RequestState(
         request_message_id=request.message_id,
-        created_at=request.created_at,
         chat_id=request.chat_id,
         user_id=request.user_id,
         goal="",

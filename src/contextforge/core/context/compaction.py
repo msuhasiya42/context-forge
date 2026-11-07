@@ -29,11 +29,13 @@ def compact(
     model: ModelClient,
     memory: str,
     model_id: str = "scripted",
+    task_id: str | None = None,
 ) -> list[AnyMessage]:
     """Fit ``messages`` into ``budget_tokens``: unchanged if they fit, else level 1, else 3.
 
     The model is called only when stubbing is not enough. One pass: a level 3 result still
-    over budget is returned as is, and the next call compacts again.
+    over budget is returned as is, and the next call compacts again. ``task_id`` names the
+    task whose loop this is, so the compress call is recorded against it.
     """
     if messages_tokens(messages) <= budget_tokens:
         return list(messages)
@@ -41,7 +43,12 @@ def compact(
     if messages_tokens(stubbed) <= budget_tokens:
         return stubbed
     return summarize_messages(
-        stubbed, keep_last=keep_last, model=model, memory=memory, model_id=model_id
+        stubbed,
+        keep_last=keep_last,
+        model=model,
+        memory=memory,
+        model_id=model_id,
+        task_id=task_id,
     )
 
 
@@ -66,6 +73,7 @@ def summarize_messages(
     model: ModelClient,
     memory: str,
     model_id: str = "scripted",
+    task_id: str | None = None,
 ) -> list[AnyMessage]:
     """Level 3: replace everything before the last ``keep_last`` messages by a model summary.
 
@@ -82,6 +90,7 @@ def summarize_messages(
             system=[memory, load_prompt(prompt_version(Stage.COMPRESS))],
             messages=messages[:boundary],
             max_tokens=_SUMMARY_MAX_TOKENS,
+            task_id=task_id,
         )
     )
     summary = SystemMessage(content=_SUMMARY_PREFIX + (response.text or ""))

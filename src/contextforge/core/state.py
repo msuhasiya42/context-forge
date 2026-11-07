@@ -64,7 +64,6 @@ class RequestState(TypedDict):
     next_action: str
     period: NotRequired[dict[str, str] | None]
     memory: NotRequired[MemorySnapshot]
-    created_at: NotRequired[str]
 
 
 class TaskState(TypedDict):

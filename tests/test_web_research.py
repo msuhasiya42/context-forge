@@ -599,8 +599,9 @@ def test_web_search_rows_keep_their_artifact_handle_through_compaction():
     (summary,) = [m for m in execute[3].messages if isinstance(m, SystemMessage)]
     assert rows_id in str(summary.content) and "s1" not in _results(execute[3])
     recorded = deps.repos.model_calls.list_by_request("r1")
-    compress_calls = [c for c in recorded if c.stage == "compress"]
-    assert [c.context_version.split("|")[1] for c in compress_calls] == ["prompt:compress.2"]
+    (compressed,) = [c for c in recorded if c.stage == "compress"]
+    assert compressed.context_version.endswith("|prompt:compress.2")
+    assert compressed.task_id == execute[0].task_id  # recorded against the task it compacted
     report = next(m for m in deps.repos.messages.list_by_chat("c1") if m.kind == "report")
     cited = {ref.artifact_id for claim in report.report.claims for ref in claim.evidence_refs}
     assert rows_id in cited and len(report.report.claims) == 2

@@ -63,11 +63,7 @@ from contextforge.core.tools.base import Tool, ToolContext, ToolResult
 from contextforge.worker.brief import load_request
 from contextforge.worker.deps import WorkerDeps
 from contextforge.worker.stages.errors import one_line
-from contextforge.worker.stages.guards import (
-    CallBudgetExceeded,
-    check_call_budget,
-    check_not_cancelled,
-)
+from contextforge.worker.stages.guards import check_not_cancelled
 from contextforge.worker.stages.sources import available_artifacts, source_line
 from contextforge.worker.stages.stubs import reconcile_stub, skipped_reason
 from contextforge.worker.tools import TOOL_NAMES_BY_KIND
@@ -164,23 +160,21 @@ def call_model(state: TaskState, runtime: Runtime[TaskRun], *, deps: WorkerDeps)
     """One execute call: appends the model's tool calls, or sets ``result``, or sets ``error``.
 
     The loop messages are compacted first when they overrun their budget, and a compacted
-    transcript replaces the one in state. ``Cancelled`` propagates; an exhausted call budget or
-    a failed call (the compress call included) ends the run as ``error``.
+    transcript replaces the one in state. ``Cancelled`` propagates; a failed call (the compress
+    call included), which an exhausted budget or a passed deadline is, ends the run as
+    ``error``.
     """
     check_not_cancelled(deps, state["chat_id"], state["request_message_id"])
     run = runtime.context
     try:
-        check_call_budget(deps, state["request_message_id"])
         model = deps.model_for(
-            state["request_message_id"],
-            memory_version=run.brief["memory"]["version"],
-            created_at=run.brief.get("created_at"),
+            state["request_message_id"], memory_version=run.brief["memory"]["version"]
         )
         specs = [tool.spec for tool in _allowed_tools(run.task.kind, deps).values()]
         built = build_context(_execute_inputs(state, run, specs, deps), deps.budgets)
-        messages = _compacted_messages(state["messages"], built, model, deps)
+        messages = _compacted_messages(state, built, model, deps)
         response = model.invoke(_model_request(state, built, messages, specs, deps))
-    except (CallBudgetExceeded, ModelError) as exc:
+    except ModelError as exc:
         logger.warning("execute call failed: %s", exc)
         return {"error": str(exc)}
     update = _handle_response(response, state, run.task, deps.budgets)
@@ -365,7 +359,7 @@ def _after_tools(state: TaskState) -> str:
 
 
 def _compacted_messages(
-    messages: list[AnyMessage], built: BuiltContext, model: ModelClient, deps: WorkerDeps
+    state: TaskState, built: BuiltContext, model: ModelClient, deps: WorkerDeps
 ) -> list[AnyMessage]:
     """Section 8 fitted into the window that sections 1 to 7 leave (spec 8.6).
 
@@ -375,13 +369,14 @@ def _compacted_messages(
     """
     budgets = deps.budgets
     return compact(
-        messages,
+        state["messages"],
         budget_tokens=budgets.messages_budget(built.fixed_tokens),
         keep_last=budgets.keep_last_messages,
         model=model,
         memory=built.system[0],  # the builder's first system block is the memory file
         # Execute and compress run on the same cheap model (implementation plan, model split).
         model_id=deps.executor_model,
+        task_id=state["task_id"],
     )
 
 

@@ -40,12 +40,7 @@ from contextforge.core.state import PendingInterrupt, PlanEntry, RequestState
 from contextforge.worker.brief import load_request
 from contextforge.worker.deps import WorkerDeps
 from contextforge.worker.stages.errors import one_line
-from contextforge.worker.stages.guards import (
-    CallBudgetExceeded,
-    check_call_budget,
-    check_not_cancelled,
-    leave_running,
-)
+from contextforge.worker.stages.guards import check_not_cancelled, leave_running
 from contextforge.worker.stages.sources import available_artifacts, source_line
 
 logger = logging.getLogger(__name__)
@@ -228,9 +223,7 @@ def _plan_or_fail(brief: RequestState, inputs: ContextInputs, deps: WorkerDeps) 
     """The planner's output; a call that cannot be made or answered becomes ``PlanFailed``."""
     try:
         return _plan_with_one_retry(brief, inputs, deps)
-    except CallBudgetExceeded as exc:
-        raise PlanFailed("model budget exhausted") from exc
-    except ModelError as exc:
+    except ModelError as exc:  # an exhausted budget or a passed deadline among them
         raise PlanFailed(f"planner model call failed: {exc}") from exc
 
 
@@ -257,7 +250,6 @@ def _plan_with_one_retry(
 def _call_planner(brief: RequestState, inputs: ContextInputs, deps: WorkerDeps) -> PlannerOutput:
     """One guarded, recorded planner call; ``ValidationError`` when the output breaks the schema."""
     check_not_cancelled(deps, brief["chat_id"], brief["request_message_id"])
-    check_call_budget(deps, brief["request_message_id"])
     built = build_context(inputs, deps.budgets)
     request = ModelRequest(
         stage=Stage.PLAN,
@@ -267,9 +259,7 @@ def _call_planner(brief: RequestState, inputs: ContextInputs, deps: WorkerDeps) 
         output_schema=PlannerOutput,
     )
     response = deps.model_for(
-        brief["request_message_id"],
-        memory_version=brief["memory"]["version"],
-        created_at=brief.get("created_at"),
+        brief["request_message_id"], memory_version=brief["memory"]["version"]
     ).invoke(request)
     return PlannerOutput.model_validate(response.structured)
 

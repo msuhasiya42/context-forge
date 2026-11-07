@@ -62,19 +62,14 @@ class WorkerDeps:
         self.semaphore = threading.BoundedSemaphore(self.budgets.tasks_in_flight)
 
     def model_for(
-        self,
-        request_message_id: str,
-        *,
-        memory_version: str | None = None,
-        created_at: str | None = None,
+        self, request_message_id: str, *, memory_version: str | None = None
     ) -> ModelClient:
         """The model client for one request. Every attempt is admitted against the request's call
         budget (with settings, also its spend cap and deadline), retried when transient, and
         saved as a ModelCall priced from its usage.
 
-        The deadline counts from the start of the request's current segment, never from its
-        ``created_at`` (A-C1), so time spent waiting on the user is not counted. ``created_at``
-        is therefore unused; it stays until the stages stop passing it.
+        The deadline counts from the start of the request's current segment, never from the
+        request's creation (A-C1), so time spent waiting on the user is not counted.
         """
         settings = self.settings
         recorded = RecordingModelClient(

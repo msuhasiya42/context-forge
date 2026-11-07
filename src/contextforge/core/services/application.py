@@ -212,7 +212,12 @@ class Application:
                 "modelCalls": len(calls),
                 "estimatedCostUsd": sum(c.estimated_cost_usd or 0 for c in calls),
                 "usageComplete": all(c.usage is not None for c in calls),
-                "costBasis": "conservative per-call reservation; not verified billing",
+                "costBasis": (
+                    "each finished call priced from its token usage at config/models.yaml "
+                    "prices; a call with unknown usage counts at the per-call reserve; calls "
+                    "in flight are not shown (the spend cap holds the reserve for them); not "
+                    "verified billing"
+                ),
             },
         }
 
