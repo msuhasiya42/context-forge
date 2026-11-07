@@ -322,6 +322,31 @@ def test_duplicate_tool_call_spends_no_slot() -> None:
     )  # the duplicate never counted; no-progress ended it
 
 
+def test_failed_dependency_fails_its_dependents() -> None:
+    # t1 returns an invalid result on both of its attempts; t3 needs no t1 and completes
+    invalid = ModelResponse(structured={})
+    deps = make_deps(
+        ScriptedModel(
+            {
+                "plan": [ModelResponse(structured=six_task_plan())],
+                "execute": [invalid, invalid, ModelResponse(structured=t1_result())],
+            }
+        ),
+        tasks_in_flight=1,
+    )
+    req = seed_chat_with_dataset(deps, chat_id="c1", user_id="u1", dataset_id="a2")
+    _start(deps, req)
+    out = build_workflow(deps, checkpointer=None).invoke(
+        {"chat_id": "c1", "message_id": req.message_id}, _cfg(req)
+    )
+    t1, t2, t3, _, _, t6 = deps.repos.tasks.list_by_request(req.message_id)
+    assert t1.status == "FAILED" and "invalid result" in t1.failure_reason
+    assert t2.status == "FAILED" and t2.failure_reason == "dependency failed"
+    assert t6.status == "FAILED" and t6.failure_reason == "dependency failed"
+    assert t3.status == "COMPLETED" and out["status"] == "COMPLETED"
+    assert deps.repos.messages.get("c1", req.message_id).status == "COMPLETED"
+
+
 def test_scripted_exhaustion_fails_request_with_reason() -> None:
     deps = make_deps(ScriptedModel({"plan": [ModelResponse(structured=six_task_plan())]}))
     req = seed_chat_with_dataset(deps, chat_id="c1", user_id="u1", dataset_id="a2")

@@ -206,40 +206,35 @@ def run_tools(state: TaskState, runtime: Runtime[TaskRun], *, deps: WorkerDeps) 
 
 
 def _run_to_end(task: Task, brief: RequestState, deps: WorkerDeps) -> Task:
-    """The Task as stored after its final transition; what that is depends on its kind."""
+    """The Task as stored after its final transition: FAILED when a dependency did not
+    complete, whatever the kind; otherwise what that is depends on its kind."""
+    results = _dependency_results(task, deps)
+    if results is None:
+        return _settle(deps, task, TaskStatus.FAILED, failure_reason=DEPENDENCY_FAILED)
     if task.kind == TaskKind.SQL_ANALYSIS:
-        return _run_sql_analysis(task, brief, deps)
+        return _run_sql_analysis(task, brief, deps, [result.summary for result in results])
     if task.kind == TaskKind.RECONCILE:
-        return _run_reconcile(task, deps)
+        return _settle(deps, task, TaskStatus.COMPLETED, result=reconcile_stub(task, results))
     return _settle(deps, task, TaskStatus.SKIPPED, failure_reason=skipped_reason(task.kind))
 
 
-def _run_sql_analysis(task: Task, brief: RequestState, deps: WorkerDeps) -> Task:
+def _run_sql_analysis(
+    task: Task, brief: RequestState, deps: WorkerDeps, dependency_summaries: list[str]
+) -> Task:
     """Run the subgraph, again from a fresh state after an error; COMPLETED or FAILED."""
     subgraph = build_task_subgraph(deps)
     run = TaskRun(task=task, brief=brief, sources=_task_sources(task, brief["chat_id"], deps))
-    summaries = [d.result.summary for d in _dependencies(task, deps) if d.result is not None]
     config: RunnableConfig = {"recursion_limit": _recursion_limit(deps.budgets)}
     error = ""
     for attempt in range(1, deps.budgets.task_retries + 2):
-        final = subgraph.invoke(_fresh_state(task, brief, summaries), config, context=run)
+        state = _fresh_state(task, brief, dependency_summaries)
+        final = subgraph.invoke(state, config, context=run)
         if final["result"] is not None:
             result = TaskResult.model_validate(final["result"])
             return _settle(deps, task, TaskStatus.COMPLETED, result=result)
         error = final["error"] or "the task ended without a result"
         logger.warning("attempt %d ended: %s", attempt, error)
     return _settle(deps, task, TaskStatus.FAILED, failure_reason=error)
-
-
-def _run_reconcile(task: Task, deps: WorkerDeps) -> Task:
-    """COMPLETED with the phase 1 stub when every dependency completed, else FAILED."""
-    dependencies = _dependencies(task, deps)
-    results = [
-        d.result for d in dependencies if d.status == TaskStatus.COMPLETED and d.result is not None
-    ]
-    if len(results) < len(dependencies):
-        return _settle(deps, task, TaskStatus.FAILED, failure_reason=DEPENDENCY_FAILED)
-    return _settle(deps, task, TaskStatus.COMPLETED, result=reconcile_stub(task, results))
 
 
 def _settle(
@@ -277,8 +272,14 @@ def _get_task(deps: WorkerDeps, request_message_id: str, task_id: str) -> Task:
     return task
 
 
-def _dependencies(task: Task, deps: WorkerDeps) -> list[Task]:
-    return [_get_task(deps, task.request_message_id, d) for d in task.depends_on_task_ids]
+def _dependency_results(task: Task, deps: WorkerDeps) -> list[TaskResult] | None:
+    """Each dependency's result in ``depends_on`` order; None when any did not complete
+    (FAILED, SKIPPED or CANCELLED), since the task would otherwise run without its input."""
+    dependencies = [_get_task(deps, task.request_message_id, d) for d in task.depends_on_task_ids]
+    results = [
+        d.result for d in dependencies if d.status == TaskStatus.COMPLETED and d.result is not None
+    ]
+    return results if len(results) == len(dependencies) else None
 
 
 def _task_sources(task: Task, chat_id: str, deps: WorkerDeps) -> list[SourceLine]:
