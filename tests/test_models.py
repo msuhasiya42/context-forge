@@ -1,16 +1,20 @@
 # tests/test_models.py
+import threading
+import time
+
 import pytest
 
 from contextforge.core.context.prompts import load_prompt, prompt_version
 from contextforge.core.entities.model_call import Stage
 from contextforge.core.models.base import ModelClient, ModelRequest, ModelResponse, ToolSpec
 from contextforge.core.models.config import load_models_config
-from contextforge.core.models.errors import ModelTimeout
+from contextforge.core.models.errors import ModelError, ModelTimeout
 from contextforge.core.models.recording import RecordingModelClient
 from contextforge.core.models.scripted import ScriptedModel, ScriptExhausted
 from contextforge.core.repositories.memory import Repositories
 from contextforge.core.settings import Settings
 from contextforge.core.values import Usage
+from contextforge.worker.deps import WorkerDeps
 from tests.helpers import make_deps
 
 
@@ -142,6 +146,70 @@ def test_spend_cap_admits_more_than_ten_cheap_calls() -> None:
         model.invoke(request)
     calls = deps.repos.model_calls.list_by_request("m1")
     assert len(calls) == 12 and sum(c.estimated_cost_usd or 0 for c in calls) < 0.01
+
+
+def _capped_deps(model: ModelClient, max_usd: float, **settings: float) -> WorkerDeps:
+    """Deps on the production call path at ``max_usd`` per request, with config prices."""
+    deps = make_deps(model)
+    deps.settings = Settings(_env_file=None, request_max_usd=max_usd, **settings)
+    deps.prices = load_models_config().prices
+    return deps
+
+
+def test_three_concurrent_calls_are_all_admitted_under_the_smoke_cap() -> None:
+    """Re-review I-1: a flat $0.10 reserve let only two calls run in flight under the $0.25
+    cap. Each call now reserves its own worst case (Nova Lite at the context cap: ~$0.0034),
+    so three parallel tasks run. Each call waits at the barrier until all three are in flight."""
+    in_flight = threading.Barrier(3, timeout=5)
+    reply = ModelResponse(text="ok", usage=Usage(input_tokens=3_000, output_tokens=300))
+
+    class WaitsForTheOthers:
+        def invoke(self, request: ModelRequest) -> ModelResponse:
+            in_flight.wait()
+            return reply
+
+    deps = _capped_deps(WaitsForTheOthers(), 0.25, call_reserve_usd=0.10)
+    request = ModelRequest(stage="execute", model=deps.executor_model, system=[], messages=[])
+    errors: list[Exception] = []
+
+    def call() -> None:
+        try:
+            deps.model_for("m1").invoke(request)
+        except Exception as exc:
+            errors.append(exc)
+
+    threads = [threading.Thread(target=call) for _ in range(3)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert errors == [] and len(deps.repos.model_calls.list_by_request("m1")) == 3
+    assert deps.pending_calls["m1"] == []
+
+
+def test_spend_cap_refuses_a_call_whose_worst_case_would_pass_it() -> None:
+    """A planner call reserves Nova Pro's worst case (~$0.045); after $0.01 spent, a $0.05 cap
+    refuses it before the provider is called, and nothing is recorded for it."""
+    spent = ModelResponse(text="ok", usage=Usage(input_tokens=10_000, output_tokens=625))
+    model = ScriptedModel({"plan": [spent, spent]})
+    deps = _capped_deps(model, 0.05)
+    request = ModelRequest(stage="plan", model=deps.planner_model, system=[], messages=[])
+    budgeted = deps.model_for("m1")
+    budgeted.invoke(request)
+    with pytest.raises(ModelError, match="^Request spend budget exhausted\\.$"):
+        budgeted.invoke(request)
+    assert len(deps.repos.model_calls.list_by_request("m1")) == 1
+    assert model.invoke(request) is spent  # the refused call never consumed the script
+
+
+def test_deadline_refuses_a_call_once_the_segment_has_run_past_it() -> None:
+    model = ScriptedModel({"execute": [ModelResponse(text="never")]})
+    deps = _capped_deps(model, 1.0, request_deadline_seconds=1)
+    deps.segment_started["m1"] = time.monotonic() - 2
+    request = ModelRequest(stage="execute", model=deps.executor_model, system=[], messages=[])
+    with pytest.raises(ModelError, match="^Request deadline exceeded\\.$"):
+        deps.model_for("m1").invoke(request)
+    assert deps.repos.model_calls.list_by_request("m1") == []
 
 
 def test_prompt_version_mapping() -> None:

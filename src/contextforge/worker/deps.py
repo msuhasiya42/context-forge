@@ -50,7 +50,8 @@ class WorkerDeps:
     semaphore: threading.BoundedSemaphore = field(init=False)
     settings: Settings | None = None
     budget_lock: threading.RLock = field(default_factory=threading.RLock)
-    pending_calls: dict[str, int] = field(default_factory=dict)
+    # The reservations of each request's model calls in flight (``BudgetedModel``).
+    pending_calls: dict[str, list[float]] = field(default_factory=dict)
     activity: ActivityBus = field(default_factory=ActivityBus)
     # time.monotonic() at the start of each request's current segment (see ``segment``).
     segment_started: dict[str, float] = field(default_factory=dict)
@@ -95,6 +96,8 @@ class WorkerDeps:
             call_budget=self.budgets.call_budget,
             max_usd=settings.request_max_usd if settings else math.inf,
             reserve_usd=settings.call_reserve_usd if settings else 0.0,
+            prices=self.prices,
+            cap_input_tokens=self.budgets.cap_input_tokens,
             retries=settings.model_retries if settings else 0,
             lock=self.budget_lock,
             pending=self.pending_calls,

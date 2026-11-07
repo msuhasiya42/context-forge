@@ -39,6 +39,13 @@ def cost_usd(prices: PriceTable, model: str, usage: Usage | None) -> float | Non
     return per_million / 1_000_000
 
 
+def worst_case_usd(prices: PriceTable, request: ModelRequest, input_tokens: int) -> float | None:
+    """The most ``request`` can cost: ``input_tokens`` (the context cap) in and its
+    ``max_tokens`` out at its model's prices; None when the model has no price."""
+    usage = Usage(input_tokens=input_tokens, output_tokens=request.max_tokens)
+    return cost_usd(prices, request.model, usage)
+
+
 def tool_set_hash(tools: list[ToolSpec]) -> str | None:
     """sha256 of the canonical JSON of the specs sorted by name; None when no tools were sent.
 
