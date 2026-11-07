@@ -12,16 +12,30 @@ from dataclasses import dataclass, field
 from functools import partial
 from typing import Any, TypedDict
 
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
+from langchain_core.messages import (
+    AIMessage,
+    AnyMessage,
+    BaseMessage,
+    HumanMessage,
+    RemoveMessage,
+    ToolMessage,
+)
 from langchain_core.messages.tool import tool_call
 from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END, START, StateGraph
+from langgraph.graph.message import REMOVE_ALL_MESSAGES
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.runtime import Runtime
 from pydantic import ValidationError
 
 from contextforge.core.context.budgets import Budgets
-from contextforge.core.context.builder import ContextInputs, SourceLine, build_context
+from contextforge.core.context.builder import (
+    BuiltContext,
+    ContextInputs,
+    SourceLine,
+    build_context,
+)
+from contextforge.core.context.compaction import compact
 from contextforge.core.context.prompts import load_prompt, prompt_version
 from contextforge.core.context.tool_results import ProcessedRows, process_rows, raw_result_id
 from contextforge.core.entities.model_call import Stage
@@ -34,7 +48,13 @@ from contextforge.core.entities.task import (
     validate_structured_data,
 )
 from contextforge.core.logging import request_context
-from contextforge.core.models.base import ModelRequest, ModelResponse, ToolCall, ToolSpec
+from contextforge.core.models.base import (
+    ModelClient,
+    ModelRequest,
+    ModelResponse,
+    ToolCall,
+    ToolSpec,
+)
 from contextforge.core.models.scripted import ScriptExhausted
 from contextforge.core.repositories.base import StaleStatusError
 from contextforge.core.state import Fact, RequestState, TaskState
@@ -132,17 +152,24 @@ def build_task_subgraph(
 def call_model(state: TaskState, runtime: Runtime[TaskRun], *, deps: WorkerDeps) -> dict[str, Any]:
     """One execute call: appends the model's tool calls, or sets ``result``, or sets ``error``.
 
-    ``Cancelled`` propagates; an exhausted call budget or a failed call ends the run as ``error``.
+    The loop messages are compacted first when they overrun their budget, and a compacted
+    transcript replaces the one in state. ``Cancelled`` propagates; an exhausted call budget or
+    a failed call (the compress call included) ends the run as ``error``.
     """
     check_not_cancelled(deps, state["chat_id"], state["request_message_id"])
+    run = runtime.context
     try:
         check_call_budget(deps, state["request_message_id"])
         model = deps.model_for(state["request_message_id"])
-        response = model.invoke(_model_request(state, runtime.context, deps))
+        specs = [tool.spec for tool in _allowed_tools(run.task.kind, deps).values()]
+        built = build_context(_execute_inputs(state, run, specs), deps.budgets)
+        messages = _compacted_messages(state["messages"], built, model, deps)
+        response = model.invoke(_model_request(state, built, messages, specs, deps))
     except (CallBudgetExceeded, ScriptExhausted) as exc:
         logger.warning("execute call failed: %s", exc)
         return {"error": str(exc)}
-    return _handle_response(response, state, runtime.context.task, deps.budgets)
+    update = _handle_response(response, state, run.task, deps.budgets)
+    return _with_transcript(update, before=state["messages"], after=messages)
 
 
 def run_tools(state: TaskState, runtime: Runtime[TaskRun], *, deps: WorkerDeps) -> dict[str, Any]:
@@ -305,15 +332,55 @@ def _after_tools(state: TaskState) -> str:
     return END if state["error"] is not None else "call_model"
 
 
-def _model_request(state: TaskState, run: TaskRun, deps: WorkerDeps) -> ModelRequest:
-    """The execute call: the task brief as the first user turn, then the loop so far."""
-    specs = [tool.spec for tool in _allowed_tools(run.task.kind, deps).values()]
-    built = build_context(_execute_inputs(state, run, specs), deps.budgets)
+def _compacted_messages(
+    messages: list[AnyMessage], built: BuiltContext, model: ModelClient, deps: WorkerDeps
+) -> list[AnyMessage]:
+    """Section 8 fitted into the window that sections 1 to 7 leave (spec 8.6).
+
+    Only the loop messages are passed, so brief fields cannot be lost to compaction. The
+    summary call goes through the request's recording client: it is saved as a ``compress``
+    ModelCall and counts against the call budget.
+    """
+    budgets = deps.budgets
+    return compact(
+        messages,
+        budget_tokens=budgets.messages_budget(built.fixed_tokens),
+        keep_last=budgets.keep_last_messages,
+        model=model,
+        memory=built.system[0],  # the builder's first system block is the memory file
+        # Execute and compress run on the same cheap model (implementation plan, model split).
+        model_id=deps.executor_model,
+    )
+
+
+def _with_transcript(
+    update: dict[str, Any], *, before: list[AnyMessage], after: list[AnyMessage]
+) -> dict[str, Any]:
+    """``update`` with the compacted transcript ``after`` written back when it differs.
+
+    Clearing the transcript and adding ``after`` replaces it in state, so the next turn starts
+    from the compacted one and a summary is paid for once, not on every later turn. Stubs keep
+    their message ids and ``add_messages`` gives the new summary one.
+    """
+    if after == before:  # element identity first, then content
+        return update
+    added = update.get("messages", [])
+    return {**update, "messages": [RemoveMessage(id=REMOVE_ALL_MESSAGES), *after, *added]}
+
+
+def _model_request(
+    state: TaskState,
+    built: BuiltContext,
+    messages: list[AnyMessage],
+    specs: list[ToolSpec],
+    deps: WorkerDeps,
+) -> ModelRequest:
+    """The execute call: the task brief as the first user turn, then the (compacted) loop."""
     return ModelRequest(
         stage=Stage.EXECUTE,
         model=deps.executor_model,
         system=built.system,
-        messages=[HumanMessage(built.user_text), *built.messages],
+        messages=[HumanMessage(built.user_text), *messages],
         tools=specs,
         output_schema=TaskResult,
         task_id=state["task_id"],

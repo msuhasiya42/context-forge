@@ -1,7 +1,10 @@
 # tests/test_workflow.py
+import dataclasses
 import threading
 
-from contextforge.core.models.base import ModelResponse, ToolCall
+from langchain_core.messages import AIMessage, SystemMessage, ToolMessage
+
+from contextforge.core.models.base import ModelRequest, ModelResponse, ToolCall
 from contextforge.core.models.scripted import ScriptedModel
 from contextforge.core.tools.base import ToolContext
 from contextforge.worker.tools.sql_query import SqlQueryTool
@@ -87,6 +90,65 @@ def test_fixture_request_produces_six_tasks_and_a_report() -> None:
     assert report.report.claims and all(c.evidence_refs for c in report.report.claims)
     assert deps.repos.messages.get("c1", req.message_id).status == "COMPLETED"
     assert len(deps.repos.model_calls.list_by_request(req.message_id)) == 5
+
+
+def test_request_completes_under_a_small_context_cap() -> None:
+    # Five distinct queries grow the first task's transcript past a 3,000-token window: level 1
+    # stubs the oldest results, and level 3 summarizes once the stubs alone no longer fit.
+    queries = [
+        ModelResponse(
+            tool_calls=[
+                ToolCall(
+                    id=f"q{limit}",
+                    name="sql_query",
+                    arguments={"dataset_id": "a2", "sql": f"SELECT * FROM t LIMIT {limit}"},
+                )
+            ],
+            stop_reason="tool_use",
+        )
+        for limit in (5, 10, 15, 20, 25)
+    ]
+    model = ScriptedModel(
+        {
+            "plan": [ModelResponse(structured=six_task_plan())],
+            "execute": [*queries, *[ModelResponse(structured=t1_result())] * 3],
+            "compress": [ModelResponse(text="summary of earlier queries")] * 3,
+        }
+    )
+    requests: list[ModelRequest] = []
+    model.on_request = requests.append
+    deps = make_deps(model, tasks_in_flight=1)  # serial, so one task's turns are consecutive
+    deps.budgets = dataclasses.replace(
+        deps.budgets, cap_input_tokens=3000, response_allowance_tokens=500
+    )
+    req = seed_chat_with_dataset(deps, chat_id="c1", user_id="u1", dataset_id="a2")
+    _start(deps, req)
+    out = build_workflow(deps, checkpointer=None).invoke(
+        {"chat_id": "c1", "message_id": req.message_id}, _cfg(req)
+    )
+    assert out["status"] == "COMPLETED"
+    tasks = deps.repos.tasks.list_by_request(req.message_id)
+    assert sorted(t.status for t in tasks) == sorted(["COMPLETED"] * 4 + ["SKIPPED"] * 2)
+    report = [m for m in deps.repos.messages.list_by_chat("c1") if m.kind == "report"][0]
+    assert report.report.claims and all(c.evidence_refs for c in report.report.claims)
+    calls = deps.repos.model_calls.list_by_request(req.message_id)
+    assert any(c.stage == "compress" for c in calls)
+    first = next(i for i, r in enumerate(requests) if r.stage == "compress")
+    # a summarized tool result is summarized together with the call that made it
+    summarized: set[str] = set()
+    for message in requests[first].messages:
+        if isinstance(message, AIMessage):
+            summarized.update(c["id"] for c in message.tool_calls)
+        elif isinstance(message, ToolMessage):
+            assert message.tool_call_id in summarized
+    # the summary is written back: the next turn sees it and the tail, not the summarized calls
+    next_turn = requests[first + 2].messages  # first + 1 is this turn's execute call
+    assert any(
+        isinstance(m, SystemMessage) and m.content.startswith("Summary of earlier work")
+        for m in next_turn
+    )
+    sent = {c["id"] for m in next_turn if isinstance(m, AIMessage) for c in m.tool_calls}
+    assert summarized and not sent & summarized
 
 
 def test_independent_tasks_run_in_parallel() -> None:
