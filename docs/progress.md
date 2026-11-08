@@ -190,3 +190,8 @@ Handoff for the next agent: `docs/handoff-2026-11-07-evening.md`.
 - Renamed the three modules to `worker/request_state.py`, `worker/dependencies.py` and `stages/citation_checks.py`. Expanded dependency/repository/context abbreviations and gave task execution and evidence-review helpers explicit names. Added a terminology glossary.
 - Kept API/database fields, model prompt formats, tool names and stored LangGraph checkpoint labels compatible. A synthetic SQLite workflow paused before the rename resumed afterward and completed, with only the expected new planner call. No live provider calls or service restart were performed for this refactor.
 - Final verification: all 226 tests pass; Ruff lint/format and strict mypy over 83 source files pass. User requested committing and pushing the completed work on the current branch.
+
+### Agentic AI session preparation
+
+- Added [the 60-minute session guide](agentic-ai-session-guide.md) for an audience with 6–15 years of engineering experience: speaking outline, actual code walkthrough, model/tool contract, state and context, failure cases, API demonstration, evaluation and anticipated questions. Checked official LangGraph documentation for framework mechanics and validated local guide links. This is a documentation change; no live provider calls were submitted.
+- Replaced the headline release-date question with an architecture decision: whether an AWS research agent should use LangGraph alone or combine it with Temporal/Step Functions. Added a copy-ready scenario prompt, report requirements and a crash-after-provider-acceptance walkthrough. The guide uses a rehearsed captured investigation plus a bounded live follow-up; prior citation bugs remain clearly labeled historical examples.
