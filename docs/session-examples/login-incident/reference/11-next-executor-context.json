@@ -1,0 +1,195 @@
+{
+  "status": "proposed continuation; previous messages retained in this short example",
+  "appendToMessagesInFile": "09-executor-readback-request.json",
+  "messagesToAppend": [
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "artifact-query-001",
+          "name": "query_artifact",
+          "arguments": {
+            "artifactId": "demo-login-metrics-001",
+            "operation": "aggregate",
+            "groupBy": [
+              "window",
+              "region"
+            ],
+            "sums": [
+              "total_logins",
+              "failed_logins"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "tool_call_id": "artifact-query-001",
+      "content": {
+        "artifactId": "demo-login-metrics-001",
+        "rowsScanned": 600,
+        "complete": true,
+        "groups": [
+          {
+            "window": "baseline",
+            "region": "us-east-1",
+            "rowsMatched": 60,
+            "total_logins": 60000,
+            "failed_logins": 600,
+            "failureRatePercent": 1.0
+          },
+          {
+            "window": "baseline",
+            "region": "us-west-2",
+            "rowsMatched": 60,
+            "total_logins": 60000,
+            "failed_logins": 600,
+            "failureRatePercent": 1.0
+          },
+          {
+            "window": "baseline",
+            "region": "eu-west-1",
+            "rowsMatched": 60,
+            "total_logins": 60000,
+            "failed_logins": 600,
+            "failureRatePercent": 1.0
+          },
+          {
+            "window": "baseline",
+            "region": "ap-south-1",
+            "rowsMatched": 60,
+            "total_logins": 60000,
+            "failed_logins": 600,
+            "failureRatePercent": 1.0
+          },
+          {
+            "window": "baseline",
+            "region": "ap-southeast-1",
+            "rowsMatched": 60,
+            "total_logins": 60000,
+            "failed_logins": 600,
+            "failureRatePercent": 1.0
+          },
+          {
+            "window": "post_release",
+            "region": "us-east-1",
+            "rowsMatched": 60,
+            "total_logins": 60000,
+            "failed_logins": 21000,
+            "failureRatePercent": 35.0
+          },
+          {
+            "window": "post_release",
+            "region": "us-west-2",
+            "rowsMatched": 60,
+            "total_logins": 60000,
+            "failed_logins": 600,
+            "failureRatePercent": 1.0
+          },
+          {
+            "window": "post_release",
+            "region": "eu-west-1",
+            "rowsMatched": 60,
+            "total_logins": 60000,
+            "failed_logins": 600,
+            "failureRatePercent": 1.0
+          },
+          {
+            "window": "post_release",
+            "region": "ap-south-1",
+            "rowsMatched": 60,
+            "total_logins": 60000,
+            "failed_logins": 600,
+            "failureRatePercent": 1.0
+          },
+          {
+            "window": "post_release",
+            "region": "ap-southeast-1",
+            "rowsMatched": 60,
+            "total_logins": 60000,
+            "failed_logins": 600,
+            "failureRatePercent": 1.0
+          }
+        ],
+        "windowTotals": [
+          {
+            "window": "baseline",
+            "total_logins": 300000,
+            "failed_logins": 3000,
+            "failureRatePercent": 1.0
+          },
+          {
+            "window": "post_release",
+            "total_logins": 300000,
+            "failed_logins": 23400,
+            "failureRatePercent": 7.8
+          }
+        ],
+        "calculation": "100 * sum(failed_logins) / sum(total_logins)",
+        "source": {
+          "artifactId": "demo-login-metrics-001",
+          "operation": {
+            "artifactId": "demo-login-metrics-001",
+            "operation": "aggregate",
+            "groupBy": [
+              "window",
+              "region"
+            ],
+            "sums": [
+              "total_logins",
+              "failed_logins"
+            ]
+          }
+        }
+      }
+    }
+  ],
+  "scriptedTaskResult": {
+    "taskId": "demo-t1",
+    "artifactIds": [
+      "demo-login-metrics-001"
+    ],
+    "findings": [
+      {
+        "statement": "Failure rate rose from 1.0% to 7.8% across matched hours.",
+        "source": {
+          "artifactId": "demo-login-metrics-001",
+          "operation": {
+            "artifactId": "demo-login-metrics-001",
+            "operation": "aggregate",
+            "groupBy": [
+              "window",
+              "region"
+            ],
+            "sums": [
+              "total_logins",
+              "failed_logins"
+            ]
+          }
+        }
+      },
+      {
+        "statement": "us-east-1: 1% to 35%; other regions: 1%.",
+        "source": {
+          "artifactId": "demo-login-metrics-001",
+          "operation": {
+            "artifactId": "demo-login-metrics-001",
+            "operation": "aggregate",
+            "groupBy": [
+              "window",
+              "region"
+            ],
+            "sums": [
+              "total_logins",
+              "failed_logins"
+            ]
+          }
+        }
+      }
+    ],
+    "limitations": [
+      "Temporal association does not establish release causation."
+    ]
+  }
+}

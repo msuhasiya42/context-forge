@@ -1,0 +1,9 @@
+We are a six-engineer SaaS team building a Python research agent on AWS. A research request runs for 5–20 minutes, reads public web sources in parallel, may pause for user clarification, and must continue sensibly after a worker crash or deployment. Each request may invoke search/fetch tools at most 50 times. We need to inspect its evidence, model calls, failures and estimated cost.
+
+Is LangGraph sufficient for this system, or should we combine it with Temporal or AWS Step Functions?
+
+Research current official documentation and relevant source code. Distinguish agent control flow from durable workflow orchestration, queues and application storage. Do not assume these technologies are mutually exclusive replacements.
+
+Compare LangGraph, Temporal and AWS Step Functions for checkpointing, parallel execution, pause/resume, retries, cancellation, duplicate delivery, operational burden and observability. Work through a specific failure: a model provider accepts a paid request, but the worker crashes before saving the response. Explain what each design can recover, what might run twice, and what still needs application-level idempotency or provider support. Do not claim exactly-once external effects without explicit evidence.
+
+Produce an architecture decision brief with a comparison matrix, a failure/recovery timeline, a recommendation for our MVP, and the conditions that would justify adding another orchestration layer later. Cite material capability claims with direct official source links. Label your architectural judgments, assumptions and unresolved questions. Avoid invented benchmark results or unsupported cost/performance rankings.

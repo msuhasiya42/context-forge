@@ -1,0 +1,30 @@
+{
+  "status": "Documented names/input fields; fictional arguments, no calls executed",
+  "calls": [
+    {
+      "jsonrpc": "2.0",
+      "id": "drive-search-001",
+      "method": "tools/call",
+      "params": {
+        "name": "search_files",
+        "arguments": {
+          "query": "parentId = 'demo-authorized-release-notes' and fullText contains 'auth-2026.11.08.1'",
+          "pageSize": 20
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": "drive-read-001",
+      "method": "tools/call",
+      "params": {
+        "name": "read_file_content",
+        "arguments": {
+          "fileId": "demo-release-notes-1",
+          "includeComments": false
+        }
+      }
+    }
+  ],
+  "dependency": "Second call requires a file ID returned by the first call; shown ID is a fixture. Follow nextPageToken when needed."
+}

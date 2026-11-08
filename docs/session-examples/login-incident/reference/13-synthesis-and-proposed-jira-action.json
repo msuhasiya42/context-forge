@@ -1,0 +1,62 @@
+{
+  "status": "Scripted synthesis/action; documented Jira name but illustrative arguments. Validate the connected server inputSchema and project metadata before execution.",
+  "inputTaskResults": [
+    "demo-t1",
+    "demo-t2",
+    "demo-t3"
+  ],
+  "summary": "In this fictional incident, login failures increased from 3,000/300,000 (1.0%) during 03:00\u201304:00Z to 23,400/300,000 (7.8%) during 04:00\u201305:00Z on November 8. The increase was concentrated in us-east-1 (1.0% to 35.0%). The supplied deployment time was 04:00Z. Release notes document a token-validation retry change, and DEMO-41 records a related hypothesis. These observations do not establish root cause.",
+  "evidence": [
+    {
+      "id": "E1",
+      "artifactId": "demo-login-metrics-001",
+      "query": {
+        "artifactId": "demo-login-metrics-001",
+        "operation": "aggregate",
+        "groupBy": [
+          "window",
+          "region"
+        ],
+        "sums": [
+          "total_logins",
+          "failed_logins"
+        ]
+      }
+    },
+    {
+      "id": "E2",
+      "url": "https://example.org/jira/DEMO-41"
+    },
+    {
+      "id": "E3",
+      "url": "https://example.org/drive/release-notes-1"
+    }
+  ],
+  "claimSources": {
+    "rates and regional concentration": [
+      "E1"
+    ],
+    "reported hypothesis": [
+      "E2"
+    ],
+    "documented retry change": [
+      "E3"
+    ]
+  },
+  "proposedAction": {
+    "tool": "createJiraIssue",
+    "arguments": {
+      "projectKey": "DEMO",
+      "cloudId": "demo-cloud-id",
+      "issueTypeName": "Task",
+      "summary": "Investigate elevated login failures in us-east-1",
+      "description": "In this fictional incident, login failures increased from 3,000/300,000 (1.0%) during 03:00\u201304:00Z to 23,400/300,000 (7.8%) during 04:00\u201305:00Z on November 8. The increase was concentrated in us-east-1 (1.0% to 35.0%). The supplied deployment time was 04:00Z. Release notes document a token-validation retry change, and DEMO-41 records a related hypothesis. These observations do not establish root cause.\nEvidence: E1 (metrics artifact/query), E2 and E3 above."
+    },
+    "requestIntent": "User explicitly requested ticket creation",
+    "backendChecks": [
+      "validate project and required Jira fields",
+      "check actual user permissions and configured approval policy",
+      "recheck duplicates and persist action execution identity"
+    ]
+  }
+}

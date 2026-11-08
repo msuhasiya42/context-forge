@@ -1,0 +1,98 @@
+{
+  "$defs": {
+    "IncidentTask": {
+      "properties": {
+        "ref": {
+          "title": "Ref",
+          "type": "string"
+        },
+        "kind": {
+          "enum": [
+            "read",
+            "synthesize",
+            "prepare_write"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "goal": {
+          "title": "Goal",
+          "type": "string"
+        },
+        "dependsOn": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Dependson",
+          "type": "array"
+        },
+        "instructions": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Instructions",
+          "type": "array"
+        },
+        "capabilities": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "query_prometheus",
+              "searchJiraIssuesUsingJql",
+              "search_files",
+              "none",
+              "createJiraIssue",
+              "read_file_content"
+            ]
+          },
+          "minItems": 1
+        }
+      },
+      "required": [
+        "ref",
+        "kind",
+        "goal",
+        "capabilities",
+        "dependsOn",
+        "instructions"
+      ],
+      "title": "IncidentTask",
+      "type": "object"
+    }
+  },
+  "properties": {
+    "goal": {
+      "title": "Goal",
+      "type": "string"
+    },
+    "tasks": {
+      "items": {
+        "$ref": "#/$defs/IncidentTask"
+      },
+      "maxItems": 6,
+      "minItems": 1,
+      "title": "Tasks",
+      "type": "array"
+    },
+    "uncertainties": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Uncertainties",
+      "type": "array"
+    },
+    "nextAction": {
+      "title": "Nextaction",
+      "type": "string"
+    }
+  },
+  "required": [
+    "goal",
+    "tasks",
+    "uncertainties",
+    "nextAction"
+  ],
+  "title": "IncidentPlan",
+  "type": "object"
+}

@@ -1,0 +1,3 @@
+{
+  "fileContent": "Release: auth-2026.11.08.1\nService: auth-api\n\nChanges\nChanged token-validation retry handling.\n\nOperational notes\nWatch login failures by region after deployment.\nThese release notes describe intended changes, not verified incident causes.\n"
+}

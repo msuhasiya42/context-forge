@@ -1,0 +1,9 @@
+Release: auth-2026.11.08.1
+Service: auth-api
+
+Changes
+Changed token-validation retry handling.
+
+Operational notes
+Watch login failures by region after deployment.
+These release notes describe intended changes, not verified incident causes.

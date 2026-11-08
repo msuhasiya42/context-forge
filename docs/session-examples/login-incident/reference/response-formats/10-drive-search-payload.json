@@ -1,0 +1,11 @@
+{
+  "files": [
+    {
+      "id": "demo-release-notes-1",
+      "title": "auth-api release auth-2026.11.08.1",
+      "mimeType": "application/vnd.google-apps.document",
+      "viewUrl": "https://example.org/drive/release-notes-1",
+      "contentSnippet": "Changed token-validation retry handling."
+    }
+  ]
+}
