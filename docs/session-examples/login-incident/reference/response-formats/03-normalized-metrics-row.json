@@ -1,0 +1,9 @@
+{
+  "detail": "Fictional fixture; no production measurements. Fictional fixture; no production measurements. Fictional fixture; no production measurements. Fictional fixture; no production measurements. Fictional fixture; no production measurements. Fictional fixture; no production measurements. Fictional fixture; no production measurements. Fictional fixture; no production measurements. ",
+  "failed_logins": 350,
+  "metric_definition": "Failed / all login attempts; one-minute buckets.",
+  "region": "us-east-1",
+  "timestamp": "2026-11-08T04:00:00+00:00",
+  "total_logins": 1000,
+  "window": "post_release"
+}

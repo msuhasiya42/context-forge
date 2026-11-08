@@ -1,0 +1,19 @@
+{
+  "status": "Documented Grafana tool; fictional metric and datasource; not executed",
+  "normalizationNote": "Provider returns time series. A proposed adapter would map outcome series to rows; files 06-08 use independent synthetic normalized rows, not captured Prometheus output. Bucket timestamps there denote interval starts.",
+  "role": "assistant",
+  "tool_calls": [
+    {
+      "id": "metrics-001",
+      "name": "query_prometheus",
+      "arguments": {
+        "datasourceUid": "demo-prometheus",
+        "expr": "sum by (region, outcome) (increase(login_attempts_total{service=\"auth-api\",environment=\"production\"}[1m]))",
+        "queryType": "range",
+        "startTime": "2026-11-08T03:01:00Z",
+        "endTime": "2026-11-08T05:00:00Z",
+        "stepSeconds": 60
+      }
+    }
+  ]
+}

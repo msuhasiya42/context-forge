@@ -1,0 +1,14 @@
+{
+  "artifactId": "demo-login-metrics-001",
+  "userId": "demo-user-001",
+  "chatId": "demo-chat-001",
+  "kind": "raw_result",
+  "name": "Fictional login metrics",
+  "mediaType": "application/x-ndjson",
+  "sizeBytes": 358380,
+  "storageRef": "mem://raw_result/demo-chat-001/demo-login-metrics-001.jsonl",
+  "status": "AVAILABLE",
+  "indexStatus": "NOT_INDEXED",
+  "derivedFromArtifactId": null,
+  "createdAt": "2026-11-08T04:35:06Z"
+}

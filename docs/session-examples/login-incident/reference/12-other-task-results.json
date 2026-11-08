@@ -1,0 +1,27 @@
+{
+  "status": "fictional proposed MCP results; links use reserved example.org",
+  "jira": {
+    "taskId": "demo-t2",
+    "matchingIncidentFound": false,
+    "searchScope": "DEMO/auth-api/exact release and login symptoms; 03:00\u201306:00Z",
+    "completeWithinScope": true,
+    "issues": [
+      {
+        "id": "DEMO-41",
+        "url": "https://example.org/jira/DEMO-41",
+        "type": "bug",
+        "excerpt": "Investigate token-validation retries; possible timeouts.",
+        "evidenceType": "unverified hypothesis; no matching incident"
+      }
+    ]
+  },
+  "releaseNotes": {
+    "taskId": "demo-t3",
+    "documentId": "demo-release-notes-1",
+    "version": "1",
+    "url": "https://example.org/drive/release-notes-1",
+    "releaseId": "auth-2026.11.08.1",
+    "excerpt": "Changed token-validation retry handling.",
+    "evidenceType": "documented change, not proof of root cause"
+  }
+}

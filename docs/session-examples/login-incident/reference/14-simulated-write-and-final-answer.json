@@ -1,0 +1,13 @@
+{
+  "status": "fictional successful branch only; no Jira ticket was created",
+  "backendDecision": "Assume configured policy allows the explicitly requested write",
+  "actionId": "demo-action-001",
+  "attempt": 1,
+  "simulatedToolResult": {
+    "issueKey": "DEMO-101",
+    "url": "https://example.org/jira/DEMO-101"
+  },
+  "finalAnswer": "In this fictional incident, login failures increased from 3,000/300,000 (1.0%) during 03:00\u201304:00Z to 23,400/300,000 (7.8%) during 04:00\u201305:00Z on November 8. The increase was concentrated in us-east-1 (1.0% to 35.0%). The supplied deployment time was 04:00Z. Release notes document a token-validation retry change, and DEMO-41 records a related hypothesis. These observations do not establish root cause. Evidence: [metrics](artifact://demo-login-metrics-001), [reported hypothesis](https://example.org/jira/DEMO-41), [release notes](https://example.org/drive/release-notes-1). Simulated ticket: [DEMO-101](https://example.org/jira/DEMO-101).",
+  "retryRule": "On an ambiguous timeout, reconcile by durable action identity before retrying; a local action ID alone does not make the remote create idempotent.",
+  "linkNote": "artifact:// is illustrative; implement an authorized viewer link."
+}

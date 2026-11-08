@@ -1,0 +1,91 @@
+{
+  "goal": "Investigate reported login failures around the auth-api release and prepare an evidence-backed Jira incident.",
+  "tasks": [
+    {
+      "ref": "t1",
+      "kind": "read",
+      "goal": "Measure the reported login-failure change.",
+      "dependsOn": [],
+      "instructions": [
+        "Use query_prometheus with a discovered datasource and environment-specific PromQL; preserve query, time bounds and warnings.",
+        "Query the supplied matched windows for auth-api in production.",
+        "Keep failed and total counts and metric definitions; compute rates only from returned data.",
+        "Capture available error-code and regional breakdowns with source references."
+      ],
+      "capabilities": [
+        "query_prometheus"
+      ]
+    },
+    {
+      "ref": "t2",
+      "kind": "read",
+      "goal": "Find related Jira evidence and possible duplicate incidents.",
+      "dependsOn": [],
+      "instructions": [
+        "Search DEMO for auth-api, the release ID and login-failure symptoms around the supplied windows.",
+        "Preserve issue IDs and links; label unverified reports and hypotheses.",
+        "Identify any matching existing incident before preparing another ticket."
+      ],
+      "capabilities": [
+        "searchJiraIssuesUsingJql"
+      ]
+    },
+    {
+      "ref": "t3",
+      "kind": "read",
+      "goal": "Read release notes for the exact deployed release.",
+      "dependsOn": [],
+      "instructions": [
+        "Search only the authorized release-notes scope for auth-api and auth-2026.11.08.1.",
+        "Use search_files, then read_file_content with a returned fileId; search snippets alone are not full release notes.",
+        "Record document ID/link/version, relevant excerpts and applicable release.",
+        "Do not treat an announced change as proof of root cause."
+      ],
+      "capabilities": [
+        "search_files",
+        "read_file_content"
+      ]
+    },
+    {
+      "ref": "t4",
+      "kind": "synthesize",
+      "goal": "Draft a short summary grounded in the retrieved evidence.",
+      "dependsOn": [
+        "t1",
+        "t2",
+        "t3"
+      ],
+      "instructions": [
+        "Connect observations to source references and time windows.",
+        "Separate measured changes, reported symptoms and candidate causes.",
+        "If reads fail or disagree, state the gaps and avoid unsupported causal conclusions."
+      ],
+      "capabilities": [
+        "none"
+      ]
+    },
+    {
+      "ref": "t5",
+      "kind": "prepare_write",
+      "goal": "Prepare the requested Jira incident for authorized execution.",
+      "dependsOn": [
+        "t4"
+      ],
+      "instructions": [
+        "Construct title and description from the supported summary and include evidence references.",
+        "Use project DEMO; keep unsupported severity, assignee and root-cause claims unspecified.",
+        "If a matching issue exists, surface it and the duplicate question.",
+        "Submit proposed parameters to the backend authorization/validation path; this planner call performs no write."
+      ],
+      "capabilities": [
+        "createJiraIssue"
+      ]
+    }
+  ],
+  "uncertainties": [
+    "No metrics, Jira issues or release notes have been retrieved yet.",
+    "The size of the failure spike and its cause are unverified.",
+    "The presence of an existing incident ticket is unknown."
+  ],
+  "nextAction": "Validate the plan and schedule the three independent read tasks."
+}

@@ -1,0 +1,14 @@
+{
+  "status": "ok",
+  "rows": [
+    {
+      "issueKey": "DEMO-41",
+      "issueType": "Bug",
+      "status": "Open",
+      "summary": "Investigate token-validation retry timeouts",
+      "descriptionText": "Possible timeout behavior; cause not confirmed.",
+      "url": "https://example.org/jira/DEMO-41"
+    }
+  ],
+  "text": "One fictional relevant issue; duplicate analysis is a separate step."
+}
