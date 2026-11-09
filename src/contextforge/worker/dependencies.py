@@ -127,7 +127,12 @@ class WorkerDependencies:
             return TranscriptWriter(self.blobs)
         if not settings.record_transcripts:
             return None
-        keys = (settings.serper_api_key, settings.langsmith_api_key, settings.dev_token)
+        keys = (
+            settings.serper_api_key,
+            settings.tavily_api_key,
+            settings.langsmith_api_key,
+            settings.dev_token,
+        )
         return TranscriptWriter(self.blobs, [k.get_secret_value() for k in keys if k is not None])
 
     @contextmanager

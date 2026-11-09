@@ -23,8 +23,10 @@ class Settings(BaseSettings):
     dev_user_id: str = "local-user"
     dev_token: SecretStr | None = None
     cors_origins: list[str] = ["http://localhost:5173"]
-    search_provider: Literal["duckduckgo", "serper"] = "duckduckgo"
+    search_provider: Literal["duckduckgo", "serper", "tavily"] = "duckduckgo"
     serper_api_key: SecretStr | None = Field(default=None, validation_alias="SERPER_API_KEY")
+    # Tavily search, and Tavily Extract as the fallback reader for pages our own fetch cannot read.
+    tavily_api_key: SecretStr | None = Field(default=None, validation_alias="TAVILY_API_KEY")
     # Overrides of the config/models.yaml stage models: the planner's for plan and cite, the
     # executor's for execute (compress keeps its own). Fallbacks are comma-separated model ids
     # that replace the stage's fallbacks; empty or unset keeps config/models.yaml's.

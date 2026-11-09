@@ -5,6 +5,7 @@ from typing import Any
 
 import boto3  # type: ignore[import-untyped]
 from botocore.config import Config  # type: ignore[import-untyped]
+from pydantic import SecretStr
 
 from contextforge.core.context.budgets import load_budgets
 from contextforge.core.entities.model_call import Stage
@@ -38,7 +39,8 @@ def build_worker(settings: Settings) -> WorkerDependencies:
         model = _bedrock_model(session, settings)
     web = PublicWebClient(
         provider=settings.search_provider,
-        api_key=settings.serper_api_key.get_secret_value() if settings.serper_api_key else None,
+        api_key=_secret(settings.serper_api_key),
+        tavily_api_key=_secret(settings.tavily_api_key),
         limit=settings.search_max_results,
         timeout=settings.web_timeout_seconds,
         max_bytes=settings.web_max_bytes,
@@ -65,6 +67,10 @@ def build_worker(settings: Settings) -> WorkerDependencies:
         routes=stage_routes(models, settings),
         settings=settings,
     )
+
+
+def _secret(value: SecretStr | None) -> str | None:
+    return value.get_secret_value() if value else None
 
 
 def stage_routes(models: ModelsConfig, settings: Settings) -> dict[Stage, ModelRoute]:

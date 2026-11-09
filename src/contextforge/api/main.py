@@ -359,7 +359,12 @@ def main() -> None:
     settings = Settings()
     secrets = tuple(
         value.get_secret_value()
-        for value in (settings.dev_token, settings.serper_api_key, settings.langsmith_api_key)
+        for value in (
+            settings.dev_token,
+            settings.serper_api_key,
+            settings.tavily_api_key,
+            settings.langsmith_api_key,
+        )
         if value is not None
     )
     configure_logging(settings.backend_log_path, secrets=secrets)
