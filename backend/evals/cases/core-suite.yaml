@@ -1,0 +1,75 @@
+# The core eval suite, machine-readable, for `python -m contextforge.evals.web_research suite run`.
+# web-research-* questions are copied verbatim from web-research-suite.md (the human-readable
+# source); their requiredParts come from each case's prompt and grading notes. The three
+# everyday cases are short questions a user would type. golden-001 is not here: it needs
+# uploaded spreadsheets and PDFs (phase 3), and the suite submits web-only requests.
+# Each requiredPart is one thing the judge marks answered, partial or missing.
+cases:
+  - id: everyday-us-india-markets
+    source: "everyday"
+    question: "Compare the US and Indian stock markets in 2026: performance, valuations, key drivers and outlook"
+    requiredParts:
+      - "US stock market performance in 2026 (major indices such as the S&P 500 or Nasdaq) with figures and dates"
+      - "Indian stock market performance in 2026 (Nifty 50 or Sensex) with figures and dates"
+      - "Valuations of both markets compared (for example price-to-earnings), with their dates"
+      - "Key drivers of each market (rates, earnings, flows, currency or policy)"
+      - "Outlook for both markets attributed to named sources, with caveats"
+  - id: everyday-ajmer-palanpur
+    source: "everyday"
+    question: "What is the weather like in Ajmer and Palanpur this week, how far apart are they, and which trains connect them?"
+    requiredParts:
+      - "This week's weather forecast for Ajmer"
+      - "This week's weather forecast for Palanpur"
+      - "Distance between Ajmer and Palanpur, with units and whether by road, rail or straight line"
+      - "Trains connecting Ajmer and Palanpur, by name or number, with timing or frequency"
+  - id: everyday-india-gdp-forecast
+    source: "everyday"
+    question: "What is India's GDP growth forecast for 2026 according to the IMF, World Bank and RBI, and why do they differ?"
+    requiredParts:
+      - "The IMF's India GDP growth forecast for 2026, with the publication it comes from and its date"
+      - "The World Bank's India GDP growth forecast for 2026, with the publication and its date"
+      - "The RBI's GDP growth projection, with the policy statement or report and its date"
+      - "The period each forecast covers (fiscal year versus calendar year) made explicit"
+      - "Why the forecasts differ: release timing, assumptions or methodology"
+  - id: web-research-002
+    source: "evals/cases/web-research-suite.md#web-research-002"
+    question: "Compare publicly documented deep research architectures from Anthropic, OpenAI, Perplexity, Google and open-source implementations as of the run date. Explain query decomposition, source discovery, page reading, evidence retention, adaptive replanning, parallelism, citation verification and final synthesis. Separate published implementation details from architectural guesses. Investigate failure modes: fabricated citations, true quotes attached to unsupported claims, repeated searches, conflicting sources, context overflow and interrupted execution. Propose an MVP using a Python backend, a chat UI and at most 50 search/fetch calls, then describe the evidence and evaluations needed before adding more agents. Include a comparison matrix and a failure/recovery walkthrough."
+    requiredParts:
+      - "Publicly documented deep research architectures of Anthropic, OpenAI, Perplexity, Google and open-source implementations compared"
+      - "Query decomposition, source discovery, page reading, evidence retention, adaptive replanning, parallelism, citation verification and final synthesis explained"
+      - "Published implementation details separated from architectural guesses, with unknown internals stated"
+      - "Failure modes investigated: fabricated citations, true quotes on unsupported claims, repeated searches, conflicting sources, context overflow and interrupted execution"
+      - "An MVP with a Python backend, a chat UI and at most 50 search/fetch calls, with a realistic budget allocation"
+      - "The evidence and evaluations needed before adding more agents, including verification that checks meaning, not only quote existence"
+      - "A comparison matrix and a failure/recovery walkthrough"
+  - id: web-research-004
+    source: "evals/cases/web-research-suite.md#web-research-004"
+    question: "Compare LangGraph, Temporal and AWS Step Functions for a research agent that runs for 5–20 minutes, executes independent web tasks in parallel, pauses for a clarification, and resumes after a worker crash. Use current official documentation and source code where useful. Work through duplicate queue delivery, retry after a paid model timeout, checkpoint compatibility, cancellation and a deployment during an active run. Compare operational burden and the published pricing units using an explicitly assumed workload; include model and search costs separately. Recommend one approach for a small AWS-based project and explain which failure guarantees still need application code and tests."
+    requiredParts:
+      - "LangGraph, Temporal and AWS Step Functions compared for a 5-20 minute research agent with parallel tasks, a clarification pause and crash resume, from official documentation"
+      - "A concrete walkthrough of duplicate queue delivery, retry after a paid model timeout, checkpoint compatibility, cancellation and a deployment during an active run"
+      - "The difference between durable orchestration and exactly-once external effects"
+      - "Operational burden of each option compared"
+      - "Published pricing units applied to an explicitly assumed workload, with model and search costs kept separate"
+      - "A recommendation for a small AWS-based project and the failure guarantees that still need application code and tests (a failure-injection plan)"
+  - id: web-research-005
+    source: "evals/cases/web-research-suite.md#web-research-005"
+    question: "Evaluate Serper, Brave Search API, Tavily, Exa and credential-free DuckDuckGo for a web research product as of the run date. Research discovery coverage, available snippets/full text, freshness controls, pricing units, rate limits, documented usage restrictions and provenance metadata. Separate a search API from a page extraction service. Design a bounded head-to-head evaluation for technical questions, regional Indian topics and current events; identify what cannot be judged without paid credentials or identical trials. Recommend a primary/fallback design that handles blocking, stale snippets, repeated domains and missing publication dates while staying within 50 combined search/fetch calls. Do not claim a provider wins on quality without measured evidence."
+    requiredParts:
+      - "Serper, Brave Search API, Tavily, Exa and DuckDuckGo compared on discovery coverage, snippets or full text and freshness controls"
+      - "Pricing units, rate limits, documented usage restrictions and provenance metadata from official documentation"
+      - "Search APIs separated from page extraction services"
+      - "A bounded head-to-head evaluation design for technical questions, regional Indian topics and current events, and what cannot be judged without paid credentials or identical trials"
+      - "A primary/fallback design handling blocking, stale snippets, repeated domains and missing publication dates within 50 combined search/fetch calls"
+      - "No provider declared the quality winner without measured evidence"
+  - id: web-research-009
+    source: "evals/cases/web-research-suite.md#web-research-009"
+    question: "Research the role of grid-scale battery storage in India's renewable integration as of the run date. Compare national policy with implementation evidence from Gujarat, Rajasthan and Karnataka. Distinguish installed, commissioned, contracted, tendered and announced capacity; keep MW and MWh separate. Examine project economics, operational use cases, grid constraints, procurement terms and environmental trade-offs using government, regulator, grid-operator and developer disclosures. Identify conflicting capacity estimates and reconcile their dates and definitions. Develop three explicitly assumed deployment scenarios and explain which conclusions can and cannot be drawn from publicly disclosed costs. Finish with a comparison table and a dated evidence-backed assessment."
+    requiredParts:
+      - "National policy on grid-scale battery storage for renewable integration in India"
+      - "Implementation evidence from Gujarat, Rajasthan and Karnataka"
+      - "Installed, commissioned, contracted, tendered and announced capacity distinguished, with MW and MWh kept separate"
+      - "Project economics, operational use cases, grid constraints, procurement terms and environmental trade-offs from government, regulator, grid-operator and developer disclosures"
+      - "Conflicting capacity estimates identified and reconciled by date and definition"
+      - "Three explicitly assumed deployment scenarios, and which conclusions public costs can and cannot support"
+      - "A comparison table and a dated, evidence-backed assessment"

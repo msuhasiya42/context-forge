@@ -105,6 +105,47 @@ run with complete matching annotations, no hard failure and a score of at least 
 `passed_with_supplied_reviews` (exit 0). This records supplied adjudication; it does not
 authenticate the reviewer's identity or independently certify factual truth.
 
+## Judged suite runs (offline LLM judge)
+
+`backend/evals/cases/core-suite.yaml` holds the core cases (`id`, `question`, `requiredParts`,
+`source`). The judge (`config/models.yaml` stage `judge`: DeepSeek v3.2, falling back to Mistral
+Large 3; neither serves a research stage) labels each claim `supported`, `partial`,
+`unsupported` or `contradicted` against its cited excerpt and the saved page text around it,
+marks each required part `answered`, `partial` or `missing`, and scores quantitative reasoning,
+synthesis and clarity 1-5. These map onto the rubric above; citations and provenance come from
+the structural checks. A judged run passes at 70 with no flag; an unsupported or contradicted
+claim raises `unsupported_material_claims`; judge errors on more than 20% of claims make the
+run `incomplete`. A human annotation for the same `bundleHash` wins for each field it sets.
+The judge never runs inside a user request.
+
+With the API running (as above), from `backend/`:
+
+```sh
+# Prints the estimate and submits nothing; add --yes to run.
+uv run --no-sync python -m contextforge.evals.web_research suite run \
+  --suite evals/cases/core-suite.yaml --repeats 3 --max-usd 6.00
+# Re-grade saved runs with the current judge (judge spend only).
+uv run --no-sync python -m contextforge.evals.web_research suite grade .data/evals/SUITE_RUN_ID
+# Regression gate: exit 1 when the mean drops over 3 points, pass^k drops or a new flag appears.
+uv run --no-sync python -m contextforge.evals.web_research suite compare \
+  .data/evals/BASELINE/scorecard.json .data/evals/CANDIDATE/scorecard.json --fail-on-drop 3
+```
+
+Each suite run writes `.data/evals/<suite-run-id>/runs/*.json` (bundle, case, grade, research
+cost, tokens and latency), `scorecard.json` and `scorecard.md`. pass@1 is the share of runs
+that pass; pass^k is the share of cases whose k repeats all pass. The suite stops submitting
+new runs once research plus judge spend reaches `--max-usd` (default 3.00), and the scorecard
+says so.
+
+Before trusting the judge, calibrate it against your own labels:
+
+```sh
+uv run --no-sync python -m contextforge.evals.web_research calibrate export .data/evals/SUITE_RUN_ID --n 20
+# Fill human_label in calibration.csv, then compare models (default: DeepSeek and Mistral):
+uv run --no-sync python -m contextforge.evals.web_research calibrate score \
+  .data/evals/SUITE_RUN_ID/calibration.csv
+```
+
 ## Current evidence and limits
 
 The full offline workflow is covered with a scripted model, real web-tool adapters over fake

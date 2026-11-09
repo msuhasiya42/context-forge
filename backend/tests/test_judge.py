@@ -14,6 +14,7 @@ from contextforge.core.settings import Settings
 from contextforge.core.values import Usage
 from contextforge.evals.judge import ClaimEvidence, judge_claims, judge_report
 from contextforge.evals.judge_client import judge_route, judge_session, shared_with_research
+from contextforge.evals.suite import load_suite
 from contextforge.evals.web_research import bundle_hash, grade_bundle
 from contextforge.infra.runtime import stage_routes
 from tests.helpers import REPO_ROOT, ByModel
@@ -162,7 +163,7 @@ def test_judged_grade_maps_weights_human_fields_win_and_errors_make_it_incomplet
     assert errored["judgeErrors"] == 1 and errored["status"] == "incomplete"
 
 
-def test_the_judge_never_grades_its_own_pipeline_and_records_its_cost() -> None:
+def test_the_judge_never_grades_its_own_pipeline_and_the_core_suite_is_well_formed() -> None:
     route = judge_route(MODELS)
     assert route == ModelRoute("deepseek.v3.2", ("mistral.mistral-large-3-675b-instruct",))
     assert MODELS.stages["judge"].max_tokens == 2000
@@ -173,6 +174,15 @@ def test_the_judge_never_grades_its_own_pipeline_and_records_its_cost() -> None:
     # An inference-profile id is the same model, so it is caught too.
     clash = ModelRoute("global.openai.gpt-oss-120b-1:0", ("deepseek.v3.2",))
     assert shared_with_research(clash, routes) == {"global.openai.gpt-oss-120b-1:0"}
+
+    cases = load_suite(REPO_ROOT / "evals" / "cases" / "core-suite.yaml")
+    ids = [case.id for case in cases]
+    assert len(ids) == len(set(ids)) >= 7
+    assert all(len(case.required_parts) >= 2 and case.question.strip() for case in cases)
+    suite_md = (REPO_ROOT / "evals" / "cases" / "web-research-suite.md").read_text()
+    for case in cases:
+        if case.id.startswith("web-research-"):
+            assert f"> {case.question}\n" in suite_md  # copied verbatim
 
     # The judge session records each call's cost at the judge model's price.
     session = judge_session(judge(claims_answer("supported")), MODELS)
