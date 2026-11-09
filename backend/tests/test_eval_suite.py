@@ -3,6 +3,8 @@ the scorecard compare gate; judge calibration; the no-live-call guard. No networ
 
 import csv
 import json
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -51,9 +53,9 @@ def _judged_runs(count: int, *, coverage: str = "answered") -> list[ModelRespons
     ]
 
 
-def _run(
-    tmp_path: Path, name: str, *, repeats: int, max_usd: float, judged: list
-) -> dict[str, Any]:
+@contextmanager
+def research_api(tmp_path: Path, name: str) -> Iterator[TestClient]:
+    """The real API in-process: scripted research whose one web read returns ``SOURCE``."""
     settings = Settings(
         _env_file=None,
         model_backend="scripted",
@@ -75,6 +77,13 @@ def _run(
         create_app(settings, worker_dependencies=worker_dependencies),
         headers={"Authorization": "Bearer local-test-token"},
     ) as client:
+        yield client
+
+
+def _run(
+    tmp_path: Path, name: str, *, repeats: int, max_usd: float, judged: list
+) -> dict[str, Any]:
+    with research_api(tmp_path, name) as client:
         return run_suite(
             [CASE],
             repeats=repeats,

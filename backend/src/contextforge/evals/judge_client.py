@@ -145,10 +145,16 @@ def judge_session(
     return JudgeSession(client=client, route=route, calls=calls, session_id=session_id)
 
 
-def estimate_judge_usd(models: ModelsConfig, runs: int) -> float:
+def estimate_judge_usd(
+    models: ModelsConfig,
+    runs: int,
+    *,
+    input_tokens_per_run: int = ESTIMATE_INPUT_TOKENS_PER_RUN,
+    output_tokens_per_run: int = ESTIMATE_OUTPUT_TOKENS_PER_RUN,
+) -> float:
     """The assumed judge spend for ``runs`` judged runs at the judge model's prices."""
     usage = Usage(
-        input_tokens=ESTIMATE_INPUT_TOKENS_PER_RUN * runs,
-        output_tokens=ESTIMATE_OUTPUT_TOKENS_PER_RUN * runs,
+        input_tokens=input_tokens_per_run * runs,
+        output_tokens=output_tokens_per_run * runs,
     )
     return cost_usd(models.prices, judge_route(models).primary, usage) or 0.0

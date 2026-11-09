@@ -73,34 +73,34 @@ class ReportVerdict(Entity):
     error: str | None = None
 
 
-class _Answer(BaseModel):
+class JudgeAnswer(BaseModel):
     """A judge answer as the model sends it: camelCase, extra keys ignored."""
 
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True, extra="ignore")
 
 
-class _ClaimJudgement(_Answer):
+class _ClaimJudgement(JudgeAnswer):
     id: str
     verdict: ClaimLabel
     reason: str = Field(description=f"At most {REASON_WORDS} words.")
 
 
-class _ClaimJudgements(_Answer):
+class _ClaimJudgements(JudgeAnswer):
     verdicts: list[_ClaimJudgement]
 
 
-class _PartJudgement(_Answer):
+class _PartJudgement(JudgeAnswer):
     part: int = Field(description="The required part's number.")
     status: PartLabel
     reason: str = Field(description=f"At most {REASON_WORDS} words.")
 
 
-class _Dimension(_Answer):
+class _Dimension(JudgeAnswer):
     score: int = Field(ge=1, le=5)
     reason: str = Field(description=f"At most {REASON_WORDS} words.")
 
 
-class _ReportJudgement(_Answer):
+class _ReportJudgement(JudgeAnswer):
     coverage: list[_PartJudgement]
     quantitative_reasoning: _Dimension
     synthesis: _Dimension
@@ -126,7 +126,7 @@ def judge_report(
         _expect_ids([str(p.part) for p in answer.coverage], len(required_parts), "part")
 
     try:
-        answer = _ask(
+        answer = ask_judge(
             model,
             REPORT_PROMPT,
             _report_input(question, required_parts, report_text),
@@ -135,7 +135,7 @@ def judge_report(
         )
     except (ModelError, ValueError) as exc:
         logger.warning("report judge failed: %s", type(exc).__name__)
-        return ReportVerdict(error=_failure(exc))
+        return ReportVerdict(error=failure_text(exc))
     statuses = {p.part: p for p in answer.coverage}
     return ReportVerdict(
         parts=[
@@ -155,10 +155,10 @@ def _judge_batch(batch: list[ClaimEvidence], model: ModelClient) -> list[ClaimVe
         _expect_ids([v.id for v in answer.verdicts], len(batch), "claim")
 
     try:
-        answer = _ask(model, CLAIMS_PROMPT, _claims_input(batch), _ClaimJudgements, check)
+        answer = ask_judge(model, CLAIMS_PROMPT, _claims_input(batch), _ClaimJudgements, check)
     except (ModelError, ValueError) as exc:
         logger.warning("claim judge failed for %d claims: %s", len(batch), type(exc).__name__)
-        reason = _failure(exc)
+        reason = failure_text(exc)
         return [
             ClaimVerdict(claim_id=c.claim_id, verdict=JUDGE_ERROR, reason=reason) for c in batch
         ]
@@ -173,7 +173,7 @@ def _judge_batch(batch: list[ClaimEvidence], model: ModelClient) -> list[ClaimVe
     ]
 
 
-def _ask[AnswerT: _Answer](
+def ask_judge[AnswerT: JudgeAnswer](
     model: ModelClient,
     prompt: str,
     user_text: str,
@@ -191,7 +191,7 @@ def _ask[AnswerT: _Answer](
     return _call(model, prompt, retry, answer_type, check)
 
 
-def _call[AnswerT: _Answer](
+def _call[AnswerT: JudgeAnswer](
     model: ModelClient,
     prompt: str,
     user_text: str,
@@ -215,7 +215,8 @@ def _call[AnswerT: _Answer](
 def _lenient(answer: dict[str, Any] | None) -> dict[str, Any]:
     """The slips open-weight models make with a result schema, fixed before validation: a list
     sent as a JSON string is decoded (DeepSeek v3.2 does this with the planner's tasks), labels
-    are lower-cased, and reasons are cut to ``REASON_WORDS`` words."""
+    are lower-cased, and reasons are cut to ``REASON_WORDS`` words, in list items, nested
+    objects and the answer itself."""
     if not isinstance(answer, dict):
         raise ValueError("the judge returned no structured answer")
     fixed = dict(answer)
@@ -229,7 +230,7 @@ def _lenient(answer: dict[str, Any] | None) -> dict[str, Any]:
             fixed[key] = [_fixed_item(item) for item in value]
         elif isinstance(value, dict):
             fixed[key] = _fixed_item(value)
-    return fixed
+    return dict(_fixed_item(fixed))
 
 
 def _fixed_item(item: Any) -> Any:
@@ -263,7 +264,7 @@ def _dimension(answer: _Dimension) -> DimensionScore:
     return DimensionScore(score=answer.score, reason=answer.reason)
 
 
-def _failure(exc: Exception) -> str:
+def failure_text(exc: Exception) -> str:
     detail = one_line(exc) if isinstance(exc, ValidationError) else str(exc)
     return f"{type(exc).__name__}: {detail}"[:300]
 
@@ -285,18 +286,23 @@ def _claims_input(batch: list[ClaimEvidence]) -> str:
     return f"<claims_data>\n{data}\n</claims_data>"
 
 
+def cut_report(report_text: str) -> str:
+    """The report, cut at ``REPORT_MAX_CHARS`` with the cut marked."""
+    if len(report_text) <= REPORT_MAX_CHARS:
+        return report_text
+    return report_text[:REPORT_MAX_CHARS] + "\n[report cut here for length]"
+
+
 def _report_input(question: str, required_parts: list[str], report_text: str) -> str:
-    report = report_text
-    if len(report) > REPORT_MAX_CHARS:
-        report = report[:REPORT_MAX_CHARS] + "\n[report cut here for length]"
-    parts = "\n".join(f"{n}. {_data(part)}" for n, part in enumerate(required_parts, 1))
+    report = cut_report(report_text)
+    parts = "\n".join(f"{n}. {untrusted(part)}" for n, part in enumerate(required_parts, 1))
     return (
-        f"<question>\n{_data(question)}\n</question>\n"
+        f"<question>\n{untrusted(question)}\n</question>\n"
         f"<required_parts>\n{parts}\n</required_parts>\n"
-        f"<report>\n{_data(report)}\n</report>"
+        f"<report>\n{untrusted(report)}\n</report>"
     )
 
 
-def _data(text: str) -> str:
+def untrusted(text: str) -> str:
     """``text`` unable to close its block or forge a tag."""
     return text.replace("<", "&lt;").replace(">", "&gt;")

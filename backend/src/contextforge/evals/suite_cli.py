@@ -89,7 +89,7 @@ def run_suite_command(args: argparse.Namespace) -> int:
         settings = Settings()
         card = regrade_suite(
             args.suite_dir,
-            _live_judge(settings, args.suite_dir / "judge-transcripts"),
+            live_judge(settings, args.suite_dir / "judge-transcripts"),
             settings.request_max_usd,
         )
         print((args.suite_dir / "scorecard.md").read_text(encoding="utf-8"))
@@ -114,8 +114,8 @@ def _run(args: argparse.Namespace) -> int:
     if not args.yes:
         print("Nothing was submitted. Add --yes to run it.")
         return EXIT_NOT_RUN
-    out_dir = args.out_dir or Path(".data/evals") / _suite_run_id()
-    judge = _live_judge(settings, out_dir / "judge-transcripts", max_usd=args.max_usd)
+    out_dir = args.out_dir or Path(".data/evals") / suite_run_id()
+    judge = live_judge(settings, out_dir / "judge-transcripts", max_usd=args.max_usd)
     print(f"Suite run files: {out_dir}", flush=True)
     with httpx.Client(base_url=args.base_url, headers=auth_headers(settings), timeout=30) as client:
         card = run_suite(
@@ -158,7 +158,7 @@ def _calibrate(args: argparse.Namespace) -> int:
     transcripts = args.csv.parent / "judge-transcripts"
     # Each model alone, without fallbacks, so its agreement is its own.
     judges = {
-        model_id: _live_judge(settings, transcripts, route=ModelRoute(model_id))
+        model_id: live_judge(settings, transcripts, route=ModelRoute(model_id))
         for model_id in model_ids
     }
     results = score_calibration(args.csv, judges)
@@ -169,7 +169,7 @@ def _calibrate(args: argparse.Namespace) -> int:
     return 0
 
 
-def _live_judge(
+def live_judge(
     settings: Settings,
     transcripts_dir: Path,
     *,
@@ -215,5 +215,5 @@ def _ids(text: str | None) -> list[str] | None:
     return [part.strip() for part in text.split(",") if part.strip()] if text else None
 
 
-def _suite_run_id() -> str:
+def suite_run_id() -> str:
     return f"{datetime.now(UTC):%Y%m%dT%H%M%SZ}-{uuid.uuid4().hex[:6]}"

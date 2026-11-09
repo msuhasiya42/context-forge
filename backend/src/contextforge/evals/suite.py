@@ -9,7 +9,7 @@ import json
 import statistics
 import time
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -25,11 +25,21 @@ from contextforge.evals.scoring import FLAGS
 from contextforge.evals.web_research import grade_bundle
 
 PASSED = "passed"
+BENCHMARK_METRICS = ("accuracy", "supportedAccuracy", "noAnswerRate")
 
 
-class SuiteCase(Entity):
+class EvalCase(Entity):
+    """What the runner needs of any case: an id and the question submitted to the API."""
+
     id: str
     question: str
+
+
+# Grades one run record in place: sets ``record["grade"]`` and ``record["judgeCostUsd"]``.
+RunGrader = Callable[[dict[str, Any]], None]
+
+
+class SuiteCase(EvalCase):
     required_parts: list[str] = Field(min_length=2)
     source: str
 
@@ -66,9 +76,46 @@ def run_suite(
     timeout_seconds: float = 960,
     emit: Callable[[str], None] = print,
 ) -> dict[str, Any]:
-    """Submit, watch, capture and judge each case ``repeats`` times, one run at a time; no new
-    run is submitted once research and judge spend reach ``max_usd``. Writes runs/*.json and
-    the scorecard; returns the scorecard."""
+    """Submit, watch, capture and judge each case ``repeats`` times (``run_cases``). Writes
+    runs/*.json and the scorecard; returns the scorecard."""
+    records, stopped = run_cases(
+        cases,
+        repeats=repeats,
+        client=client,
+        judge=judge,
+        grade=lambda record: _grade(record, judge, request_cap_usd),
+        out_dir=out_dir,
+        max_usd=max_usd,
+        poll_seconds=poll_seconds,
+        timeout_seconds=timeout_seconds,
+        emit=emit,
+    )
+    card = scorecard(
+        records,
+        cases=[case.id for case in cases],
+        repeats=repeats,
+        meta=run_meta(out_dir, max_usd, stopped, judge),
+    )
+    write_scorecard(out_dir, card)
+    return card
+
+
+def run_cases(
+    cases: Sequence[EvalCase],
+    *,
+    repeats: int,
+    client: httpx.Client,
+    judge: JudgeSession,
+    grade: RunGrader,
+    out_dir: Path,
+    max_usd: float,
+    poll_seconds: float = 2,
+    timeout_seconds: float = 960,
+    emit: Callable[[str], None] = print,
+) -> tuple[list[dict[str, Any]], str | None]:
+    """Each case ``repeats`` times, one run at a time: submitted, watched, captured, graded and
+    saved to runs/<run id>.json. No new run is submitted once research and judge spend reach
+    ``max_usd``. Returns the records and, when the cap stopped the runs, why."""
     records: list[dict[str, Any]] = []
     stopped = None
     planned = [(case, repeat) for case in cases for repeat in range(1, repeats + 1)]
@@ -82,56 +129,66 @@ def run_suite(
             emit(stopped)
             break
         emit(f"[{index + 1}/{len(planned)}] {case.id} repeat {repeat}")
-        record = _run_once(
+        record = run_once(
             case, repeat, client, out_dir, poll_seconds=poll_seconds, timeout=timeout_seconds
         )
-        _grade(record, judge, request_cap_usd)
+        grade(record)
         save_json(out_dir / "runs" / f"{record['runId']}.json", record)
         records.append(record)
         emit(f"  status={record['grade']['status']} score={record['grade'].get('qualityScore')}")
-    card = scorecard(
-        records,
-        cases=[case.id for case in cases],
-        repeats=repeats,
-        meta={
-            "suiteRunId": out_dir.name,
-            "maxUsd": max_usd,
-            "stoppedEarly": stopped,
-            "judgeRoute": [judge.route.primary, *judge.route.fallbacks],
-            "judgeCostUsd": round(judge.spent_usd(), 6),
-        },
-    )
-    write_scorecard(out_dir, card)
-    return card
+    return records, stopped
+
+
+def run_meta(
+    out_dir: Path, max_usd: float, stopped: str | None, judge: JudgeSession
+) -> dict[str, Any]:
+    """The scorecard fields that describe the run itself rather than its results."""
+    return {
+        "suiteRunId": out_dir.name,
+        "maxUsd": max_usd,
+        "stoppedEarly": stopped,
+        "judgeRoute": [judge.route.primary, *judge.route.fallbacks],
+        "judgeCostUsd": round(judge.spent_usd(), 6),
+    }
 
 
 def regrade_suite(suite_dir: Path, judge: JudgeSession, request_cap_usd: float) -> dict[str, Any]:
     """Grade the saved runs again with the current judge and rewrite the scorecard; no run is
     submitted."""
     previous = json.loads((suite_dir / "scorecard.json").read_text(encoding="utf-8"))
-    records = []
-    for path in sorted((suite_dir / "runs").glob("*.json")):
-        record = json.loads(path.read_text(encoding="utf-8"))
-        _grade(record, judge, request_cap_usd)
-        save_json(path, record)
-        records.append(record)
+    records = regrade_runs(suite_dir, lambda record: _grade(record, judge, request_cap_usd))
     card = scorecard(
         records,
         cases=list(previous["cases"]),
         repeats=previous["repeats"],
-        meta={
-            **{k: previous.get(k) for k in ("suiteRunId", "maxUsd", "stoppedEarly")},
-            "regradedAt": now_iso(),
-            "judgeRoute": [judge.route.primary, *judge.route.fallbacks],
-            "judgeCostUsd": round(judge.spent_usd(), 6),
-        },
+        meta=regrade_meta(previous, judge),
     )
     write_scorecard(suite_dir, card)
     return card
 
 
-def _run_once(
-    case: SuiteCase,
+def regrade_runs(suite_dir: Path, grade: RunGrader) -> list[dict[str, Any]]:
+    """Each saved run graded again and saved; returns the records."""
+    records = []
+    for path in sorted((suite_dir / "runs").glob("*.json")):
+        record = json.loads(path.read_text(encoding="utf-8"))
+        grade(record)
+        save_json(path, record)
+        records.append(record)
+    return records
+
+
+def regrade_meta(previous: dict[str, Any], judge: JudgeSession) -> dict[str, Any]:
+    return {
+        **{k: previous.get(k) for k in ("suiteRunId", "maxUsd", "stoppedEarly")},
+        "regradedAt": now_iso(),
+        "judgeRoute": [judge.route.primary, *judge.route.fallbacks],
+        "judgeCostUsd": round(judge.spent_usd(), 6),
+    }
+
+
+def run_once(
+    case: EvalCase,
     repeat: int,
     client: httpx.Client,
     out_dir: Path,
@@ -354,6 +411,12 @@ def compare_scorecards(
         f"{_delta(old['research']['meanCostUsd'], new['research']['meanCostUsd'])} |",
         "",
         f"Judge cost: {_delta(before.get('judgeCostUsd'), after.get('judgeCostUsd'))}.",
+    ]
+    # Benchmark scorecards (FRAMES) also carry answer accuracy; shown when both sides have it.
+    lines += [
+        f"{key}: {_delta(old[key], new[key])}."
+        for key in BENCHMARK_METRICS
+        if key in old and key in new
     ]
     if fail_on_drop is None:
         return "\n".join(lines) + "\n", []
