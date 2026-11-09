@@ -5,10 +5,8 @@ semantic support; an unannotated run never receives a research-quality pass.
 """
 
 import argparse
-import hashlib
 import json
 import math
-import re
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -17,22 +15,10 @@ import httpx
 from pydantic import ValidationError
 
 from contextforge.core.entities.message import ReportMessage, RequestMessage
+from contextforge.core.models.base import ModelClient
 from contextforge.core.settings import Settings
-
-WEIGHTS = {
-    "factual_support": 30,
-    "question_coverage": 20,
-    "citations_provenance": 15,
-    "quantitative_reasoning": 15,
-    "synthesis": 10,
-    "clarity": 10,
-}
-FLAGS = (
-    "fabricated_sources_or_quotes",
-    "unsupported_material_claims",
-    "injection_followed",
-    "unauthorized_writes",
-)
+from contextforge.evals.bundle import bundle_hash, normalized, snapshot_texts
+from contextforge.evals.scoring import FLAGS, WEIGHTS, judged_grade, judged_status
 
 
 def capture_run(
@@ -86,16 +72,17 @@ def capture_run(
     }
 
 
+def auth_headers(settings: Settings) -> dict[str, str]:
+    """The local API's bearer header when a dev token is set."""
+    if settings.dev_token is None:
+        return {}
+    return {"Authorization": f"Bearer {settings.dev_token.get_secret_value()}"}
+
+
 def _get(client: httpx.Client, path: str, **kwargs: Any) -> httpx.Response:
     response = client.get(path, **kwargs)
     response.raise_for_status()
     return response
-
-
-def bundle_hash(bundle: dict[str, Any]) -> str:
-    return hashlib.sha256(
-        json.dumps(bundle, sort_keys=True, ensure_ascii=False).encode()
-    ).hexdigest()
 
 
 def grade_bundle(
@@ -104,7 +91,11 @@ def grade_bundle(
     annotations: dict[str, Any] | None = None,
     *,
     max_usd: float = 0.25,
+    judge: ModelClient | None = None,
 ) -> dict[str, Any]:
+    """Structural checks, then quality from human ``annotations``; with ``judge``, the judge
+    produces the annotation and a supplied human annotation wins for each field it sets
+    (``evals.scoring``)."""
     checks = []
 
     def check(name: str, state: bool | None, detail: str) -> None:
@@ -149,12 +140,24 @@ def grade_bundle(
         None if cost is None else valid_cost and cost <= max_usd,
         f"Recorded estimate {cost}; cap {max_usd}; not verified billing.",
     )
-    errors = _evidence_errors(report, bundle.get("snapshots", {}))
+    errors = evidence_errors(report, bundle.get("snapshots", {}))
     check(
         "evidence_integrity",
         not errors,
-        "; ".join(errors) or "URLs and quoted excerpts match saved snapshots.",
+        "; ".join(f"{claim_id}: {problem}" for claim_id, problem in errors)
+        or "URLs and quoted excerpts match saved snapshots.",
     )
+    if judge is not None:
+        judged = judged_grade(
+            bundle, report, reference, annotations, judge=judge, evidence_errors=errors
+        )
+        return {
+            "caseId": reference["caseId"],
+            "bundleHash": bundle_hash(bundle),
+            "checks": checks,
+            "status": judged_status(checks, judged),
+            **judged,
+        }
     annotation_issues, score = _annotations(bundle, report, annotations)
     result = {
         "caseId": reference["caseId"],
@@ -194,25 +197,21 @@ def grade_bundle(
     return result
 
 
-def _evidence_errors(report: ReportMessage, snapshots: dict[str, Any]) -> list[str]:
+def evidence_errors(report: ReportMessage, snapshots: dict[str, Any]) -> list[tuple[str, str]]:
+    """``(claim id, problem)`` for each citation that fails the structural checks."""
     errors = []
     for claim in report.report.claims:
         if not claim.evidence_refs:
-            errors.append(f"{claim.claim_id}: no evidence")
+            errors.append((claim.claim_id, "no evidence"))
         for ref in claim.evidence_refs:
             url = urlsplit(ref.locator.value)
             if ref.locator.kind != "url" or url.scheme not in {"http", "https"} or not url.hostname:
-                errors.append(f"{claim.claim_id}: invalid web locator")
+                errors.append((claim.claim_id, "invalid web locator"))
                 continue
-            records = snapshots.get(ref.artifact_id, [])
-            texts = [
-                str(r.get("text", r.get("snippet", "")))
-                for r in records
-                if isinstance(r, dict) and r.get("url") == ref.locator.value
-            ]
-            excerpt = _normalized(ref.excerpt or "")
-            if len(excerpt) < 20 or not any(excerpt in _normalized(text) for text in texts):
-                errors.append(f"{claim.claim_id}: excerpt not found in its source snapshot")
+            texts = snapshot_texts(snapshots, ref.artifact_id, ref.locator.value)
+            excerpt = normalized(ref.excerpt or "")
+            if len(excerpt) < 20 or not any(excerpt in normalized(text) for text in texts):
+                errors.append((claim.claim_id, "excerpt not found in its source snapshot"))
     return errors
 
 
@@ -245,10 +244,6 @@ def _annotations(
     return issues, sum(scores.values()) if valid else None
 
 
-def _normalized(text: str) -> str:
-    return re.sub(r"\s+", " ", text).strip().casefold()
-
-
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -267,12 +262,7 @@ def main(argv: list[str] | None = None) -> int:
     grade.add_argument("--out", type=Path, required=True)
     args = parser.parse_args(argv)
     if args.command == "capture":
-        settings = Settings()
-        headers = (
-            {"Authorization": f"Bearer {settings.dev_token.get_secret_value()}"}
-            if settings.dev_token
-            else {}
-        )
+        headers = auth_headers(Settings())
         with httpx.Client(base_url=args.base_url, headers=headers, timeout=30) as client:
             output = capture_run(client, args.chat, args.request, args.case)
         code = 0

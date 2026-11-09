@@ -127,13 +127,7 @@ class WorkerDependencies:
             return TranscriptWriter(self.blobs)
         if not settings.record_transcripts:
             return None
-        keys = (
-            settings.serper_api_key,
-            settings.tavily_api_key,
-            settings.langsmith_api_key,
-            settings.dev_token,
-        )
-        return TranscriptWriter(self.blobs, [k.get_secret_value() for k in keys if k is not None])
+        return TranscriptWriter(self.blobs, secret_values(settings))
 
     @contextmanager
     def segment(self, chat_id: str, request_message_id: str) -> Iterator[None]:
@@ -184,3 +178,14 @@ class WorkerDependencies:
         ]
         latest = max(requests, key=lambda m: (m.created_at, m.message_id), default=None)
         self.repositories.chats.touch(user_id, chat_id, latest.status if latest else None)
+
+
+def secret_values(settings: Settings) -> list[str]:
+    """Every configured secret, for ``TranscriptWriter`` to redact from what it stores."""
+    keys = (
+        settings.serper_api_key,
+        settings.tavily_api_key,
+        settings.langsmith_api_key,
+        settings.dev_token,
+    )
+    return [k.get_secret_value() for k in keys if k is not None]

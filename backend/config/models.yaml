@@ -68,3 +68,11 @@ stages:
     fallbacks: ["global.amazon.nova-2-lite-v1:0"]
     effort: medium
     maxTokens: 4000
+  # The offline eval judge (src/contextforge/evals/judge.py), never called inside a user
+  # request. Neither model serves a research stage above, so no model grades its own pipeline
+  # (tests/test_judge.py checks it).
+  judge:
+    model: "deepseek.v3.2"
+    fallbacks: ["mistral.mistral-large-3-675b-instruct"]
+    effort: low
+    maxTokens: 2000

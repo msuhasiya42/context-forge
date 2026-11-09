@@ -15,13 +15,13 @@ from typing import Any
 import httpx
 
 from contextforge.core.settings import Settings
-from contextforge.evals.web_research import capture_run
+from contextforge.evals.web_research import auth_headers, capture_run
 
 BUILD = "web-research-v3"
 FINISHED = {"COMPLETED", "FAILED", "CANCELLED", "WAITING_USER"}
 
 
-def _save(path: Path, value: Any) -> None:
+def save_json(path: Path, value: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(value, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
@@ -55,7 +55,7 @@ def submit_run(
         "idempotencyKey": idempotency_key or str(uuid.uuid4()),
         "health": health,
     }
-    _save(out_dir / "run.json", metadata)
+    save_json(out_dir / "run.json", metadata)
     if chat_id is None:
         chat = _json(
             client.post(
@@ -64,7 +64,7 @@ def submit_run(
         )
         chat_id = chat["chatId"]
         metadata["chatId"] = chat_id
-        _save(out_dir / "run.json", metadata)
+        save_json(out_dir / "run.json", metadata)
     request = _json(
         client.post(
             f"/chats/{chat_id}/requests",
@@ -74,7 +74,7 @@ def submit_run(
     )
     request_id: str = request["messageId"]
     metadata["requestId"] = request_id
-    _save(out_dir / "run.json", metadata)
+    save_json(out_dir / "run.json", metadata)
     return chat_id, request_id
 
 
@@ -100,7 +100,7 @@ def watch_run(
     with (out_dir / "progress.jsonl").open("a", encoding="utf-8") as progress:
         while True:
             detail = _json(client.get(path))
-            _save(out_dir / "detail.json", detail)
+            save_json(out_dir / "detail.json", detail)
             status = detail["request"]["status"]
             event = {
                 "status": status,
@@ -125,24 +125,24 @@ def watch_run(
                 break
             time.sleep(poll_seconds)
     trace = _json(client.get(path + "/trace"))
-    _save(out_dir / "trace.json", trace)
+    save_json(out_dir / "trace.json", trace)
     if status not in FINISHED:
-        _save(out_dir / "result.json", {"status": "WATCH_TIMEOUT", "requestStatus": status})
+        save_json(out_dir / "result.json", {"status": "WATCH_TIMEOUT", "requestStatus": status})
         return 2
     try:
         bundle = capture_run(client, chat_id, request_id, case_id)
     except (httpx.HTTPError, ValueError) as exc:
-        _save(
+        save_json(
             out_dir / "result.json",
             {"status": status, "captureError": type(exc).__name__, "detail": str(exc)},
         )
         return 2 if status == "WAITING_USER" else 1
-    _save(out_dir / "bundle.json", bundle)
+    save_json(out_dir / "bundle.json", bundle)
     report = bundle["report"]
     text = "\n\n".join(bundle["deliverables"]) or report["content"]
     (out_dir / "report.md").write_text(text + "\n", encoding="utf-8")
     findings = len(report["report"]["claims"])
-    _save(out_dir / "result.json", {"status": status, "findings": findings})
+    save_json(out_dir / "result.json", {"status": status, "findings": findings})
     return 0 if status == "COMPLETED" and findings else 2 if status == "WAITING_USER" else 1
 
 
@@ -169,12 +169,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.poll_seconds <= 0 or args.timeout_seconds <= 0:
         parser.error("Polling interval and timeout must be positive.")
     out_dir = args.out_dir or Path(".data/runs") / str(uuid.uuid4())
-    settings = Settings()
-    headers = (
-        {"Authorization": f"Bearer {settings.dev_token.get_secret_value()}"}
-        if settings.dev_token
-        else {}
-    )
+    headers = auth_headers(Settings())
     print(f"Run files: {out_dir}", flush=True)
     try:
         with httpx.Client(base_url=args.base_url, headers=headers, timeout=30) as client:
@@ -203,7 +198,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Saved run files; exit={code}. A completed run still needs quality review.")
             return code
     except (httpx.HTTPError, ValueError) as exc:
-        _save(out_dir / "client-error.json", {"type": type(exc).__name__, "message": str(exc)})
+        save_json(out_dir / "client-error.json", {"type": type(exc).__name__, "message": str(exc)})
         print(f"API test stopped: {type(exc).__name__}: {exc}. See {out_dir} for saved progress.")
         return 1
     except KeyboardInterrupt:

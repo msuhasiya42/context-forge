@@ -27,16 +27,19 @@ from contextforge.worker.tools.sql_query import SqlQueryTool
 logger = logging.getLogger(__name__)
 
 
+def aws_session(settings: Settings) -> Any:
+    """The boto3 session for the configured profile (or the default chain) and region."""
+    if settings.aws_profile:
+        return boto3.Session(profile_name=settings.aws_profile, region_name=settings.aws_region)
+    return boto3.Session(region_name=settings.aws_region)
+
+
 def build_worker(settings: Settings) -> WorkerDependencies:
-    session = (
-        boto3.Session(profile_name=settings.aws_profile, region_name=settings.aws_region)
-        if settings.aws_profile
-        else boto3.Session(region_name=settings.aws_region)
-    )
+    session = aws_session(settings)
     repositories, blobs, queue = _persistence(session, settings)
     model: ModelClient = ScriptedModel({})
     if settings.model_backend == "bedrock":
-        model = _bedrock_model(session, settings)
+        model = bedrock_model(session, settings)
     web = PublicWebClient(
         provider=settings.search_provider,
         api_key=_secret(settings.serper_api_key),
@@ -114,7 +117,7 @@ def _persistence(session: Any, settings: Settings) -> tuple[Repositories, BlobSt
     )
 
 
-def _bedrock_model(session: Any, settings: Settings) -> BedrockModel:
+def bedrock_model(session: Any, settings: Settings) -> BedrockModel:
     """Bedrock with one client per read timeout. botocore's retries are off: BudgetedModel's
     bounded retry is the only one, so each attempt is admitted and recorded once."""
 
@@ -127,7 +130,8 @@ def _bedrock_model(session: Any, settings: Settings) -> BedrockModel:
     planner = client(settings.planner_timeout_seconds)
     return BedrockModel(
         client(settings.executor_timeout_seconds),
-        by_stage={Stage.PLAN: planner, Stage.CITE: planner},
+        # The offline judge reads long reports and page context, so it waits like the planner.
+        by_stage={Stage.PLAN: planner, Stage.CITE: planner, Stage.JUDGE: planner},
     )
 
 

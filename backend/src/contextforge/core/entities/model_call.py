@@ -21,6 +21,8 @@ class Stage(StrEnum):
     # artifact's items.
     SUMMARY = "summary"
     REPORT = "report"
+    # The offline eval judge (``evals.judge``); never called inside a user request.
+    JUDGE = "judge"
 
 
 # Facts about one call that have no field of their own (keys snake_case, values plain JSON):
