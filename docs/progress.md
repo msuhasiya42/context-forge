@@ -78,7 +78,7 @@ Not created on purpose: the stream-to-SQS Lambda and service roles (phase 11, CD
 
 ## Legacy files
 
-`bridge.py`, `build_template.py`, `test_bridge.py`, `verify_delivery.py` and `prototype.template.json` are an earlier, narrow DynamoDB-to-SQS event-delivery prototype using the old Job terminology. They are not the application and are not integrated. Keep them as reference until phase 10 deliberately replaces or removes them. `evidence/budget-created.jpg` records the $5 AWS usage alert.
+`docs/archive/prototype/` (`bridge.py`, `build_template.py`, `test_bridge.py`, `verify_delivery.py`, `prototype.template.json`; moved out of the repo root on 9 Nov 2026) holds an earlier, narrow DynamoDB-to-SQS event-delivery prototype using the old Job terminology. They are not the application and are not integrated. Keep them as reference until phase 10 deliberately replaces or removes them. `docs/archive/prototype/evidence/budget-created.jpg` records the $5 AWS usage alert.
 
 ## Rules for whoever picks this up
 

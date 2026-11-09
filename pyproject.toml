@@ -41,13 +41,10 @@ packages = ["src/contextforge"]
 [tool.ruff]
 line-length = 100
 # Python only. Markdown holds docs and verbatim prompts whose code blocks ruff would
-# reformat; the root-level .py files are pre-phase-1 AWS prototypes kept untouched.
+# reformat; docs/archive/prototype holds pre-phase-1 AWS prototypes kept untouched.
 extend-exclude = [
     "*.md",
-    "bridge.py",
-    "build_template.py",
-    "test_bridge.py",
-    "verify_delivery.py",
+    "docs/archive/",
 ]
 
 [tool.ruff.lint]
