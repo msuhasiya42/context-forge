@@ -261,12 +261,20 @@ def main(argv: list[str] | None = None) -> int:
     grade.add_argument("--annotations", type=Path)
     grade.add_argument("--out", type=Path, required=True)
     # Imported here: the suite modules import grade_bundle from this module.
+    from contextforge.evals.benchmarks.frames_cli import (
+        BENCH_COMMANDS,
+        add_bench_commands,
+        run_bench_command,
+    )
     from contextforge.evals.suite_cli import SUITE_COMMANDS, add_suite_commands, run_suite_command
 
     add_suite_commands(sub)
+    add_bench_commands(sub)
     args = parser.parse_args(argv)
     if args.command in SUITE_COMMANDS:
         return run_suite_command(args)
+    if args.command in BENCH_COMMANDS:
+        return run_bench_command(args)
     if args.command == "capture":
         headers = auth_headers(Settings())
         with httpx.Client(base_url=args.base_url, headers=headers, timeout=30) as client:
