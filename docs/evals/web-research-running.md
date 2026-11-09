@@ -146,6 +146,10 @@ uv run --no-sync python -m contextforge.evals.web_research calibrate score \
   .data/evals/SUITE_RUN_ID/calibration.csv
 ```
 
+## FRAMES benchmark
+
+A public multi-hop benchmark runs through the same suite runner: see [frames.md](frames.md).
+
 ## Current evidence and limits
 
 The full offline workflow is covered with a scripted model, real web-tool adapters over fake
