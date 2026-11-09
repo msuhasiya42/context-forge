@@ -337,6 +337,166 @@ def test_duckduckgo_searches_are_spaced_out_across_tasks():
     assert len(waits) == 2 and all(1.5 < wait <= 4.0 for wait in waits)
 
 
+TAVILY_KEY = "tvly-test-secret-key"  # a fake key: the tests assert it never leaks
+LONG_TEXT = "Python 3.13 ships a new interactive interpreter and an experimental JIT. " * 4
+
+
+def _no_key_leak(caplog: pytest.LogCaptureFixture, *messages: str) -> None:
+    assert caplog.records  # the failures were logged, by provider and status
+    assert all(TAVILY_KEY not in text for text in (caplog.text, *messages))
+
+
+def _slow_resolver(host: str) -> list[str]:
+    time.sleep(1)  # past the client's deadline, before the guard has cleared the host
+    return [PUBLIC_IP]
+
+
+def test_tavily_search_maps_hits_and_falls_back_in_order(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Tavily is a provider like Serper: Bearer key, basic depth, no answer or images; when
+    it fails (a server error, then its quota's 432), Serper takes over when keyed, else
+    DuckDuckGo. A malformed answer is one more failure, and the key is never logged."""
+    sent: list[httpx.Request] = []
+    tavily_answers: list[httpx.Response] = []
+    hits = [
+        {"title": "No url"},
+        "junk",
+        {"title": "T", "url": DOCS_URL, "content": " What's\nnew "},
+    ]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        sent.append(request)
+        if request.url.host == "api.tavily.com":
+            return tavily_answers.pop(0) if tavily_answers else httpx.Response(200, json={})
+        if request.url.host == "google.serper.dev":
+            return httpx.Response(200, json={"organic": [{"title": "S", "link": DOCS_URL}]})
+        return httpx.Response(200, text=_search_page((DOCS_URL, "D", "Changes.")))
+
+    tavily = _web(handler, provider="tavily", tavily_api_key=TAVILY_KEY, limit=3)
+    tavily_answers[:] = [httpx.Response(200, json={"results": hits})]
+    assert tavily.search("python") == [{"title": "T", "url": DOCS_URL, "snippet": "What's new"}]
+    request = sent[0]
+    assert request.url == "https://api.tavily.com/search"
+    assert request.headers["authorization"] == f"Bearer {TAVILY_KEY}"
+    assert json.loads(request.content) == {
+        "query": "python",
+        "search_depth": "basic",
+        "max_results": 3,
+        "include_answer": False,
+        "include_images": False,
+    }
+
+    keyed = _web(handler, provider="tavily", tavily_api_key=TAVILY_KEY, api_key="serper-key")
+    for fallback, web in (("google.serper.dev", keyed), ("html.duckduckgo.com", tavily)):
+        sent[:] = []
+        tavily_answers[:] = [httpx.Response(500), httpx.Response(432)]
+        assert [row["url"] for row in web.search("python")] == [DOCS_URL]
+        assert [request.url.host for request in sent] == ["api.tavily.com"] * 2 + [fallback]
+    assert "provider=tavily status=432" in caplog.text
+
+    # DuckDuckGo first, Tavily the first fallback; every provider failing raises the last error.
+    def all_down(request: httpx.Request) -> httpx.Response:
+        sent.append(request)
+        if request.url.host == "api.tavily.com":
+            return httpx.Response(200, text="not json")
+        return httpx.Response(503) if request.url.host == "google.serper.dev" else BOT_CHECK
+
+    sent[:] = []
+    both_keys = _web(all_down, tavily_api_key=TAVILY_KEY, api_key="serper-key")
+    with pytest.raises(httpx.HTTPStatusError) as failure:
+        both_keys.search("python")
+    hosts = [request.url.host for request in sent]
+    assert hosts == ["html.duckduckgo.com"] * 2 + ["api.tavily.com", "google.serper.dev"]
+    _no_key_leak(caplog, str(failure.value))
+
+
+def test_fetch_falls_back_to_tavily_extract_only_for_pages_it_may_read(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A blocked (403) or empty page is read through Tavily Extract when a key is set, saved
+    with its provenance and citable like any page. Without a key, for a 404, or for a URL the
+    guard or the task allowlist refused, Extract is never asked; when it fails the page's own
+    failure surfaces."""
+    sent: list[httpx.Request] = []
+    direct: list[httpx.Response] = []
+    extract_answer: list[httpx.Response] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        sent.append(request)
+        if request.url.host == "api.tavily.com":
+            return extract_answer[0]
+        return direct[0]
+
+    def extract_calls() -> list[httpx.Request]:
+        return [request for request in sent if request.url.host == "api.tavily.com"]
+
+    worker_dependencies = make_deps(ScriptedModel({}))
+    url = "https://blocked.example.org/report"
+    fetcher = _fetcher(_web(handler, tavily_api_key=TAVILY_KEY), worker_dependencies, url)
+    extracted = {"results": [{"url": url, "raw_content": f"Report\n\n  {LONG_TEXT}  \n"}]}
+    extract_answer[:] = [httpx.Response(200, json=extracted)]
+
+    for blocked in (httpx.Response(403), _page("<script>render()</script>")):
+        sent[:], direct[:] = [], [blocked]
+        result = fetcher.run({"url": url}, _ctx("f1"))
+        header_line, text = (result.text or "").split("\n", 1)
+        assert json.loads(header_line)["fetchPath"] == "tavily_extract"
+        assert text == f"Report\n{LONG_TEXT.strip()}"
+        (call,) = extract_calls()
+        assert call.headers["authorization"] == f"Bearer {TAVILY_KEY}"
+        assert json.loads(call.content) == {
+            "urls": [url],
+            "extract_depth": "basic",
+            "format": "text",
+        }
+    artifact = worker_dependencies.repositories.artifacts.get("c1", result.artifact_ids[0])
+    assert artifact is not None
+    snapshot = json.loads(worker_dependencies.blobs.get(artifact.storage_ref))
+    assert snapshot["fetchPath"] == "tavily_extract" and snapshot["requestedUrl"] == url
+    # The citation check reads the saved text, whichever path produced it.
+    request_state = create_initial_request_state(_request("research"))
+    excerpt = "ships a new interactive interpreter"
+    ref = {"artifactId": artifact.artifact_id, "locator": {"kind": "url", "value": url}}
+    request_state["facts"] = [{"text": excerpt, "evidence_refs": [{**ref, "excerpt": excerpt}]}]
+    assert check_citations(request_state, worker_dependencies)["facts"] == request_state["facts"]
+
+    # A readable page stays direct; a 404, a refused address or a URL outside the task's
+    # allowlist never reaches Extract; neither does any failure without a key.
+    sent[:], direct[:] = [], [_page(f"<p>{LONG_TEXT}</p>")]
+    page = fetcher.run({"url": url}, _ctx("f2"))
+    assert json.loads((page.text or "").split("\n")[0])["fetchPath"] == "direct"
+    direct[:] = [httpx.Response(404)]
+    assert _refused(fetcher.run({"url": url}, _ctx()), "http_status")
+    private = _web(handler, tavily_api_key=TAVILY_KEY, resolver=lambda host: ["10.0.0.5"])
+    assert _refused(
+        _fetcher(private, worker_dependencies, url).run({"url": url}, _ctx()), "url_refused"
+    )
+    slow_dns = _web(
+        handler,
+        tavily_api_key=TAVILY_KEY,
+        resolver=_slow_resolver,
+        deadline_seconds=0.2,
+    )
+    assert "deadline" in (
+        _fetcher(slow_dns, worker_dependencies, url).run({"url": url}, _ctx()).error or ""
+    )
+    other = "https://elsewhere.example/"
+    assert _refused(fetcher.run({"url": other}, _ctx()), "url_not_allowed")
+    direct[:] = [httpx.Response(403)]
+    assert _refused(
+        _fetcher(_web(handler), worker_dependencies, url).run({"url": url}, _ctx()), "http_status"
+    )
+    assert extract_calls() == []
+
+    # Extract failing too (its quota's 433): the page's own failure surfaces, key unlogged.
+    extract_answer[:] = [httpx.Response(433)]
+    failed = fetcher.run({"url": url}, _ctx())
+    assert _refused(failed, "http_status") and len(extract_calls()) == 1
+    assert "provider=tavily_extract status=433" in caplog.text
+    _no_key_leak(caplog, failed.error or "")
+
+
 def test_cite_keeps_only_facts_quoting_their_snapshot_by_url():
     page = (
         "<p>Python 3.13 ships a <b>new</b>\n   interactive interpreter.</p>"
