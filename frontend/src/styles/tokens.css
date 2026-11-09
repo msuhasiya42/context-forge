@@ -1,0 +1,73 @@
+/* Design tokens: the only place colours, spacing, type and radii are defined. */
+:root {
+  --color-bg: #f6f7f9;
+  --color-surface: #ffffff;
+  --color-surface-muted: #eef0f4;
+  --color-border: #d6dae2;
+  --color-text: #1b1f27;
+  --color-text-muted: #5b6474;
+  --color-accent: #2f5bd3;
+  --color-accent-hover: #2449ad;
+  --color-on-accent: #ffffff;
+  --color-selected: #dfe6fb;
+  --color-user-bubble: #dfe8ff;
+  --color-agent-bubble: #ffffff;
+  --color-danger: #b42318;
+  --color-danger-surface: #fdecea;
+  --color-on-danger: #ffffff;
+  --color-backdrop: rgb(15 18 25 / 45%);
+  --color-focus: #1f6feb;
+
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+
+  --font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  --font-family-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --font-size-sm: 0.8125rem;
+  --font-size-md: 0.9375rem;
+  --font-size-lg: 1.125rem;
+  --font-size-xl: 1.375rem;
+  --font-weight-medium: 500;
+  --font-weight-bold: 600;
+  --line-height: 1.5;
+
+  --radius-sm: 6px;
+  --radius-md: 12px;
+  --radius-pill: 999px;
+  --shadow-dialog: 0 12px 32px rgb(0 0 0 / 25%);
+  --icon-button-size: 32px;
+  --border: 1px solid var(--color-border);
+  --focus-outline: 2px solid var(--color-focus);
+
+  --sidebar-width: 280px;
+  --content-max-width: 760px;
+  --drawer-wide-width: 1040px;
+  /* A code pane scrolls beyond this height rather than pushing everything else away. */
+  --code-max-height: 24rem;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --color-bg: #12151b;
+    --color-surface: #1a1e26;
+    --color-surface-muted: #161a21;
+    --color-border: #2e3542;
+    --color-text: #e8ebf1;
+    --color-text-muted: #9aa3b4;
+    --color-accent: #6d8ff0;
+    --color-accent-hover: #87a3f5;
+    --color-on-accent: #0d1220;
+    --color-selected: #263257;
+    --color-user-bubble: #24314f;
+    --color-agent-bubble: #1f242e;
+    --color-danger: #ff8a7f;
+    --color-danger-surface: #3a1d1b;
+    --color-on-danger: #1a0b0a;
+    --color-backdrop: rgb(0 0 0 / 60%);
+    --color-focus: #8fb0ff;
+  }
+}

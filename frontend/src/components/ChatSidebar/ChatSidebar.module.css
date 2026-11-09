@@ -1,0 +1,132 @@
+.sidebar {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border-right: var(--border);
+  background: var(--color-surface-muted);
+}
+
+.header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-4);
+  border-bottom: var(--border);
+}
+
+.title {
+  flex: 1;
+  margin: 0;
+  font-size: var(--font-size-lg);
+}
+
+.errorSlot {
+  padding: var(--space-3) var(--space-4) 0;
+}
+
+.nav {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.list {
+  margin: 0;
+  padding: var(--space-2);
+  list-style: none;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding-right: var(--space-1);
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+}
+
+.row:hover {
+  background: var(--color-surface);
+}
+
+/* Weight and border mark the selection too, so it does not rely on colour alone. */
+.selected,
+.selected:hover {
+  border-color: var(--color-accent);
+  background: var(--color-selected);
+  font-weight: var(--font-weight-bold);
+}
+
+.item {
+  flex: 1;
+  min-width: 0;
+  padding: var(--space-3);
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  font-weight: inherit;
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+/* Row actions appear on hover or keyboard focus; touch screens always show them. */
+.rowActions {
+  display: flex;
+  flex-shrink: 0;
+  opacity: 0;
+}
+
+.row:hover .rowActions,
+.row:focus-within .rowActions {
+  opacity: 1;
+}
+
+@media (hover: none) {
+  .rowActions {
+    opacity: 1;
+  }
+}
+
+.renameField {
+  flex: 1;
+  min-width: 0;
+  padding: var(--space-1);
+}
+
+.renameInput {
+  width: 100%;
+  padding: var(--space-2);
+  border: var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface);
+}
+
+.renameInput[aria-invalid='true'] {
+  border-color: var(--color-danger);
+}
+
+.renameError {
+  margin: var(--space-1) 0 0;
+  color: var(--color-danger);
+  font-size: var(--font-size-sm);
+  font-weight: normal;
+}
+
+/* Narrow screens: the sidebar becomes a full-screen panel behind the toggle. */
+@media (max-width: 767px) {
+  .sidebar {
+    display: none;
+    position: fixed;
+    inset: 0;
+    z-index: 10;
+    border-right: none;
+  }
+
+  .open {
+    display: flex;
+  }
+}

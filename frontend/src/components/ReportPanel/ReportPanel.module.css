@@ -1,0 +1,23 @@
+.report {
+  line-height: var(--line-height);
+  overflow-wrap: anywhere;
+}
+
+.report h3 {
+  margin: 0 0 var(--space-3);
+  font-size: var(--font-size-xl);
+}
+
+.report h4 {
+  margin: var(--space-5) 0 var(--space-2);
+  font-size: var(--font-size-lg);
+}
+
+.report a {
+  color: var(--color-accent);
+}
+
+.report a:focus-visible {
+  outline: var(--focus-outline);
+  outline-offset: 2px;
+}
