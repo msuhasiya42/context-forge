@@ -14,7 +14,8 @@ from contextforge.core.entities import wire
 from contextforge.core.repositories.memory import Repositories
 from contextforge.core.storage import MemoryBlobStore
 
-FOLDER = Path("docs/session-examples/login-incident/reference")
+REPO_ROOT = Path(__file__).resolve().parents[2]  # scripts/ -> backend/ -> repo root
+FOLDER = REPO_ROOT / "docs/session-examples/login-incident/reference"
 ARTIFACT = "demo-login-metrics-001"
 
 

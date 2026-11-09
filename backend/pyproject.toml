@@ -2,7 +2,6 @@
 name = "contextforge"
 version = "0.1.0"
 description = "Research-agent engine for private financial documents."
-readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "pydantic>=2.9",
@@ -41,11 +40,8 @@ packages = ["src/contextforge"]
 [tool.ruff]
 line-length = 100
 # Python only. Markdown holds docs and verbatim prompts whose code blocks ruff would
-# reformat; docs/archive/prototype holds pre-phase-1 AWS prototypes kept untouched.
-extend-exclude = [
-    "*.md",
-    "docs/archive/",
-]
+# reformat.
+extend-exclude = ["*.md"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP"]

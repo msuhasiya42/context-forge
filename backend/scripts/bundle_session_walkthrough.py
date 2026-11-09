@@ -5,7 +5,8 @@ from pathlib import Path
 
 from scripts.session_narrative import narrated
 
-FOLDER = Path("docs/session-examples/login-incident")
+REPO_ROOT = Path(__file__).resolve().parents[2]  # scripts/ -> backend/ -> repo root
+FOLDER = REPO_ROOT / "docs/session-examples/login-incident"
 
 
 def read(name: str) -> dict:
