@@ -24,6 +24,7 @@ class Budgets:
     tool_result_row_cap: int
     facts_cap: int
     call_budget: int
+    refused_call_budget: int
     tasks_in_flight: int
     tool_calls_per_task: int
     task_retries: int
@@ -38,6 +39,10 @@ class Budgets:
     def __post_init__(self) -> None:
         if not 1 <= self.web_tool_call_budget <= 50:
             raise ValueError("webToolCallBudget must be between 1 and 50")
+        if self.refused_call_budget < 0:
+            raise ValueError(
+                f"refusedCallBudget must be at least 0, got {self.refused_call_budget}"
+            )
         for key, value in (
             ("researchRounds", self.research_rounds),
             ("tasksPerRound", self.tasks_per_round),
@@ -72,6 +77,7 @@ def load_budgets(path: Path = BUDGETS_PATH) -> Budgets:
         tool_result_row_cap=_int(raw, "toolResultRowCap"),
         facts_cap=_int(raw, "factsCap"),
         call_budget=_int(raw, "callBudget"),
+        refused_call_budget=_int(raw, "refusedCallBudget"),
         tasks_in_flight=_int(raw, "tasksInFlight"),
         tool_calls_per_task=_int(raw, "toolCallsPerTask"),
         task_retries=_int(raw, "taskRetries"),

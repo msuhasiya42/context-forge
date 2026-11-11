@@ -20,6 +20,7 @@ from contextforge.core.models.base import ModelRequest
 from contextforge.core.models.config import ModelRoute
 from contextforge.core.models.errors import (
     ModelAccessDenied,
+    ModelOverloaded,
     ModelRejected,
     ModelThrottled,
     ModelUnavailable,
@@ -179,7 +180,7 @@ def test_gemini_failures_route_or_raise_and_never_carry_the_key(
 
     cases: list[tuple[Handler, type[Exception]]] = [
         (answer(httpx.Response(429, json={"error": {"message": "Quota."}})), ModelThrottled),
-        (answer(httpx.Response(503, json=[{"error": {"message": "Busy."}}])), ModelUnavailable),
+        (answer(httpx.Response(503, json=[{"error": {"message": "Busy."}}])), ModelOverloaded),
         (answer(httpx.Response(404, text="not json")), ModelUnavailable),
         (answer(httpx.Response(403, json={"error": {"message": "Denied."}})), ModelAccessDenied),
         (answer(httpx.Response(400, json={"error": {"message": "Bad."}})), ModelRejected),

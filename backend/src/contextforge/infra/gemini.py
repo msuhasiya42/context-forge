@@ -31,6 +31,7 @@ from contextforge.core.models.base import (
 from contextforge.core.models.errors import (
     ModelAccessDenied,
     ModelError,
+    ModelOverloaded,
     ModelRejected,
     ModelThrottled,
     ModelUnavailable,
@@ -209,6 +210,8 @@ def http_error(response: httpx.Response) -> ModelError:
     detail = f"Gemini answered HTTP {status}: {_error_message(response)}"
     if status == 429:
         return ModelThrottled(detail)
+    if status == 503:
+        return ModelOverloaded(detail)
     if status == 404 or status >= 500:
         return ModelUnavailable(detail)
     if status in {401, 403}:

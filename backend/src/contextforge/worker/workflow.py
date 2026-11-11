@@ -42,6 +42,7 @@ from contextforge.worker.stages.plan import (
 )
 from contextforge.worker.stages.report import fail_request, write_report
 from contextforge.worker.stages.review import validate_research_findings
+from contextforge.worker.stages.round_budget import research_reserve
 
 logger = logging.getLogger(__name__)
 
@@ -291,7 +292,12 @@ def _execute_planned_tasks(
     worker_dependencies: WorkerDependencies,
 ) -> RequestState:
     """Execute the plan's unfinished entries in dependency waves, adding each outcome to
-    ``finished_task_outcomes``; a wave's facts join the request state before the next."""
+    ``finished_task_outcomes``; a wave's facts join the request state before the next.
+
+    Each wave runs with the calls the lead, cite and report still need kept from it
+    (``research_reserve`` over the facts found and the researchers yet to finish), so a
+    researcher that would use them ends instead, and the report is written from what research
+    found."""
     while len(finished_task_outcomes) < len(request_state["plan"]):
         check_not_cancelled(
             worker_dependencies, request_state["chat_id"], request_state["request_message_id"]
@@ -301,8 +307,13 @@ def _execute_planned_tasks(
             finished_task_outcomes,
             worker_dependencies.budgets.tasks_in_flight,
         )
+        reserve = research_reserve(
+            sum(len(outcome["facts"]) for outcome in finished_task_outcomes.values()),
+            len(request_state["plan"]) - len(finished_task_outcomes),
+        )
+        wave_state: RequestState = {**request_state, "call_reserve": reserve}
         futures = [
-            workflow_stages.execute_task(request_state, entry["task_id"]) for entry in ready_tasks
+            workflow_stages.execute_task(wave_state, entry["task_id"]) for entry in ready_tasks
         ]
         task_outcomes = [future.result() for future in futures]
         finished_task_outcomes.update((outcome["task_id"], outcome) for outcome in task_outcomes)

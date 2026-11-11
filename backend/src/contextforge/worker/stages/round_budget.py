@@ -4,7 +4,8 @@ A round is worth starting only if, after it, cite and report still have their ca
 and time: a round that starves cite withholds every web claim and leaves the answer worse
 than one round would. So the cost of a new round is estimated from what research so far
 actually used, never from a fixed guess, and the reserve for cite and report grows with the
-facts found so far plus those the new round may add.
+facts found so far plus those the new round may add. The same reserve (``research_reserve``)
+is kept from the researchers while they run: their calls may not use it (``BudgetedModel``).
 """
 
 import math
@@ -14,7 +15,9 @@ from dataclasses import dataclass
 
 from contextforge.core.entities.model_call import ModelCall
 from contextforge.core.entities.task import MAX_FACTS_PER_RESULT, Task, TaskKind
+from contextforge.core.models.recording import refused_before_generation
 from contextforge.core.state import RequestState
+from contextforge.worker.calls import calls_used
 from contextforge.worker.dependencies import WorkerDependencies
 from contextforge.worker.request_state import load_request
 from contextforge.worker.stages.execute import TaskOutcome
@@ -80,14 +83,18 @@ class RoundBudget:
         return ""
 
     def reserved_calls(self, researchers: int) -> int:
-        """The lead call, then cite over today's facts and the most the new researchers may
-        add, then the report's own calls."""
-        facts = self.facts + researchers * MAX_FACTS_PER_RESULT
-        return LEAD_CALLS + math.ceil(facts / CITE_BATCH_SIZE) + CALLS_AFTER_CITE
+        return research_reserve(self.facts, researchers)
 
     def _researcher_calls(self, kind: TaskKind) -> int:
         floor = self.web_researcher_calls if kind == TaskKind.WEB_SEARCH else 1
         return max(self.calls_per_task, floor)
+
+
+def research_reserve(facts: int, researchers: int) -> int:
+    """The calls kept for after research: the lead call, then cite over the ``facts`` found and
+    the most ``researchers`` still to finish may add, then the report's own calls."""
+    facts += researchers * MAX_FACTS_PER_RESULT
+    return LEAD_CALLS + math.ceil(facts / CITE_BATCH_SIZE) + CALLS_AFTER_CITE
 
 
 def observe_round_budget(
@@ -105,7 +112,10 @@ def observe_round_budget(
     calls = deps.repositories.model_calls.list_by_request(request_message_id)
     request = load_request(deps.repositories.messages, request_state["chat_id"], request_message_id)
     reserve_usd = settings.call_reserve_usd if settings else 0.0
-    per_task_calls = Counter(c.task_id for c in calls if c.task_id is not None)
+    # Attempts refused before generating spent none of the call budget.
+    per_task_calls = Counter(
+        c.task_id for c in calls if c.task_id is not None and not refused_before_generation(c)
+    )
     web_tasks = sum(1 for t in tasks if t.kind == TaskKind.WEB_SEARCH)
     web_cap = settings.web_tool_calls_per_task if settings else budgets.tool_calls_per_task
     usd_per_task, usd_outside = _observed_costs(calls, reserve_usd)
@@ -116,7 +126,7 @@ def observe_round_budget(
         elapsed = max(0.0, now - deps.segment_started.get(request_message_id, now))
         seconds_left = settings.request_deadline_seconds - elapsed
     return RoundBudget(
-        calls_left=budgets.call_budget - len(calls),
+        calls_left=budgets.call_budget - calls_used(calls),
         web_left=budgets.web_tool_call_budget - request.web_tool_calls,
         usd_left=settings.request_max_usd - _spent(calls, reserve_usd) if settings else None,
         seconds_left=seconds_left,

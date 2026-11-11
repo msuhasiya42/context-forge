@@ -27,6 +27,7 @@ def test_budgets_yaml_has_spec_values() -> None:
         "toolResultRowCap": 50,
         "factsCap": 30,
         "callBudget": 50,
+        "refusedCallBudget": 30,
         "webToolCallBudget": 50,
         "tasksInFlight": 5,
         "toolCallsPerTask": 6,
@@ -56,3 +57,9 @@ def test_models_yaml_has_price_version() -> None:
 def test_round_limits_must_be_at_least_one(key) -> None:
     with pytest.raises(ValueError, match="must be at least 1"):
         dataclasses.replace(load_budgets(), **{key: 0})
+
+
+def test_refused_call_budget_may_be_zero_but_not_negative() -> None:
+    assert dataclasses.replace(load_budgets(), refused_call_budget=0).refused_call_budget == 0
+    with pytest.raises(ValueError, match="refusedCallBudget must be at least 0"):
+        dataclasses.replace(load_budgets(), refused_call_budget=-1)

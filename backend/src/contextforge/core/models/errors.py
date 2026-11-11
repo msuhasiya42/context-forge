@@ -29,6 +29,11 @@ class ModelUnreachable(ModelUnavailable):
     endpoint), so the call was never sent: it used no tokens and costs nothing."""
 
 
+class ModelOverloaded(ModelUnavailable):
+    """The provider answered that it cannot serve the call now (HTTP 503, Bedrock's
+    ServiceUnavailableException): a refusal before generation, so it used no tokens."""
+
+
 class ModelThrottled(ModelError):
     """The provider refused the call for rate; a later attempt may succeed."""
 

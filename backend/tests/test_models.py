@@ -1,4 +1,5 @@
 # tests/test_models.py
+import dataclasses
 import json
 import threading
 import time
@@ -7,12 +8,13 @@ import pytest
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from contextforge.core.context.prompts import load_prompt, prompt_version
-from contextforge.core.entities.model_call import Stage
+from contextforge.core.entities.model_call import Outcome, Stage
 from contextforge.core.models.base import ModelClient, ModelRequest, ModelResponse, ToolSpec
 from contextforge.core.models.config import ModelRoute, load_models_config
 from contextforge.core.models.errors import (
     ModelAccessDenied,
     ModelError,
+    ModelOverloaded,
     ModelRejected,
     ModelThrottled,
     ModelTimeout,
@@ -254,6 +256,10 @@ def test_forty_calls_on_a_free_model_never_trip_the_spend_cap(monkeypatch) -> No
     throttled = ModelThrottled("429 RESOURCE_EXHAUSTED")
     model = ByModel({flash: [no_usage, throttled, throttled] * 20, lite: [no_usage] * 20})
     worker_dependencies = make_deps(model, call_budget=200)
+    # 40 throttles: over the default refused-call budget, which is not under test here.
+    worker_dependencies.budgets = dataclasses.replace(
+        worker_dependencies.budgets, refused_call_budget=50
+    )
     worker_dependencies.settings = Settings(
         _env_file=None, request_max_usd=0.25, call_reserve_usd=0.10, model_retries=1
     )
@@ -267,6 +273,51 @@ def test_forty_calls_on_a_free_model_never_trip_the_spend_cap(monkeypatch) -> No
     records = worker_dependencies.repositories.model_calls.list_by_request("m1")
     assert len(records) == 80 and {c.estimated_cost_usd for c in records} == {0.0}
     assert worker_dependencies.pending_calls["m1"] == []
+
+
+def test_throttled_attempts_spend_no_call_budget_but_stay_on_record() -> None:
+    """Live finding (Gemini free tier): 17 of a run's 50 calls were 429s that generated
+    nothing, and the researchers ran out of calls. Refused attempts are recorded at $0 with
+    zero usage and count only toward refusedCallBudget, so 20 throttles followed by 20
+    answers fit a call budget of 20."""
+    flash, lite = "gemini-3.5-flash", "gemini-3.5-flash-lite"
+    throttled = ModelThrottled("Gemini answered HTTP 429: exceeded your current quota")
+    model = ByModel({flash: [throttled] * 20, lite: [ModelResponse(text="ok")] * 21})
+    worker_dependencies = make_deps(model, call_budget=20)
+    worker_dependencies.routes = {Stage.EXECUTE: ModelRoute(flash, (lite,))}
+    request = ModelRequest(stage="execute", model=flash, system=[], messages=[])
+    for _ in range(20):
+        worker_dependencies.cooldown = ModelCooldown()  # flash first every call
+        assert worker_dependencies.model_for("m1").invoke(request).text == "ok"
+    records = worker_dependencies.repositories.model_calls.list_by_request("m1")
+    refused = [c for c in records if c.outcome == Outcome.ERROR]
+    assert len(records) == 40 and len(refused) == 20
+    assert all(c.usage == Usage(input_tokens=0, output_tokens=0) for c in refused)
+    assert all("429" in (c.failure_reason or "") for c in refused)
+    with pytest.raises(ModelError, match="^Request model-call budget exhausted\\.$"):
+        worker_dependencies.model_for("m1").invoke(request)
+
+
+def test_refused_call_budget_ends_a_provider_that_refuses_forever() -> None:
+    """Refusals cost no call budget, so their own limit is what stops the loop: each 503 is
+    admitted until refusedCallBudget of them are on record, and the next attempt is refused
+    before it is sent."""
+    overloaded = ModelOverloaded("Gemini answered HTTP 503: the model is overloaded")
+    model = ByModel({"gemini-3.5-flash": [overloaded] * 100})
+    worker_dependencies = make_deps(model, call_budget=50)
+    worker_dependencies.budgets = dataclasses.replace(
+        worker_dependencies.budgets, refused_call_budget=3
+    )
+    worker_dependencies.routes = {Stage.EXECUTE: ModelRoute("gemini-3.5-flash", ())}
+    request = ModelRequest(stage="execute", model="gemini-3.5-flash", system=[], messages=[])
+    for _ in range(3):
+        with pytest.raises(ModelOverloaded):
+            worker_dependencies.model_for("m1").invoke(request)
+    with pytest.raises(ModelError, match="^Request refused-call budget exhausted"):
+        worker_dependencies.model_for("m1").invoke(request)
+    assert len(model.sent) == 3
+    records = worker_dependencies.repositories.model_calls.list_by_request("m1")
+    assert [c.estimated_cost_usd for c in records] == [0.0, 0.0, 0.0]
 
 
 def test_a_throttled_call_that_falls_back_leaves_no_reserve_but_unknown_paid_usage_does(

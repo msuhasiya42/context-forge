@@ -171,3 +171,97 @@ def test_research_flow_preserves_partial_evidence_and_rejects_a_wrong_metric(tmp
     grade = grade_bundle(bundle, {"caseId": "web-research-001"})
     assert grade["status"] == "needs_review"
     assert all(c["status"] == "pass" for c in grade["checks"])
+
+
+class CutOffFixtureModel(ResearchFixtureModel):
+    """Three independent researchers: the first reads the page and returns, the other two
+    only ever reply in prose, so they spend calls until the call reserve stops them."""
+
+    def invoke(self, request: ModelRequest) -> ModelResponse:
+        if request.stage == "plan":
+            self.calls.append(request)
+            tasks = [
+                {
+                    "kind": "web_search",
+                    "inputArtifactIds": [],
+                    "ref": f"t{i}",
+                    "goal": goal,
+                    "dependsOn": [],
+                }
+                for i, goal in enumerate(
+                    ["Read https://example.org/report", "Find LangGraph", "Find CrewAI"], 1
+                )
+            ]
+            return ModelResponse(
+                structured={
+                    "kind": "plan",
+                    "goal": "Compare the frameworks.",
+                    "question": [],
+                    "tasks": tasks,
+                    "nextAction": "Research each.",
+                }
+            )
+        first = next((r.task_id for r in self.calls if r.stage == "execute"), request.task_id)
+        if request.stage == "execute" and request.task_id != first:
+            self.calls.append(request)
+            return ModelResponse(text="Still researching.")
+        return super().invoke(request)
+
+
+def test_researchers_cut_off_at_the_call_reserve_still_get_a_report() -> None:
+    """Live finding: researchers spent all 50 calls, so cite and report had none and a request
+    with one good finding ended FAILED. Researchers now stop where the calls cite and report
+    need begin (round_budget.research_reserve): the two that never finish are cut off, and the
+    report is written from the one that did."""
+    model = CutOffFixtureModel()
+    call_budget = 14
+    worker_dependencies = make_deps(
+        model,
+        call_budget=call_budget,
+        tasks_in_flight=1,
+        settings=Settings(
+            _env_file=None,
+            model_backend="scripted",
+            call_reserve_usd=0.001,
+            request_max_usd=0.25,
+        ),
+    )
+    req = seed_chat_with_dataset(worker_dependencies, chat_id="c1", user_id="u1", dataset_id="a2")
+    worker_dependencies.tools.update(
+        web_tools(
+            _web(lambda _: _page(f"<p>{SOURCE}</p>")),
+            worker_dependencies.repositories,
+            worker_dependencies.blobs,
+        )
+    )
+    worker_dependencies.repositories.messages.update_request_status(
+        "c1", req.message_id, "ACCEPTED", "RUNNING"
+    )
+    result = build_research_workflow(worker_dependencies, None).invoke(
+        {"chat_id": "c1", "message_id": req.message_id},
+        {"configurable": {"thread_id": req.message_id}},
+    )
+
+    assert result["status"] == "COMPLETED"
+    tasks = worker_dependencies.repositories.tasks.list_by_request(req.message_id)
+    assert sorted(t.status for t in tasks) == ["COMPLETED", "FAILED", "FAILED"]
+    assert all(
+        "reserved for cite and report" in (t.failure_reason or "")
+        for t in tasks
+        if t.status == "FAILED"
+    )
+    # Each cut-off researcher's last call could only return its result.
+    for task in tasks:
+        if task.status == "FAILED":
+            last = [r for r in model.calls if r.task_id == task.task_id][-1]
+            assert not last.tools
+    stages = [r.stage for r in model.calls]
+    assert "cite" in stages and "report" in stages and "summary" in stages
+    assert len(model.calls) <= call_budget
+    report = next(
+        m
+        for m in worker_dependencies.repositories.messages.list_by_chat("c1")
+        if m.kind == "report"
+    )
+    assert [c.text for c in report.report.claims] == [SOURCE]
+    assert "Find LangGraph" in report.content and "Find CrewAI" in report.content

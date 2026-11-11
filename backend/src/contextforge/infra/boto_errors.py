@@ -17,6 +17,7 @@ from botocore.exceptions import (  # type: ignore[import-untyped]
 from contextforge.core.models.errors import (
     ModelAccessDenied,
     ModelError,
+    ModelOverloaded,
     ModelThrottled,
     ModelTimeout,
     ModelUnavailable,
@@ -24,7 +25,8 @@ from contextforge.core.models.errors import (
 )
 
 _THROTTLED = {"ThrottlingException", "TooManyRequestsException"}
-_UNAVAILABLE = {"ServiceUnavailableException", "InternalServerException", "ModelNotReadyException"}
+# Refused before generating (HTTP 503); InternalServerException may come mid-generation.
+_OVERLOADED = {"ServiceUnavailableException", "ModelNotReadyException"}
 # Never retried: the request, the model id or the account's access has to change first.
 _FIX_FIRST = {
     "ValidationException": "the request does not match what the model accepts",
@@ -67,7 +69,9 @@ def _client_error(exc: ClientError) -> ModelError:
         return ModelThrottled(detail)
     if code == "ModelTimeoutException":
         return ModelTimeout(detail)
-    if code in _UNAVAILABLE or status >= 500:
+    if code in _OVERLOADED:
+        return ModelOverloaded(detail)
+    if code == "InternalServerException" or status >= 500:
         return ModelUnavailable(detail)
     if code == "AccessDeniedException":
         return ModelAccessDenied(f"{detail} ({_FIX_FIRST[code]})")

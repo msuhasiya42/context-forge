@@ -11,6 +11,7 @@ from contextforge.core.models.base import ModelClient, ModelRequest, ModelRespon
 from contextforge.core.models.errors import (
     ModelAccessDenied,
     ModelError,
+    ModelOverloaded,
     ModelThrottled,
     ModelTimeout,
     ModelUnreachable,
@@ -24,9 +25,10 @@ PriceTable = Mapping[str, Mapping[str, float]]
 # The usage of a call that never reached the provider: known, and zero.
 _NOT_SENT = Usage(input_tokens=0, output_tokens=0)
 # Failures the provider raises before it generates anything: no connection was made, the call
-# was throttled (429), or the account may not invoke the model. Such an attempt used no tokens,
-# so a fallback that follows it does not leave a reserve charged behind.
-_NEVER_GENERATED = (ModelUnreachable, ModelThrottled, ModelAccessDenied)
+# was throttled (429) or refused as overloaded (503), or the account may not invoke the model.
+# Such an attempt used no tokens, so a fallback that follows it does not leave a reserve charged
+# behind, and it does not count toward the request's call budget (``refused_before_generation``).
+_NEVER_GENERATED = (ModelUnreachable, ModelOverloaded, ModelThrottled, ModelAccessDenied)
 
 
 def price_row(prices: PriceTable, model: str) -> Mapping[str, float] | None:
@@ -48,6 +50,12 @@ def cost_usd(prices: PriceTable, model: str, usage: Usage | None) -> float | Non
         + (usage.cache_write_tokens or 0) * row.get("cacheWritePerMTok", row["inputPerMTok"])
     )
     return per_million / 1_000_000
+
+
+def refused_before_generation(call: ModelCall) -> bool:
+    """Whether ``call`` is an attempt the provider refused before generating: recorded as an
+    error with zero usage, which only a ``_NEVER_GENERATED`` failure is."""
+    return call.outcome == Outcome.ERROR and call.usage == _NOT_SENT
 
 
 def is_free(prices: PriceTable, model: str) -> bool:
@@ -89,7 +97,8 @@ class RecordingModelClient:
     recomputed later; a call whose usage is unknown (a timeout, an error) or whose model has no
     price is charged ``unknown_cost_usd``, since unknown is never zero for a paid model. A
     zero-priced model costs nothing whatever its usage. A call the provider refused before
-    generating (unreachable, throttled, access denied) used no tokens, so it is charged nothing.
+    generating (unreachable, overloaded, throttled, access denied) used no tokens, so it is charged
+    nothing.
     ``model`` is recorded as ``<provider>/<model id>`` (spec 3.5); ``provider`` is a name or,
     for a client over several providers, a function of the model id. With ``transcripts``, each
     record also gets its call's transcript (the exact request and the response or error).

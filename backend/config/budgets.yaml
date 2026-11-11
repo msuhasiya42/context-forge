@@ -10,8 +10,11 @@ toolResultRowCap: 50
 columnCap: 20
 cellCharCap: 200
 
-# Run limits.
+# Run limits. callBudget counts the model calls that reached a model; attempts the provider
+# refused before generating (429, 503, access denied, unreachable) count only toward
+# refusedCallBudget, so a provider that refuses forever still ends the request.
 callBudget: 50
+refusedCallBudget: 30
 # Search and fetch combined across the request, including failed attempts and resumes.
 webToolCallBudget: 50
 tasksInFlight: 5

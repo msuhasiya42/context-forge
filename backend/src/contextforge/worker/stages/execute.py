@@ -62,6 +62,7 @@ from contextforge.core.repositories.base import StaleStatusError
 from contextforge.core.state import Conclusion, Fact, RequestState, TaskState
 from contextforge.core.tools.base import Tool, ToolContext, ToolResult
 from contextforge.core.values import LocatorKind
+from contextforge.worker.calls import calls_used
 from contextforge.worker.dependencies import WorkerDependencies
 from contextforge.worker.request_state import load_request
 from contextforge.worker.stages.errors import one_line
@@ -89,6 +90,7 @@ NO_FACTS = (
     "it again with facts that cite it, or say in uncertainties why none could be supported"
 )
 TOOL_BUDGET_EXHAUSTED = "tool call budget exhausted"
+CALL_RESERVE_REACHED = "request model calls reserved for cite and report"
 NO_PROGRESS = "no progress"
 DEPENDENCY_FAILED = "dependency failed"
 ALREADY_DONE = "[already done] "
@@ -197,7 +199,8 @@ def call_model(
     The loop messages are compacted first when they overrun their budget, and a compacted
     transcript replaces the one in state. ``Cancelled`` propagates; a failed call (the compress
     call included), which an exhausted budget or a passed deadline is, ends the run as
-    ``error``.
+    ``error``. The call before the request's call reserve (``call_reserve``) is the attempt's
+    last: it may only return the result, so the researcher hands back what it has.
     """
     check_not_cancelled(
         worker_dependencies, task_state["chat_id"], task_state["request_message_id"]
@@ -209,10 +212,14 @@ def call_model(
         task_state, worker_dependencies
     ):
         stop = "request web-tool budget exhausted"
+    keep_calls = task_context.request_state.get("call_reserve", 0)
+    if _last_call_before_reserve(task_state["request_message_id"], keep_calls, worker_dependencies):
+        stop = CALL_RESERVE_REACHED
     try:
         model = worker_dependencies.model_for(
             task_state["request_message_id"],
             memory_version=task_context.request_state["memory"]["version"],
+            keep_calls=keep_calls,
         )
         # F7 ruling 1: the call that ends an attempt offers no tools, so return_result is the
         # only tool left and the adapter forces it; the task returns what it has gathered.
@@ -680,6 +687,8 @@ def _stop_note(stop: str, task_state: TaskState, budgets: Budgets) -> str:
         return f"stopped at the shared request web-tool budget; {read}"
     if stop == TOOL_BUDGET_EXHAUSTED:
         return f"stopped at the tool-call budget; {read}"
+    if stop == CALL_RESERVE_REACHED:
+        return f"stopped to leave the request's last model calls to cite and report; {read}"
     return f"stopped after {budgets.no_progress_turns} turns without progress; {read}"
 
 
@@ -848,6 +857,19 @@ def _invoke_tool(
     except Exception as exc:  # a failing tool is a result the model sees, not a crashed task
         logger.warning("tool %s raised: %s", call.name, exc)
         return ToolResult(status="error", error=str(exc), error_class="system", retryable=True)
+
+
+def _last_call_before_reserve(
+    request_message_id: str, keep_calls: int, worker_dependencies: WorkerDependencies
+) -> bool:
+    """Whether the next call is the last ``BudgetedModel`` admits before the ``keep_calls``
+    reserved for after research; calls other researchers have in flight count as made."""
+    if keep_calls <= 0:
+        return False
+    records = worker_dependencies.repositories.model_calls.list_by_request(request_message_id)
+    used = calls_used(records)
+    in_flight = len(worker_dependencies.pending_calls.get(request_message_id, []))
+    return used + in_flight + 1 + keep_calls >= worker_dependencies.budgets.call_budget
 
 
 def _web_budget_spent(task_state: TaskState, worker_dependencies: WorkerDependencies) -> bool:

@@ -78,12 +78,19 @@ class WorkerDependencies:
         return route.primary if route is not None else "scripted"
 
     def model_for(
-        self, request_message_id: str, *, memory_version: str | None = None
+        self,
+        request_message_id: str,
+        *,
+        memory_version: str | None = None,
+        keep_calls: int = 0,
     ) -> ModelClient:
         """The model client for one request. A call goes to its stage's fallbacks while its model
         is down (``worker.routing``). Every attempt is admitted against the request's call budget
         (with settings, also its spend cap and deadline), retried when transient, and saved as a
         ModelCall priced from its usage, with its transcript unless settings turn transcripts off.
+        An attempt refused before generating counts toward ``budgets.refused_call_budget``, not
+        the call budget. ``keep_calls`` of the call budget are left unused (a researcher leaves
+        them to the lead, cite and report).
 
         The deadline counts from the start of the request's current segment, never from the
         request's creation (A-C1), so time spent waiting on the user is not counted.
@@ -111,6 +118,8 @@ class WorkerDependencies:
             self.repositories.model_calls,
             request_message_id,
             call_budget=self.budgets.call_budget,
+            refused_call_budget=self.budgets.refused_call_budget,
+            keep_calls=keep_calls,
             max_usd=settings.request_max_usd if settings else math.inf,
             reserve_usd=settings.call_reserve_usd if settings else 0.0,
             prices=self.prices,

@@ -80,6 +80,9 @@ class RequestState(TypedDict):
     assumptions: NotRequired[list[str]]
     verification: NotRequired[dict[str, Any]]
     memory: MemorySnapshot
+    # Model calls a research task may not use: kept for the lead, cite and report
+    # (``round_budget.research_reserve``). Set by the workflow for each wave of researchers.
+    call_reserve: NotRequired[int]
 
 
 class TaskState(TypedDict):
