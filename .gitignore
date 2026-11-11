@@ -19,3 +19,7 @@ backend/backend.log*
 node_modules/
 frontend/dist/
 .env.local
+
+# Understand-Anything knowledge graph output
+.ua/
+.understand-anything/
