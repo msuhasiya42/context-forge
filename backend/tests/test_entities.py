@@ -2,6 +2,7 @@
 import pytest
 from pydantic import ValidationError
 
+from contextforge.core.entities import wire
 from contextforge.core.entities.message import ActionResponseMessage, MessageAdapter, RequestMessage
 from contextforge.core.entities.task import Task, TaskKind, validate_structured_data
 from contextforge.core.entities.user import User
@@ -102,7 +103,8 @@ def test_ulids_sort_by_creation() -> None:
 
 
 def test_a_task_record_from_before_researcher_specs_still_loads() -> None:
-    # F16: the spec fields are new; a stored Task without them reads with empty defaults.
+    # F16: the spec fields, round and searches are new; a stored Task without them reads with
+    # defaults, and the wire form (the SSE task event) carries the round.
     task = Task.model_validate(
         {
             "taskId": "t1",
@@ -122,3 +124,4 @@ def test_a_task_record_from_before_researcher_specs_still_loads() -> None:
         "",
         "",
     )
+    assert task.round == 1 and task.searches == [] and wire(task)["round"] == 1

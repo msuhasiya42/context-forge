@@ -88,6 +88,7 @@ export function parseMessage(value: unknown): Message {
     status: readStatus(record, kind),
     failureReason: readOptionalString(record, 'failureReason'),
     deliverableArtifactIds: kind === 'report' ? readDeliverables(record) : undefined,
+    brief: kind === 'request' ? readOptionalString(record, 'brief') : undefined,
   };
 }
 
@@ -98,7 +99,16 @@ export function parseTask(value: unknown): RequestTask {
     kind: readString(record, 'kind'),
     goal: readString(record, 'goal'),
     status: readString(record, 'status'),
+    round: readOptionalRound(record),
   };
+}
+
+/** A task's round; absent on a task stored before research rounds existed. */
+function readOptionalRound(record: JsonRecord): number | undefined {
+  const value = record.round;
+  if (isAbsent(value)) return undefined;
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < 1) throw invalidResponse();
+  return value;
 }
 
 function readItems(value: unknown): unknown[] {

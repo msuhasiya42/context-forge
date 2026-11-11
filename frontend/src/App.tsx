@@ -25,6 +25,10 @@ export function App({ client, pollIntervalMs = DEFAULT_POLL_INTERVAL_MS }: AppPr
   const app = useChatApp(client, pollIntervalMs);
   const sidebar = useSidebarOverlay();
   const { activeChat, messages } = app;
+  const latestRequest =
+    messages.state.status === 'success'
+      ? messages.state.data.filter((m) => m.kind === 'request').at(-1)
+      : undefined;
 
   return (
     <div className={styles.layout}>
@@ -64,16 +68,8 @@ export function App({ client, pollIntervalMs = DEFAULT_POLL_INTERVAL_MS }: AppPr
         }
       >
         <MemoryPanel client={client} />
-        <RequestControls
-          client={client}
-          request={
-            messages.state.status === 'success'
-              ? messages.state.data.filter((m) => m.kind === 'request').at(-1)
-              : undefined
-          }
-          onUpdate={messages.upsert}
-        />
-        <PlanTasks tasks={messages.planTasks} />
+        <RequestControls client={client} request={latestRequest} onUpdate={messages.upsert} />
+        <PlanTasks brief={latestRequest?.brief} tasks={messages.planTasks} />
         {messages.activity && <p role="status">{messages.activity}</p>}
         <PaneContent
           client={client}

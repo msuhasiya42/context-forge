@@ -267,6 +267,55 @@ def test_restart_after_crash_mid_task_completes(tmp_path) -> None:
     assert worker_dependencies.repositories.tasks.get(req.message_id, executes[0]).attempt == 1
 
 
+def test_restart_mid_round_two_reruns_neither_round_one_nor_its_lead_review(tmp_path) -> None:
+    # F16: every lead review is a checkpointed task, so a resumed run restores round 1's
+    # researcher and the review that started round 2 instead of calling them again.
+    db = tmp_path / "ckpt.sqlite"
+    plan = {**six_task_plan(), "tasks": six_task_plan()["tasks"][:1]}  # t1 alone
+    follow_up = {**six_task_plan()["tasks"][2], "ref": "f1", "objective": "Recurring merchants."}
+    script = {
+        "plan": [ModelResponse(structured=plan)],
+        "execute": [ModelResponse(structured=t1_result())] * 2,
+        "lead": [
+            ModelResponse(
+                structured={"action": "run_subagents", "reason": "gap", "tasks": [follow_up]}
+            ),
+            ModelResponse(structured={"action": "complete_task", "reason": "enough"}),
+        ],
+    }
+    worker_dependencies = make_deps(ScriptedModel(script), tasks_in_flight=1, research_rounds=3)
+    req = seed_chat_with_dataset(worker_dependencies, chat_id="c1", user_id="u1", dataset_id="a2")
+    executes = []
+
+    def crash_in_round_two(request):
+        if request.stage == "execute":
+            executes.append(request.task_id)
+            if len(executes) == 2:  # the process dies while the round-2 researcher runs
+                raise RuntimeError("crash")
+
+    worker_dependencies.model.on_request = crash_in_round_two  # type: ignore[attr-defined]
+    try:
+        RequestRunner(worker_dependencies, _saver(db)).start("c1", req.message_id)
+    except RuntimeError:
+        pass
+    worker_dependencies.model.on_request = None  # type: ignore[attr-defined]
+    worker_dependencies.repositories.messages.update_request_status(
+        "c1", req.message_id, "RUNNING", "ACCEPTED"
+    )
+    out = RequestRunner(worker_dependencies, _saver(db)).start("c1", req.message_id)
+    assert out.started and out.status == "COMPLETED"
+    calls = worker_dependencies.repositories.model_calls.list_by_request(req.message_id)
+    stages = [c.stage for c in calls]
+    # plan, round 1, review 1, round 2 (the crashed call is on record, then its retry),
+    # review 2, report summary
+    assert stages.count("plan") == 1 and stages.count("lead") == 2
+    first, second = worker_dependencies.repositories.tasks.list_by_request(req.message_id)
+    assert [c.task_id for c in calls if c.stage == "execute"] == [first.task_id] + [
+        second.task_id
+    ] * 2
+    assert (first.round, first.attempt) == (1, 1) and (second.round, second.attempt) == (2, 2)
+
+
 def test_pending_interrupt_carries_next_action(tmp_path) -> None:
     db = tmp_path / "ckpt.sqlite"
     worker_dependencies = make_deps(

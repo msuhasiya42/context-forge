@@ -55,9 +55,11 @@ def build_trace(records: TraceRecords) -> dict[str, Any]:
     def summaries(calls: list[ModelCall]) -> list[dict[str, Any]]:
         return [call_summary(c, tool_calls.get(c.model_call_id, [])) for c in calls]
 
-    # Outside a task the model is called by the planner and, once, for the report's summary.
-    report_calls = [c for c in by_task[None] if c.stage != Stage.PLAN]
-    by_task[None] = [c for c in by_task[None] if c.stage == Stage.PLAN]
+    # Outside a task the model is called by the planner, the lead between rounds and, once,
+    # for the report's summary.
+    lead_stages = (Stage.PLAN, Stage.LEAD)
+    report_calls = [c for c in by_task[None] if c.stage not in lead_stages]
+    by_task[None] = [c for c in by_task[None] if c.stage in lead_stages]
 
     request = records.request
     report = next((m for m in records.entries if isinstance(m, ReportMessage)), None)

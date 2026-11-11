@@ -21,6 +21,8 @@ class Stage(StrEnum):
     # artifact's items.
     SUMMARY = "summary"
     REPORT = "report"
+    # The lead researcher's review between research rounds (F16).
+    LEAD = "lead"
     # The offline eval judge (``evals.judge``); never called inside a user request.
     JUDGE = "judge"
 

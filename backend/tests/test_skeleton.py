@@ -31,7 +31,9 @@ def test_budgets_yaml_has_spec_values() -> None:
         "noProgressTurns": 3,
         "columnCap": 20,
         "cellCharCap": 200,
+        "researchRounds": 3,
         "tasksPerRound": 5,
+        "tasksPerRequest": 12,
     }
 
 

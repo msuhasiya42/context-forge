@@ -82,10 +82,14 @@ def _secret(value: SecretStr | None) -> str | None:
 
 def stage_routes(models: ModelsConfig, settings: Settings) -> dict[Stage, ModelRoute]:
     """config/models.yaml's model and fallbacks per stage, with the settings' overrides: the
-    planner's apply to plan and cite, the executor's to execute."""
+    planner's apply to plan, lead and cite, the executor's to execute."""
     routes = {Stage(name): stage.route for name, stage in models.stages.items()}
     overrides = (
-        ((Stage.PLAN, Stage.CITE), settings.planner_model, settings.planner_fallbacks),
+        (
+            (Stage.PLAN, Stage.LEAD, Stage.CITE),
+            settings.planner_model,
+            settings.planner_fallbacks,
+        ),
         ((Stage.EXECUTE,), settings.executor_model, settings.executor_fallbacks),
     )
     for stages, model, fallbacks in overrides:
@@ -135,7 +139,12 @@ def bedrock_model(session: Any, settings: Settings) -> BedrockModel:
     return BedrockModel(
         client(settings.executor_timeout_seconds),
         # The offline judge reads long reports and page context, so it waits like the planner.
-        by_stage={Stage.PLAN: planner, Stage.CITE: planner, Stage.JUDGE: planner},
+        by_stage={
+            Stage.PLAN: planner,
+            Stage.LEAD: planner,
+            Stage.CITE: planner,
+            Stage.JUDGE: planner,
+        },
     )
 
 

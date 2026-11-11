@@ -1,4 +1,5 @@
-"""The request workflow (LangGraph Functional API): plan, gate, task waves, cite, report.
+"""The request workflow (LangGraph Functional API): plan, then research rounds (gate, task
+waves, lead review), then cite and report.
 
 On resume the entrypoint re-runs from its first line and every finished task's result is
 restored by name and call order. So every model call and repository write lives in a task,
@@ -31,6 +32,7 @@ from contextforge.worker.stages.citation_checks import (
 )
 from contextforge.worker.stages.execute import TaskOutcome, execute_task
 from contextforge.worker.stages.guards import Cancelled, check_not_cancelled
+from contextforge.worker.stages.lead import LeadReview, lead_review
 from contextforge.worker.stages.plan import (
     PlanFailed,
     PlanResult,
@@ -53,6 +55,7 @@ class _WorkflowStages:
     create_plan: Callable[..., Future[PlanResult]]
     validate_and_save_tasks: Callable[..., Future[list[PlanEntry]]]
     execute_task: Callable[..., Future[TaskOutcome]]
+    lead_review: Callable[..., Future[LeadReview]]
     validate_findings: Callable[..., Future[CitationCheckResult]]
     write_report: Callable[..., Future[str]]
     fail_request: Callable[..., Future[None]]
@@ -72,6 +75,9 @@ class _WorkflowStages:
             ),
             execute_task=_as_task(
                 "execute", partial(execute_task, worker_dependencies=worker_dependencies)
+            ),
+            lead_review=_as_task(
+                "lead", partial(lead_review, worker_dependencies=worker_dependencies)
             ),
             validate_findings=_as_task(
                 "cite", partial(validate_research_findings, worker_dependencies=worker_dependencies)
@@ -134,7 +140,7 @@ def _run_research_request(
     workflow_stages: _WorkflowStages,
     worker_dependencies: WorkerDependencies,
 ) -> str:
-    """Plan, run the waves, cite and report; the request's final status."""
+    """Plan, run the research rounds, cite and report; the request's final status."""
     request_state = workflow_stages.load_request_state(
         inputs["chat_id"], inputs["message_id"]
     ).result()
@@ -144,7 +150,7 @@ def _run_research_request(
     except PlanFailed as failed:
         workflow_stages.fail_request(request_state, failed.reason).result()
         return RequestStatus.FAILED.value
-    request_state, task_outcomes = _execute_planned_tasks(
+    request_state, task_outcomes = _research_rounds(
         request_state, workflow_stages, worker_dependencies
     )
     # The request state is a bounded context aid; task results are the complete factual record.
@@ -225,6 +231,8 @@ def _with_plan(request_state: RequestState, planned: PlanResult) -> RequestState
         "period": period,
         "assumptions": [*request_state.get("assumptions", []), *assumed],
         "goal": planned["goal"],
+        # A plan checkpointed before F16 has no brief.
+        "brief": planned.get("brief", ""),
         "open_questions": [*request_state["open_questions"], *new_questions],
         "next_action": planned["next_action"],
     }
@@ -235,14 +243,50 @@ def _unique(items: Iterable[str]) -> list[str]:
     return list(dict.fromkeys(items))
 
 
-def _execute_planned_tasks(
+def _research_rounds(
     request_state: RequestState,
     workflow_stages: _WorkflowStages,
     worker_dependencies: WorkerDependencies,
 ) -> tuple[RequestState, list[TaskOutcome]]:
-    """Execute the plan in dependency waves; a wave's facts join the request state before the
-    next."""
-    finished_task_outcomes: dict[str, TaskOutcome] = {}
+    """Run the plan's researchers, then, while rounds remain, let the lead review every
+    finding so far and gate and run the researchers it starts. Ends when the lead completes
+    (its review also completes when a task or budget cap leaves no room) or after
+    ``budgets.research_rounds`` rounds; with 1 the lead is never called. Returns every round's
+    outcomes."""
+    finished: dict[str, TaskOutcome] = {}
+    research_round = 1
+    while True:
+        request_state = _execute_planned_tasks(
+            request_state, finished, workflow_stages, worker_dependencies
+        )
+        if research_round >= worker_dependencies.budgets.research_rounds:
+            return request_state, list(finished.values())
+        review = workflow_stages.lead_review(
+            request_state, list(finished.values()), research_round
+        ).result()
+        if review["brief"]:
+            request_state = {**request_state, "brief": review["brief"]}
+        if review["action"] == "complete_task":
+            return request_state, list(finished.values())
+        research_round += 1
+        try:
+            entries = workflow_stages.validate_and_save_tasks(
+                request_state, review, research_round=research_round
+            ).result()
+        except PlanFailed as rejected:  # the report is written from the rounds already run
+            logger.warning("round %d rejected by the gate: %s", research_round, rejected.reason)
+            return request_state, list(finished.values())
+        request_state = {**request_state, "plan": [*request_state["plan"], *entries]}
+
+
+def _execute_planned_tasks(
+    request_state: RequestState,
+    finished_task_outcomes: dict[str, TaskOutcome],
+    workflow_stages: _WorkflowStages,
+    worker_dependencies: WorkerDependencies,
+) -> RequestState:
+    """Execute the plan's unfinished entries in dependency waves, adding each outcome to
+    ``finished_task_outcomes``; a wave's facts join the request state before the next."""
     while len(finished_task_outcomes) < len(request_state["plan"]):
         check_not_cancelled(
             worker_dependencies, request_state["chat_id"], request_state["request_message_id"]
@@ -260,7 +304,7 @@ def _execute_planned_tasks(
         request_state = _update_request_state_with_results(
             request_state, task_outcomes, worker_dependencies.budgets.facts_cap
         )
-    return request_state, list(finished_task_outcomes.values())
+    return request_state
 
 
 def _find_ready_tasks(

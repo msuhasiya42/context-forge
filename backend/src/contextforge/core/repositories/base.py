@@ -3,8 +3,8 @@
 Repositories store and return entity objects, never dicts. ``save`` is an upsert keyed by the
 entity's id. ``update_status`` methods are conditional writes: they apply only when the stored
 status equals ``expected`` and raise ``StaleStatusError`` otherwise, so a stale worker cannot
-overwrite a newer state. Optional ``result`` and ``failure_reason`` arguments change the stored
-field only when given. Updating a record that does not exist raises ``LookupError``.
+overwrite a newer state. Optional ``result``, ``failure_reason`` and ``searches`` arguments change
+the stored field only when given. Updating a record that does not exist raises ``LookupError``.
 """
 
 from typing import Protocol
@@ -94,6 +94,7 @@ class TaskRepository(Protocol):
         *,
         result: TaskResult | None = None,
         failure_reason: str | None = None,
+        searches: list[str] | None = None,
     ) -> Task: ...
 
 

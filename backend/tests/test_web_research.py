@@ -1114,3 +1114,6 @@ def test_a_result_without_facts_after_reading_sources_is_returned_once_for_facts
         if m.kind == "report"
     )
     assert [c.text for c in report.report.claims] == ["adds an experimental free-threaded build"]
+    # F16: the query is kept on the Task, so a follow-up researcher never repeats it.
+    tasks = worker_dependencies.repositories.tasks.list_by_request(report.request_message_id)
+    assert ["python 3.13"] in [task.searches for task in tasks]

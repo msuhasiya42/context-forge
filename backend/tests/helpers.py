@@ -44,11 +44,14 @@ def make_deps(
     *,
     call_budget: int | None = None,
     tasks_in_flight: int | None = None,
+    research_rounds: int = 1,
     settings: Settings | None = None,
 ) -> WorkerDependencies:
     """In-memory worker dependencies over ``model``, with configured budgets and model routes,
     and the real ``sql_query`` tool over the same repositories and blob store. ``settings``
-    turns on the production call path: spend reservation, call admission and the deadline."""
+    turns on the production call path: spend reservation, call admission and the deadline.
+    One research round by default, the flow before the lead loop (F16): a test of the loop
+    asks for more."""
     models = load_models_config(REPO_ROOT / "config" / "models.yaml")
     repositories = Repositories.in_memory()
     blobs = MemoryBlobStore()
@@ -56,7 +59,11 @@ def make_deps(
         repositories=repositories,
         blobs=blobs,
         model=model,
-        budgets=_budgets(call_budget=call_budget, tasks_in_flight=tasks_in_flight),
+        budgets=_budgets(
+            call_budget=call_budget,
+            tasks_in_flight=tasks_in_flight,
+            research_rounds=research_rounds,
+        ),
         tools={"sql_query": SqlQueryTool(repositories.artifacts, blobs)},
         queue=InProcessQueue(),
         price_version=models.price_version,

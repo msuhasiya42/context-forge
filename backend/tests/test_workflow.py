@@ -2,6 +2,7 @@
 import dataclasses
 import threading
 
+import pytest
 from langchain_core.messages import AIMessage, SystemMessage, ToolMessage
 
 from contextforge.core.entities.message import ReportMessage
@@ -853,6 +854,15 @@ def test_the_lead_brief_is_kept_and_each_researcher_gets_its_full_spec() -> None
     plan_call = next(r for r in requests if r.stage == "plan")
     # the configured round ceiling is stated; the attribution comment is never sent
     assert "up to 5 researchers" in plan_call.system[-1] and "<!--" not in plan_call.system[-1]
+    # One research round (the default here) is the flow before the lead loop: no lead call.
+    stages = [
+        c.stage
+        for c in worker_dependencies.repositories.model_calls.list_by_request(req.message_id)
+    ]
+    assert stages == ["plan", "execute", "summary"]
+    assert [a["text"] for _, a in worker_dependencies.activity.since(req.message_id, 0)] == [
+        "Brief written"
+    ]
     execute_text = next(r for r in requests if r.stage == "execute").messages[0].content
     for line in (
         "Task goal: Transfers between own accounts.",
@@ -862,3 +872,134 @@ def test_the_lead_brief_is_kept_and_each_researcher_gets_its_full_spec() -> None
         "Boundaries: Transfers only; card bills are out of scope.",
     ):
         assert line in execute_text
+
+
+def _one_fact_result(index: int) -> dict:
+    """``t1_result`` keeping only its fact ``index``: each round finds a different fact."""
+    result = t1_result()
+    return {**result, "facts": [result["facts"][index]], "evidenceRefs": []}
+
+
+def _follow_up(ref: str, objective: str) -> dict:
+    return {
+        "ref": ref,
+        "kind": "sql_analysis",
+        "goal": "Card bill settlements.",
+        "objective": objective,
+        "outputFormat": "Row pairs with amounts.",
+        "toolsAndSources": "sql_query over a2.",
+        "boundaries": "Settlements only; transfers are done.",
+        "inputArtifactIds": ["a2"],
+    }
+
+
+def _lead(action: str, reason: str, tasks: list | None = None) -> ModelResponse:
+    return ModelResponse(
+        structured={"action": action, "reason": reason, "brief": None, "tasks": tasks or []}
+    )
+
+
+def _run(worker_dependencies: WorkerDependencies, req) -> str:
+    _start(worker_dependencies, req)
+    return build_research_workflow(worker_dependencies, checkpointer=None).invoke(
+        {"chat_id": "c1", "message_id": req.message_id}, _cfg(req)
+    )["status"]
+
+
+def test_the_lead_starts_a_second_round_and_the_report_covers_both() -> None:
+    # Lead review after round 1: one follow-up repeats t1's objective (dropped in code), the
+    # other runs in round 2; the review after round 2 completes. Cite and report see both.
+    duplicate = _follow_up("f1", "LIST each transfer pair, so spending can exclude it!")
+    new = _follow_up("f2", "Find the card bill settlement pairs.")
+    worker_dependencies = make_deps(
+        ScriptedModel(
+            {
+                "plan": [ModelResponse(structured=_briefed_plan())],
+                "execute": [
+                    ModelResponse(structured=_one_fact_result(0)),
+                    ModelResponse(structured=_one_fact_result(1)),
+                ],
+                "lead": [
+                    _lead("run_subagents", "Settlements are not covered.", [duplicate, new]),
+                    _lead("complete_task", "Transfers and settlements are both found."),
+                ],
+            }
+        ),
+        research_rounds=3,
+    )
+    requests: list[ModelRequest] = []
+    worker_dependencies.model.on_request = requests.append  # type: ignore[attr-defined]
+    req = seed_chat_with_dataset(worker_dependencies, chat_id="c1", user_id="u1", dataset_id="a2")
+    assert _run(worker_dependencies, req) == "COMPLETED"
+    tasks = worker_dependencies.repositories.tasks.list_by_request(req.message_id)
+    assert [(t.round, t.status) for t in tasks] == [(1, "COMPLETED"), (2, "COMPLETED")]
+    assert tasks[1].objective == "Find the card bill settlement pairs."
+    report = next(
+        m
+        for m in worker_dependencies.repositories.messages.list_by_chat("c1")
+        if isinstance(m, ReportMessage)
+    )
+    texts = " ".join(c.text for c in report.report.claims)
+    assert "Rows 12/13" in texts and "Rows 50/51" in texts
+    # The second review reads both rounds' condensed findings, never pages or excerpts.
+    second_review = [r for r in requests if r.stage == "lead"][1].messages[0].content
+    assert "Rows 12/13" in second_review and "Rows 50/51" in second_review
+    assert "searchesRun" in second_review and "excerpt" not in second_review
+    assert [a["text"] for _, a in worker_dependencies.activity.since(req.message_id, 0)] == [
+        "Brief written",
+        "Round 2: 1 more researcher",
+        "Lead: enough evidence — Transfers and settlements are both found.",
+    ]
+
+
+def test_an_invalid_lead_twice_completes_with_the_findings_so_far() -> None:
+    no_tasks = _lead("run_subagents", "More is needed.")  # run_subagents needs tasks
+    worker_dependencies = make_deps(
+        ScriptedModel(
+            {
+                "plan": [ModelResponse(structured=_briefed_plan())],
+                "execute": [ModelResponse(structured=t1_result())],
+                "lead": [no_tasks, no_tasks],
+            }
+        ),
+        research_rounds=3,
+    )
+    req = seed_chat_with_dataset(worker_dependencies, chat_id="c1", user_id="u1", dataset_id="a2")
+    assert _run(worker_dependencies, req) == "COMPLETED"
+    assert len(worker_dependencies.repositories.tasks.list_by_request(req.message_id)) == 1
+    calls = worker_dependencies.repositories.model_calls.list_by_request(req.message_id)
+    assert [c.stage for c in calls].count("lead") == 2
+    assert "Research stopped: lead output invalid" in [
+        a["text"] for _, a in worker_dependencies.activity.since(req.message_id, 0)
+    ]
+
+
+@pytest.mark.parametrize(
+    ("limit", "stopped"),
+    [
+        ({"tasks_per_request": 1}, "tasks per request reached"),
+        # plan and one researcher spent 2 of 10: no room for the lead, a researcher and the
+        # report's calls
+        ({"call_budget": 10}, "model-call budget reached"),
+    ],
+)
+def test_caps_stop_the_loop_before_the_lead_is_called(limit, stopped) -> None:
+    worker_dependencies = make_deps(
+        ScriptedModel(
+            {
+                "plan": [ModelResponse(structured=_briefed_plan())],
+                "execute": [ModelResponse(structured=t1_result())],
+                "lead": [_lead("run_subagents", "x", [_follow_up("f1", "Settlements.")])],
+            }
+        ),
+        research_rounds=3,
+    )
+    worker_dependencies.budgets = dataclasses.replace(worker_dependencies.budgets, **limit)
+    req = seed_chat_with_dataset(worker_dependencies, chat_id="c1", user_id="u1", dataset_id="a2")
+    assert _run(worker_dependencies, req) == "COMPLETED"
+    calls = worker_dependencies.repositories.model_calls.list_by_request(req.message_id)
+    assert "lead" not in [c.stage for c in calls]
+    assert len(worker_dependencies.repositories.tasks.list_by_request(req.message_id)) == 1
+    assert f"Research stopped: {stopped}" in [
+        a["text"] for _, a in worker_dependencies.activity.since(req.message_id, 0)
+    ]

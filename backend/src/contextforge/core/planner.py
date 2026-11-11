@@ -76,6 +76,33 @@ class PlannerOutput(Entity):
         return self
 
 
+class LeadDecision(Entity):
+    """The lead researcher's review after a round (F16): start more researchers, or finish.
+
+    ``brief`` is a revised research plan, or None to keep the current one. ``tasks`` are the
+    follow-up researchers, refs local to this decision; empty when completing.
+    """
+
+    action: Literal["run_subagents", "complete_task"]
+    reason: str
+    brief: str | None = None
+    tasks: list[PlannedTask] = []
+
+    @model_validator(mode="after")
+    def _check_tasks_for_action(self) -> Self:
+        if self.action == "complete_task":
+            if self.tasks:
+                raise ValueError("complete_task carries no tasks")
+            return self
+        if not MIN_PLANNED_TASKS <= len(self.tasks) <= MAX_PLANNED_TASKS:
+            raise ValueError(
+                f"run_subagents needs {MIN_PLANNED_TASKS} to {MAX_PLANNED_TASKS} tasks, "
+                f"got {len(self.tasks)}"
+            )
+        check_task_graph(self.tasks)
+        return self
+
+
 def check_task_graph(tasks: list[PlannedTask]) -> None:
     """Raise ``ValueError`` unless refs are unique and ``depends_on`` names other tasks of the
     same list without a cycle."""
@@ -148,14 +175,38 @@ def read_plan_leniently(
     if fixed.get("kind") == "plan" and fixed.get("question") == []:
         del fixed["question"]
         fixes.append("plan question sent as an empty array")
-    fixed["tasks"] = []
+    fixed["tasks"] = _with_task_kinds(tasks, dataset_ids, fixes)
+    return fixed, fixes
+
+
+def read_lead_leniently(
+    answer: dict[str, Any] | None, dataset_ids: Collection[str]
+) -> tuple[dict[str, Any] | None, list[str]]:
+    """The lead's decision with the planner's task slips fixed (``read_plan_leniently``):
+    ``tasks`` sent as a JSON string, a task without a ``kind``."""
+    if not isinstance(answer, dict):
+        return answer, []
+    fixed, fixes = dict(answer), []
+    tasks = fixed.get("tasks")
+    if isinstance(tasks, str) and isinstance(decoded := _json_value(tasks), list):
+        fixed["tasks"] = tasks = decoded
+        fixes.append("tasks sent as a JSON string")
+    if isinstance(tasks, list):
+        fixed["tasks"] = _with_task_kinds(tasks, dataset_ids, fixes)
+    return fixed, fixes
+
+
+def _with_task_kinds(tasks: list[Any], dataset_ids: Collection[str], fixes: list[str]) -> list[Any]:
+    """``tasks`` with a kind given to each that names none and can be inferred; a note per fix
+    is appended to ``fixes``."""
+    fixed = []
     for task in tasks:
         kind = _missing_kind(task, dataset_ids)
         if kind is not None:
             task = {**task, "kind": kind.value}
             fixes.append(f"{task.get('ref')} kind missing: {kind.value}")
-        fixed["tasks"].append(task)
-    return fixed, fixes
+        fixed.append(task)
+    return fixed
 
 
 def with_inferred_dependencies(output: PlannerOutput) -> tuple[PlannerOutput, list[str]]:

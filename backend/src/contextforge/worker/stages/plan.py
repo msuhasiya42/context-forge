@@ -6,6 +6,7 @@ stage returns the clarification as a ``pending`` payload and the workflow interr
 
 import logging
 import re
+from collections.abc import Mapping
 from dataclasses import replace
 from datetime import date, datetime
 from typing import Any, TypedDict
@@ -161,7 +162,11 @@ def create_research_plan(
                 raise PlanFailed("planner asked a question after being told to plan")
         if output.kind == "plan":
             pending = None
-            _save_brief(request_state, output.brief, worker_dependencies)
+            if output.brief:  # kept on the request record, where the UI reads it
+                save_brief(request_state, output.brief, worker_dependencies)
+                worker_dependencies.activity.emit(
+                    request_state["request_message_id"], "", "Brief written"
+                )
         else:
             pending = _ask_user(request_state, attempt, output, worker_dependencies)
         return PlanResult(
@@ -180,12 +185,10 @@ def create_research_plan(
         )
 
 
-def _save_brief(
+def save_brief(
     request_state: RequestState, brief: str, worker_dependencies: WorkerDependencies
 ) -> None:
-    """Keep the lead's brief on the request record, where the UI reads it; none is no write."""
-    if not brief:
-        return
+    """Write ``brief`` onto the request record (the lead's revisions as well as the first)."""
     worker_dependencies.repositories.messages.set_request_brief(
         request_state["chat_id"], request_state["request_message_id"], brief
     )
@@ -199,17 +202,26 @@ def _may_ask(attempt: int, artifacts: list[Artifact]) -> bool:
 
 
 def validate_and_save_tasks(
-    request_state: RequestState, planned: PlanResult, worker_dependencies: WorkerDependencies
+    request_state: RequestState,
+    planned: Mapping[str, Any],
+    worker_dependencies: WorkerDependencies,
+    *,
+    research_round: int = 1,
 ) -> list[PlanEntry]:
-    """Check the plan against the chat, then create one PLANNED Task per planned task.
+    """Check ``planned["tasks"]`` against the chat, then create one PLANNED Task per planned
+    task, marked with ``research_round``: the plan's are round 1, the lead's follow-ups later.
 
     Every task is checked before any is saved, so a rejected plan creates nothing. Idempotent:
-    when the request already has Tasks (a re-run after a crash before the checkpoint), returns
-    their entries and creates none. Entries come back in plan order.
+    when the request already has Tasks of this round (a re-run after a crash before the
+    checkpoint), returns their entries and creates none. Entries come back in plan order.
     """
     request_message_id = request_state["request_message_id"]
     with request_context(request_message_id):
-        existing = worker_dependencies.repositories.tasks.list_by_request(request_message_id)
+        existing = [
+            task
+            for task in worker_dependencies.repositories.tasks.list_by_request(request_message_id)
+            if task.round == research_round
+        ]
         if existing:
             logger.info("plan gate found %d tasks already created", len(existing))
             return [_plan_entry(task) for task in existing]
@@ -218,9 +230,9 @@ def validate_and_save_tasks(
             planned_tasks,
             worker_dependencies.repositories.artifacts.list_by_chat(request_state["chat_id"]),
         )
-        tasks = _new_tasks(planned_tasks, request_message_id)
+        tasks = _new_tasks(planned_tasks, request_message_id, research_round)
         worker_dependencies.repositories.tasks.save_all(tasks)
-        logger.info("plan gate created %d tasks", len(tasks))
+        logger.info("plan gate created %d round-%d tasks", len(tasks), research_round)
         return [_plan_entry(task) for task in tasks]
 
 
@@ -477,7 +489,9 @@ def _check_input(ref: str, artifact_id: str, artifact: Artifact | None) -> None:
         )
 
 
-def _new_tasks(planned_tasks: list[PlannedTask], request_message_id: str) -> list[Task]:
+def _new_tasks(
+    planned_tasks: list[PlannedTask], request_message_id: str, research_round: int
+) -> list[Task]:
     """One PLANNED Task per planned task; ids are made in plan order, so they sort in it."""
     task_ids = {task.ref: new_ulid() for task in planned_tasks}
     now = now_iso()
@@ -493,6 +507,7 @@ def _new_tasks(planned_tasks: list[PlannedTask], request_message_id: str) -> lis
             output_format=task.output_format,
             tools_and_sources=task.tools_and_sources,
             boundaries=task.boundaries,
+            round=research_round,
             status=TaskStatus.PLANNED,
             attempt=1,
             created_at=now,

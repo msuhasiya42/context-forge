@@ -160,6 +160,7 @@ class InMemoryTasks:
         *,
         result: TaskResult | None = None,
         failure_reason: str | None = None,
+        searches: list[str] | None = None,
     ) -> Task:
         with self._lock:
             current = self._tasks.get((request_message_id, task_id))
@@ -172,6 +173,8 @@ class InMemoryTasks:
                 changes["result"] = result
             if failure_reason is not None:
                 changes["failure_reason"] = failure_reason
+            if searches is not None:
+                changes["searches"] = searches
             updated = current.model_copy(update=changes)
             self._tasks[(request_message_id, task_id)] = updated
         self._after_save(updated)

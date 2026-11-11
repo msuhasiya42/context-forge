@@ -19,6 +19,12 @@ toolCallsPerTask: 6
 taskRetries: 1
 noProgressTurns: 3
 
-# Lead researcher (F16). The most researchers the lead starts in one round; the plan prompt
-# states it as the ceiling for a complex or broad question.
+# Lead researcher (F16). Rounds of research per request: round 1 is the plan's researchers;
+# after each round but the last the lead reviews the findings and may start more. 1 turns
+# the loop off (one plan, one execute, cite, report).
+researchRounds: 3
+# The most researchers the lead starts in one round; the plan prompt states it as the
+# ceiling for a complex or broad question.
 tasksPerRound: 5
+# The most researchers in one request across all rounds.
+tasksPerRequest: 12

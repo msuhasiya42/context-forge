@@ -68,6 +68,8 @@ class RequestState(TypedDict):
     chat_id: str
     user_id: str
     goal: str
+    # The lead researcher's brief (F16), revised by its reviews; absent before planning.
+    brief: NotRequired[str]
     constraints: list[str]
     plan: list[PlanEntry]
     facts: list[Fact]

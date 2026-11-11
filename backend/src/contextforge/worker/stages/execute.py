@@ -7,7 +7,7 @@ it is the Task record and the outcome the workflow folds into the request state.
 
 import json
 import logging
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from functools import partial
 from typing import Any, NotRequired, TypedDict
@@ -112,6 +112,8 @@ class TaskOutcome(TypedDict):
     # Why the task was SKIPPED or FAILED; the report lists it under uncertainties.
     failure_reason: str | None
     coverage: NotRequired[dict[str, Any]]
+    # The web_search queries it ran (F16); absent from an outcome checkpointed before.
+    searches: NotRequired[list[str]]
 
 
 @dataclass(frozen=True)
@@ -328,6 +330,7 @@ def _run_model_tool_loop(
         "recursion_limit": _recursion_limit(_task_budgets(task.kind, worker_dependencies))
     }
     error = ""
+    searches: list[str] = []
     attempts = worker_dependencies.budgets.task_retries + 1
     for attempt in range(1, attempts + 1):
         if attempt > 1:
@@ -336,12 +339,27 @@ def _run_model_tool_loop(
             worker_dependencies.activity.emit(task.request_message_id, task.task_id, retry)
         task_state = _create_initial_task_state(task, request_state, dependency_summaries)
         final = subgraph.invoke(task_state, config, context=task_context)
+        searches.extend(q for q in _searches_run(final) if q not in searches)
         if final["result"] is not None:
             result = TaskResult.model_validate(final["result"])
-            return _finish_task(worker_dependencies, task, TaskStatus.COMPLETED, result=result)
+            return _finish_task(
+                worker_dependencies, task, TaskStatus.COMPLETED, result=result, searches=searches
+            )
         error = final["error"] or "the task ended without a result"
         logger.warning("attempt %d ended: %s", attempt, error)
-    return _finish_task(worker_dependencies, task, TaskStatus.FAILED, failure_reason=error)
+    return _finish_task(
+        worker_dependencies, task, TaskStatus.FAILED, failure_reason=error, searches=searches
+    )
+
+
+def _searches_run(task_state: Mapping[str, Any]) -> list[str]:
+    """The queries of the web_search calls that returned ok in this attempt, in call order."""
+    prefix = "web_search:"
+    return [
+        str(json.loads(key.removeprefix(prefix)).get("query", ""))
+        for key in task_state["seen_calls"]
+        if key.startswith(prefix)
+    ]
 
 
 def _finish_task(
@@ -351,6 +369,7 @@ def _finish_task(
     *,
     result: TaskResult | None = None,
     failure_reason: str | None = None,
+    searches: list[str] | None = None,
 ) -> Task:
     """RUNNING -> ``status``: the Task's final transition."""
     logger.info("task %s %s", status.value, failure_reason or "")
@@ -361,6 +380,7 @@ def _finish_task(
         status,
         result=result,
         failure_reason=failure_reason,
+        searches=searches or None,
     )
 
 
@@ -459,6 +479,7 @@ def _build_task_outcome(task: Task) -> TaskOutcome:
         uncertainties=list(result.uncertainties) if result else [],
         failure_reason=task.failure_reason,
         coverage=result.coverage if result else {},
+        searches=list(task.searches),
     )
 
 

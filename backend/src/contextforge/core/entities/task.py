@@ -76,10 +76,15 @@ class Task(Entity):
     output_format: str = ""
     tools_and_sources: str = ""
     boundaries: str = ""
+    # The research round that created it (F16): 1 for the plan's researchers, then one more
+    # per lead review that started researchers. Records from before F16 read as round 1.
+    round: int = Field(default=1, ge=1)
     status: TaskStatus
     attempt: int = Field(ge=1)
     result: TaskResult | None = None
     failure_reason: str | None = None
+    # The web_search queries the researcher ran, so a follow-up researcher never repeats them.
+    searches: list[str] = []
     created_at: str
     updated_at: str
 

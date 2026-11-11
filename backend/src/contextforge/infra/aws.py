@@ -372,12 +372,15 @@ class DynamoTasks:
         *,
         result: TaskResult | None = None,
         failure_reason: str | None = None,
+        searches: list[str] | None = None,
     ) -> Task:
         changes: dict[str, Any] = {"status": new, "updatedAt": now_iso()}
         if result is not None:
             changes["result"] = result.model_dump(mode="json", by_alias=True)
         if failure_reason is not None:
             changes["failureReason"] = failure_reason
+        if searches is not None:
+            changes["searches"] = searches
         return Task.model_validate(
             self.store.update_status(
                 f"REQ#{request_message_id}", f"TASK#{task_id}", changes, str(expected)

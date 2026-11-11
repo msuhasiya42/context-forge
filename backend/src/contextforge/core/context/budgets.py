@@ -32,6 +32,8 @@ class Budgets:
     cell_char_cap: int
     web_tool_call_budget: int
     tasks_per_round: int
+    research_rounds: int
+    tasks_per_request: int
 
     def __post_init__(self) -> None:
         if not 1 <= self.web_tool_call_budget <= 50:
@@ -71,6 +73,8 @@ def load_budgets(path: Path = BUDGETS_PATH) -> Budgets:
         cell_char_cap=_int(raw, "cellCharCap"),
         web_tool_call_budget=_int(raw, "webToolCallBudget"),
         tasks_per_round=_int(raw, "tasksPerRound"),
+        research_rounds=_int(raw, "researchRounds"),
+        tasks_per_request=_int(raw, "tasksPerRequest"),
     )
 
 

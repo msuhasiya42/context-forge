@@ -408,6 +408,6 @@ def test_settings_override_the_primary_and_the_fallbacks_of_their_stages() -> No
     expected_plan = ModelRoute(
         "global.moonshotai.kimi-k3.1", ("deepseek.v3.2", "apac.amazon.nova-pro-v1:0")
     )
-    assert routes[Stage.PLAN] == routes[Stage.CITE] == expected_plan
+    assert routes[Stage.PLAN] == routes[Stage.LEAD] == routes[Stage.CITE] == expected_plan
     assert routes[Stage.EXECUTE] == config.stages["execute"].route  # empty keeps the config
     assert routes[Stage.COMPRESS] == config.stages["compress"].route

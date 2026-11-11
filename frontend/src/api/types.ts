@@ -62,6 +62,8 @@ export interface Message {
   inReplyToMessageId?: string;
   /** On a report too long for the chat: the deliverable Artifacts holding the full report. */
   deliverableArtifactIds?: string[];
+  /** On a request: the lead researcher's brief (its research plan), once planned. */
+  brief?: string;
 }
 
 /** One task of a request's plan, as the event stream sends it. */
@@ -72,6 +74,8 @@ export interface RequestTask {
   goal: string;
   /** PLANNED, RUNNING, COMPLETED, FAILED, SKIPPED or CANCELLED. */
   status: string;
+  /** The research round that started it: 1 for the plan, more for the lead's follow-ups. */
+  round?: number;
 }
 
 export type StreamEvent =

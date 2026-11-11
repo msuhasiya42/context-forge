@@ -32,7 +32,7 @@ prices:
 # The model per stage on the Bedrock backend, and its fallbacks: any Bedrock model id with a
 # price row above. A call goes to the next fallback while the model before is down (unavailable,
 # unreachable, throttled after the retry, or not available for this account); a model that was
-# down is tried last for 60 s. CONTEXTFORGE_PLANNER_MODEL / _FALLBACKS override plan and cite,
+# down is tried last for 60 s. CONTEXTFORGE_PLANNER_MODEL / _FALLBACKS override plan, lead and cite,
 # CONTEXTFORGE_EXECUTOR_MODEL / _FALLBACKS execute; compress keeps its own.
 # Plan (bake-off 7 Nov 2026, docs/evals/plan-bakeoff-2026-11-07.md): gpt-oss-120b, Qwen3-235B
 # and Nova 2 Lite gave valid plans first try. Kimi K3.1 also did, at 45 times the cost and with
@@ -40,6 +40,13 @@ prices:
 # ["deepseek.v3.2", "apac.amazon.nova-pro-v1:0"].
 stages:
   plan:
+    model: "openai.gpt-oss-120b-1:0"
+    fallbacks: ["qwen.qwen3-235b-a22b-2507-v1:0", "global.amazon.nova-2-lite-v1:0"]
+    effort: high
+    maxTokens: 4000
+  # The lead researcher's review between rounds (F16): the planner's route, as it is the same
+  # role reading the brief again. CONTEXTFORGE_PLANNER_MODEL / _FALLBACKS override it too.
+  lead:
     model: "openai.gpt-oss-120b-1:0"
     fallbacks: ["qwen.qwen3-235b-a22b-2507-v1:0", "global.amazon.nova-2-lite-v1:0"]
     effort: high

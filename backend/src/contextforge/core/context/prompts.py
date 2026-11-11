@@ -20,6 +20,7 @@ _STAGE_PROMPTS: dict[Stage, str] = {
     Stage.SUMMARY: "summary.1",
     Stage.CITE: "cite.1",
     Stage.REPORT: "report.1",
+    Stage.LEAD: "lead_review.1",
 }
 
 

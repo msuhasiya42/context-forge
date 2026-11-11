@@ -51,6 +51,45 @@ it('streams an answer and closes the stream when the view is unmounted', async (
   expect(close).toHaveBeenCalled();
 });
 
+it('shows the lead brief on demand and groups the tasks by research round', async () => {
+  const request = {
+    ...userRequest('r1', 'c1', 'Compare gold and silver', '2026-11-07T10:00:00Z'),
+    status: 'RUNNING' as const,
+    brief: 'Two metals, one window. Comparison effort: two researchers.',
+  };
+  const client = createMockClient({
+    seed: { chats: [chat('c1', 'Metals', '2026-11-07T10:00:00Z')], messages: [request] },
+  });
+  let emit: ((event: StreamEvent) => void) | undefined;
+  client.streamRequest = vi.fn((_chat, _request, onEvent) => {
+    emit = onEvent;
+    return () => undefined;
+  });
+  const { user } = renderApp(client);
+  await waitFor(() => expect(emit).toBeDefined());
+  await act(async () => {
+    emit?.({
+      kind: 'task',
+      task: { taskId: 't1', kind: 'web_search', goal: 'Gold', status: 'COMPLETED', round: 1 },
+    });
+    emit?.({
+      kind: 'task',
+      task: { taskId: 't2', kind: 'web_search', goal: 'Dated silver', status: 'RUNNING', round: 2 },
+    });
+  });
+  const plan = screen.getByRole('region', { name: 'Plan' });
+  // The brief stays collapsed until asked for.
+  expect(within(plan).queryByText(request.brief)).not.toBeInTheDocument();
+  await user.click(within(plan).getByRole('button', { name: /Research brief/ }));
+  expect(within(plan).getByText(request.brief)).toBeInTheDocument();
+  expect(
+    within(plan)
+      .getAllByRole('heading', { level: 3 })
+      .map((heading) => heading.textContent),
+  ).toEqual(['Round 1', 'Round 2']);
+  expect(within(plan).getByText('Dated silver')).toBeInTheDocument();
+});
+
 it('sends clarification replies to the existing request and saves standing instructions', async () => {
   const request = {
     ...userRequest('r1', 'c1', 'Compare Python versions', '2026-11-07T10:00:00Z'),
