@@ -1,16 +1,19 @@
 """Composition root for the real model, web tools and selectable application persistence."""
 
 import logging
+from functools import cache
 from typing import Any
 
 import boto3  # type: ignore[import-untyped]
+import httpx
 from botocore.config import Config  # type: ignore[import-untyped]
 from pydantic import SecretStr
 
 from contextforge.core.context.budgets import load_budgets
 from contextforge.core.entities.model_call import Stage
-from contextforge.core.models.base import ModelClient
+from contextforge.core.models.base import ModelClient, ModelRequest, ModelResponse
 from contextforge.core.models.config import ModelRoute, ModelsConfig, load_models_config
+from contextforge.core.models.errors import ModelAccessDenied
 from contextforge.core.models.recording import PriceTable
 from contextforge.core.models.scripted import ScriptedModel
 from contextforge.core.queue import InProcessQueue, Queue
@@ -19,6 +22,7 @@ from contextforge.core.settings import Settings
 from contextforge.core.storage import BlobStore, MemoryBlobStore
 from contextforge.infra.aws import S3Blobs, SqsQueue, dynamo_repositories
 from contextforge.infra.bedrock import BedrockModel
+from contextforge.infra.gemini import GeminiModel, RequestPacer, is_gemini_model
 from contextforge.infra.tracing import RequestTracer, langsmith_client
 from contextforge.infra.web import PublicWebClient, web_tools
 from contextforge.worker.dependencies import WorkerDependencies
@@ -133,6 +137,49 @@ def bedrock_model(session: Any, settings: Settings) -> BedrockModel:
         # The offline judge reads long reports and page context, so it waits like the planner.
         by_stage={Stage.PLAN: planner, Stage.CITE: planner, Stage.JUDGE: planner},
     )
+
+
+class ByProvider:
+    """Sends a call for a Gemini model id to Gemini and every other call to Bedrock."""
+
+    def __init__(self, bedrock: ModelClient, gemini: ModelClient | None) -> None:
+        self._bedrock, self._gemini = bedrock, gemini
+
+    def invoke(self, request: ModelRequest) -> ModelResponse:
+        if not is_gemini_model(request.model):
+            return self._bedrock.invoke(request)
+        if self._gemini is None:
+            # Access denied routes to the next model, as Gemini refusing the key would.
+            raise ModelAccessDenied(f"{request.model} needs CONTEXTFORGE_GEMINI_API_KEY.")
+        return self._gemini.invoke(request)
+
+
+def model_provider(model_id: str) -> str:
+    """The provider recorded on a ModelCall (``<provider>/<model id>``)."""
+    return "gemini" if is_gemini_model(model_id) else "bedrock"
+
+
+def judge_model_client(settings: Settings, reasoning_effort: str | None = None) -> ByProvider:
+    """The offline judge's provider client: Gemini when a key is set, Bedrock for the rest.
+    Gemini waits like the planner, as the judge reads long reports and page context."""
+    gemini = None
+    if settings.gemini_api_key is not None:
+        http = httpx.Client(timeout=httpx.Timeout(settings.planner_timeout_seconds, connect=5))
+        gemini = GeminiModel(
+            http,
+            settings.gemini_api_key,
+            base_url=settings.gemini_base_url,
+            pacer=gemini_pacer(settings.gemini_min_interval_seconds),
+            reasoning_effort=reasoning_effort,
+        )
+    return ByProvider(bedrock_model(aws_session(settings), settings), gemini)
+
+
+@cache
+def gemini_pacer(min_interval: float) -> RequestPacer:
+    """One pacer per process, so every judge client built (calibration builds one per model)
+    shares the free tier's request rate."""
+    return RequestPacer(min_interval)
 
 
 def _tracer(settings: Settings, prices: PriceTable) -> RequestTracer:

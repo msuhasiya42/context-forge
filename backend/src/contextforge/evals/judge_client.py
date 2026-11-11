@@ -5,10 +5,12 @@ Every judge call of one session is recorded under the session id, so its spend a
 the sum of its ModelCalls, as a request's are.
 """
 
+import logging
 import math
 import uuid
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from functools import cache
 from pathlib import Path
 
 from contextforge.core.entities.model_call import Stage
@@ -18,8 +20,11 @@ from contextforge.core.models.recording import RecordingModelClient, cost_usd
 from contextforge.core.models.transcript import TranscriptWriter
 from contextforge.core.repositories.memory import InMemoryModelCalls
 from contextforge.core.values import Usage
+from contextforge.infra.gemini import is_gemini_model
 from contextforge.worker.calls import BudgetedModel
 from contextforge.worker.routing import ModelCooldown, RoutedModel
+
+logger = logging.getLogger(__name__)
 
 # Judge calls are offline and many; only the spend cap should stop them.
 _CALL_BUDGET = 100_000
@@ -84,6 +89,25 @@ def judge_route(models: ModelsConfig) -> ModelRoute:
     return models.stages[Stage.JUDGE.value].route
 
 
+def usable_route(route: ModelRoute, *, gemini_key_set: bool) -> ModelRoute:
+    """``route`` without its Gemini models when no Gemini key is set, so the judge grades with
+    its Bedrock fallback. ``ValueError`` when no model is left."""
+    if gemini_key_set:
+        return route
+    models = [model for model in (route.primary, *route.fallbacks) if not is_gemini_model(model)]
+    if not models:
+        raise ValueError("Every judge model is a Gemini model; set CONTEXTFORGE_GEMINI_API_KEY.")
+    if len(models) < len(route.fallbacks) + 1:
+        _warn_gemini_skipped()
+    return ModelRoute(models[0], tuple(models[1:]))
+
+
+@cache
+def _warn_gemini_skipped() -> None:
+    """Logged once per process, however many judge sessions are built."""
+    logger.warning("CONTEXTFORGE_GEMINI_API_KEY is not set; the judge skips its Gemini models.")
+
+
 def base_model(model_id: str) -> str:
     prefix, _, rest = model_id.partition(".")
     return rest if prefix in _GEO_PREFIXES and rest else model_id
@@ -110,7 +134,7 @@ def judge_session(
     retries: int = 1,
     reserve_usd: float = 0.10,
     transcripts: TranscriptWriter | None = None,
-    provider: str = "bedrock",
+    provider: str | Callable[[str], str] = "bedrock",
 ) -> JudgeSession:
     """A session over ``provider_client`` (Bedrock, or a scripted model in tests) on the judge
     stage's route, or on ``route`` when one is given (calibration compares models)."""
@@ -149,12 +173,14 @@ def estimate_judge_usd(
     models: ModelsConfig,
     runs: int,
     *,
+    route: ModelRoute | None = None,
     input_tokens_per_run: int = ESTIMATE_INPUT_TOKENS_PER_RUN,
     output_tokens_per_run: int = ESTIMATE_OUTPUT_TOKENS_PER_RUN,
 ) -> float:
-    """The assumed judge spend for ``runs`` judged runs at the judge model's prices."""
+    """The assumed judge spend for ``runs`` judged runs at the prices of ``route``'s primary
+    (default: the judge stage's)."""
     usage = Usage(
         input_tokens=input_tokens_per_run * runs,
         output_tokens=output_tokens_per_run * runs,
     )
-    return cost_usd(models.prices, judge_route(models).primary, usage) or 0.0
+    return cost_usd(models.prices, (route or judge_route(models)).primary, usage) or 0.0

@@ -22,6 +22,9 @@ from tests.test_research_eval import _bundle
 
 MODELS = load_models_config(REPO_ROOT / "config" / "models.yaml")
 USAGE = Usage(input_tokens=1_000, output_tokens=100)
+# The judge's Bedrock fallback alone: Gemini's free tier costs nothing, so tests of judge spend
+# grade on a priced model.
+PRICED_JUDGE = ModelRoute("deepseek.v3.2")
 
 
 def claims_answer(*verdicts: str, as_string: bool = False) -> ModelResponse:
@@ -165,7 +168,8 @@ def test_judged_grade_maps_weights_human_fields_win_and_errors_make_it_incomplet
 
 def test_the_judge_never_grades_its_own_pipeline_and_the_core_suite_is_well_formed() -> None:
     route = judge_route(MODELS)
-    assert route == ModelRoute("deepseek.v3.2", ("mistral.mistral-large-3-675b-instruct",))
+    assert route == ModelRoute("gemini-3.5-flash", ("gemini-3.5-flash-lite", "deepseek.v3.2"))
+    assert MODELS.prices["gemini-3.5-flash"]["inputPerMTok"] == 0.0  # the free tier
     assert MODELS.stages["judge"].max_tokens == 2000
     for model in (route.primary, *route.fallbacks):
         assert model in MODELS.prices
@@ -185,7 +189,7 @@ def test_the_judge_never_grades_its_own_pipeline_and_the_core_suite_is_well_form
             assert f"> {case.question}\n" in suite_md  # copied verbatim
 
     # The judge session records each call's cost at the judge model's price.
-    session = judge_session(judge(claims_answer("supported")), MODELS)
+    session = judge_session(judge(claims_answer("supported")), MODELS, route=PRICED_JUDGE)
     judge_claims([_evidence(1)], model=session.client)
     assert session.spent_usd() == pytest.approx(1_000 * 0.64e-6 + 100 * 1.91e-6)
     [call] = session.calls.list_by_request(session.session_id)

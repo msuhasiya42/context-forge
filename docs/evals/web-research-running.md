@@ -108,8 +108,8 @@ authenticate the reviewer's identity or independently certify factual truth.
 ## Judged suite runs (offline LLM judge)
 
 `backend/evals/cases/core-suite.yaml` holds the core cases (`id`, `question`, `requiredParts`,
-`source`). The judge (`config/models.yaml` stage `judge`: DeepSeek v3.2, falling back to Mistral
-Large 3; neither serves a research stage) labels each claim `supported`, `partial`,
+`source`). The judge (`config/models.yaml` stage `judge`: Gemini 3.5 Flash, falling back to
+Gemini 3.5 Flash-Lite and then DeepSeek v3.2 on Bedrock; none serves a research stage) labels each claim `supported`, `partial`,
 `unsupported` or `contradicted` against its cited excerpt and the saved page text around it,
 marks each required part `answered`, `partial` or `missing`, and scores quantitative reasoning,
 synthesis and clarity 1-5. These map onto the rubric above; citations and provenance come from
@@ -117,6 +117,14 @@ the structural checks. A judged run passes at 70 with no flag; an unsupported or
 claim raises `unsupported_material_claims`; judge errors on more than 20% of claims make the
 run `incomplete`. A human annotation for the same `bundleHash` wins for each field it sets.
 The judge never runs inside a user request.
+
+The Gemini models run on Google's free tier through its OpenAI-compatible API, so judging costs
+about $0 and the grader is of another model family than the pipeline. Set
+`CONTEXTFORGE_GEMINI_API_KEY` in `backend/.env`; calls are spaced at least
+`CONTEXTFORGE_GEMINI_MIN_INTERVAL_SECONDS` (default 4.5) apart for the free tier's request limit,
+so a suite takes a few seconds per judge call longer. A throttled (429), unavailable (404, 5xx)
+or timed-out Gemini call moves to the next model, ending on Bedrock DeepSeek at its price;
+without the key the judge skips Gemini and uses DeepSeek (logged once).
 
 With the API running (as above), from `backend/`:
 
@@ -141,7 +149,7 @@ Before trusting the judge, calibrate it against your own labels:
 
 ```sh
 uv run --no-sync python -m contextforge.evals.web_research calibrate export .data/evals/SUITE_RUN_ID --n 20
-# Fill human_label in calibration.csv, then compare models (default: DeepSeek and Mistral):
+# Fill human_label in calibration.csv, then compare models (default: the judge stage's model and each fallback):
 uv run --no-sync python -m contextforge.evals.web_research calibrate score \
   .data/evals/SUITE_RUN_ID/calibration.csv
 ```

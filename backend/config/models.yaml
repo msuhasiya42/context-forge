@@ -25,6 +25,10 @@ prices:
   "moonshotai.kimi-k3.1":                  { inputPerMTok: 4.00,   outputPerMTok: 20.00,  cacheReadPerMTok: 0.0 }
   "minimax.minimax-m2.5":                  { inputPerMTok: 0.31,   outputPerMTok: 1.24,   cacheReadPerMTok: 0.0 }
   "nvidia.nemotron-super-3-120b":          { inputPerMTok: 0.15,   outputPerMTok: 0.67,   cacheReadPerMTok: 0.0 }
+  # Google Gemini (the judge only), through its OpenAI-compatible API, not Bedrock: free tier;
+  # paid prices differ — update if billing is enabled.
+  "gemini-3.5-flash":                      { inputPerMTok: 0.0,    outputPerMTok: 0.0,    cacheReadPerMTok: 0.0 }
+  "gemini-3.5-flash-lite":                 { inputPerMTok: 0.0,    outputPerMTok: 0.0,    cacheReadPerMTok: 0.0 }
 # The model per stage on the Bedrock backend, and its fallbacks: any Bedrock model id with a
 # price row above. A call goes to the next fallback while the model before is down (unavailable,
 # unreachable, throttled after the retry, or not available for this account); a model that was
@@ -69,10 +73,11 @@ stages:
     effort: medium
     maxTokens: 4000
   # The offline eval judge (src/contextforge/evals/judge.py), never called inside a user
-  # request. Neither model serves a research stage above, so no model grades its own pipeline
-  # (tests/test_judge.py checks it).
+  # request. No model serves a research stage above, so no model grades its own pipeline
+  # (tests/test_judge.py checks it). Gemini (gemini-* ids, CONTEXTFORGE_GEMINI_API_KEY) first,
+  # free and of another model family; without the key the judge uses DeepSeek on Bedrock.
   judge:
-    model: "deepseek.v3.2"
-    fallbacks: ["mistral.mistral-large-3-675b-instruct"]
+    model: "gemini-3.5-flash"
+    fallbacks: ["gemini-3.5-flash-lite", "deepseek.v3.2"]
     effort: low
     maxTokens: 2000

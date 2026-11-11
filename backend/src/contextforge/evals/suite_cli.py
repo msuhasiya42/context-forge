@@ -12,7 +12,8 @@ from pathlib import Path
 
 import httpx
 
-from contextforge.core.models.config import ModelRoute, load_models_config
+from contextforge.core.entities.model_call import Stage
+from contextforge.core.models.config import ModelRoute, ModelsConfig, load_models_config
 from contextforge.core.models.transcript import TranscriptWriter
 from contextforge.core.settings import Settings
 from contextforge.evals.calibration import (
@@ -27,6 +28,7 @@ from contextforge.evals.judge_client import (
     judge_route,
     judge_session,
     shared_with_research,
+    usable_route,
 )
 from contextforge.evals.langsmith_log import log_suite
 from contextforge.evals.suite import (
@@ -37,7 +39,7 @@ from contextforge.evals.suite import (
     select_cases,
 )
 from contextforge.evals.web_research import auth_headers
-from contextforge.infra.runtime import aws_session, bedrock_model, stage_routes
+from contextforge.infra.runtime import judge_model_client, model_provider, stage_routes
 from contextforge.infra.tracing import langsmith_client
 from contextforge.worker.dependencies import secret_values
 
@@ -105,7 +107,8 @@ def _run(args: argparse.Namespace) -> int:
     settings = Settings()
     runs = len(cases) * args.repeats
     research = runs * settings.request_max_usd
-    judging = estimate_judge_usd(load_models_config(), runs)
+    models = load_models_config()
+    judging = estimate_judge_usd(models, runs, route=configured_judge_route(settings, models))
     print(
         f"{len(cases)} cases x {args.repeats} repeats = {runs} runs. Worst case research "
         f"${research:.2f} ({runs} x ${settings.request_max_usd:.2f} per-request cap) plus judge "
@@ -153,7 +156,7 @@ def _calibrate(args: argparse.Namespace) -> int:
         return 0
     settings = Settings()
     models = load_models_config()
-    configured = judge_route(models)
+    configured = configured_judge_route(settings, models)
     model_ids = args.judge_model or [configured.primary, *configured.fallbacks]
     transcripts = args.csv.parent / "judge-transcripts"
     # Each model alone, without fallbacks, so its agreement is its own.
@@ -176,10 +179,15 @@ def live_judge(
     route: ModelRoute | None = None,
     max_usd: float = math.inf,
 ) -> JudgeSession:
-    """The Bedrock judge, refused when one of its models serves a research stage. Transcripts
-    are stored beside the run with every configured secret redacted."""
+    """The judge on Gemini and Bedrock, refused when one of its models serves a research stage.
+    Transcripts are stored beside the run with every configured secret redacted."""
     models = load_models_config()
-    route = route or judge_route(models)
+    try:
+        route = usable_route(
+            route or judge_route(models), gemini_key_set=settings.gemini_api_key is not None
+        )
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
     shared = shared_with_research(route, stage_routes(models, settings))
     if shared:
         raise SystemExit(f"Judge model also serves a research stage: {', '.join(sorted(shared))}.")
@@ -189,14 +197,25 @@ def live_judge(
         else None
     )
     return judge_session(
-        bedrock_model(aws_session(settings), settings),
+        judge_model_client(settings, reasoning_effort=models.stages[Stage.JUDGE.value].effort),
         models,
         route=route,
         max_usd=max_usd,
         retries=settings.model_retries,
         reserve_usd=settings.call_reserve_usd,
         transcripts=transcripts,
+        provider=model_provider,
     )
+
+
+def configured_judge_route(settings: Settings, models: ModelsConfig) -> ModelRoute:
+    """The judge stage's route as it will run, for the cost estimate: without its Gemini models
+    when no key is set (``live_judge`` refuses a route left with none)."""
+    route = judge_route(models)
+    try:
+        return usable_route(route, gemini_key_set=settings.gemini_api_key is not None)
+    except ValueError:
+        return route
 
 
 def _log_langsmith(settings: Settings, card: dict[str, object], out_dir: Path) -> None:

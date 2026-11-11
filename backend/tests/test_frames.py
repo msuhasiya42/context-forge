@@ -32,7 +32,7 @@ from contextforge.evals.benchmarks.frames_suite import regrade_frames, run_frame
 from contextforge.evals.judge_client import judge_session
 from contextforge.evals.web_research import main
 from tests.test_eval_suite import research_api
-from tests.test_judge import MODELS, USAGE, claims_answer
+from tests.test_judge import MODELS, PRICED_JUDGE, USAGE, claims_answer
 
 FIXTURE = Path(__file__).parent / "fixtures" / "frames-rows.json"
 REVISION = "4ef3e0c1d2b3a4958677"
@@ -212,7 +212,7 @@ def _bench(
             [to_case(item) for item in items],
             repeats=1,
             client=client,
-            judge=judge_session(ScriptedModel({"judge": judged}), MODELS),
+            judge=judge_session(ScriptedModel({"judge": judged}), MODELS, route=PRICED_JUDGE),
             out_dir=tmp_path / name,
             max_usd=max_usd,
             meta={"dataset": frames.DATASET, "revision": REVISION, "seed": 7},
@@ -306,8 +306,7 @@ def test_bench_frames_without_yes_prints_the_estimate_and_calls_nothing(
     def refuse(*args: object, **kwargs: object) -> None:
         raise AssertionError("no live call may be made without --yes")
 
-    monkeypatch.setattr(suite_cli, "bedrock_model", refuse)
-    monkeypatch.setattr(suite_cli, "aws_session", refuse)
+    monkeypatch.setattr(suite_cli, "judge_model_client", refuse)
     monkeypatch.setattr(httpx, "Client", refuse)
     monkeypatch.setenv("CONTEXTFORGE_REQUEST_MAX_USD", "0.25")
     cache, out = tmp_path / "cache" / "test.jsonl", tmp_path / "out"

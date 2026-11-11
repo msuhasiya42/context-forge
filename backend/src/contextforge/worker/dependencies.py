@@ -187,5 +187,6 @@ def secret_values(settings: Settings) -> list[str]:
         settings.tavily_api_key,
         settings.langsmith_api_key,
         settings.dev_token,
+        settings.gemini_api_key,
     )
     return [k.get_secret_value() for k in keys if k is not None]

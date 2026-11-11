@@ -29,7 +29,12 @@ from contextforge.evals.benchmarks.frames_suite import (
     run_frames,
 )
 from contextforge.evals.judge_client import estimate_judge_usd
-from contextforge.evals.suite_cli import EXIT_NOT_RUN, live_judge, suite_run_id
+from contextforge.evals.suite_cli import (
+    EXIT_NOT_RUN,
+    configured_judge_route,
+    live_judge,
+    suite_run_id,
+)
 from contextforge.evals.web_research import auth_headers
 
 BENCH_COMMANDS = ("bench",)
@@ -74,9 +79,11 @@ def run_bench_command(args: argparse.Namespace) -> int:
     questions = len(saved_ids) if saved_ids else args.n
     runs = questions * args.repeats
     research = runs * settings.request_max_usd
+    models = load_models_config()
     judging = estimate_judge_usd(
-        load_models_config(),
+        models,
         runs,
+        route=configured_judge_route(settings, models),
         input_tokens_per_run=JUDGE_INPUT_TOKENS_PER_RUN,
         output_tokens_per_run=JUDGE_OUTPUT_TOKENS_PER_RUN,
     )

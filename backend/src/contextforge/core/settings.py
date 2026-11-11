@@ -27,6 +27,12 @@ class Settings(BaseSettings):
     serper_api_key: SecretStr | None = Field(default=None, validation_alias="SERPER_API_KEY")
     # Tavily search, and Tavily Extract as the fallback reader for pages our own fetch cannot read.
     tavily_api_key: SecretStr | None = Field(default=None, validation_alias="TAVILY_API_KEY")
+    # The offline judge's Gemini models (OpenAI-compatible API). Unset: the judge skips its
+    # Gemini models and uses its Bedrock fallback. The free tier allows a few requests a
+    # minute, so calls are spaced at least the interval apart.
+    gemini_api_key: SecretStr | None = None
+    gemini_base_url: str = "https://generativelanguage.googleapis.com/v1beta/openai"
+    gemini_min_interval_seconds: float = Field(default=4.5, ge=0)
     # Overrides of the config/models.yaml stage models: the planner's for plan and cite, the
     # executor's for execute (compress keeps its own). Fallbacks are comma-separated model ids
     # that replace the stage's fallbacks; empty or unset keeps config/models.yaml's.

@@ -2,7 +2,7 @@
 
 import hashlib
 import json
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 
 from contextforge.core.context.prompts import prompt_version
 from contextforge.core.entities.model_call import CallMetadata, ModelCall, Outcome
@@ -73,7 +73,8 @@ class RecordingModelClient:
     recomputed later; a call whose usage is unknown (a timeout, an error) or whose model has no
     price is charged ``unknown_cost_usd``, since unknown is never zero. A call that never
     reached the provider (``ModelUnreachable``) used no tokens, so it is charged nothing.
-    ``model`` is recorded as ``<provider>/<model id>`` (spec 3.5). With ``transcripts``, each
+    ``model`` is recorded as ``<provider>/<model id>`` (spec 3.5); ``provider`` is a name or,
+    for a client over several providers, a function of the model id. With ``transcripts``, each
     record also gets its call's transcript (the exact request and the response or error).
     """
 
@@ -87,7 +88,7 @@ class RecordingModelClient:
         price_version: str,
         prices: PriceTable | None = None,
         unknown_cost_usd: float | None = None,
-        provider: str = "bedrock",
+        provider: str | Callable[[str], str] = "bedrock",
         transcripts: TranscriptWriter | None = None,
     ) -> None:
         self._inner = inner
@@ -152,7 +153,10 @@ class RecordingModelClient:
         context_version = f"mem:{self._memory_version}|prompt:{prompt_version(request.stage)}"
         # A call never sent costs nothing, whether or not its model has a price.
         cost = 0.0 if usage is _NOT_SENT else cost_usd(self._prices, request.model, usage)
-        model = f"{self._provider}/{request.model}"
+        provider = self._provider
+        if not isinstance(provider, str):
+            provider = provider(request.model)
+        model = f"{provider}/{request.model}"
         return ModelCall(
             model_call_id=model_call_id,
             request_message_id=self._request_message_id,

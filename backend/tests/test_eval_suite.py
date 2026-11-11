@@ -24,7 +24,7 @@ from contextforge.evals.suite import SuiteCase, compare_scorecards, regrade_suit
 from contextforge.evals.web_research import main
 from contextforge.infra.web import web_tools
 from tests.helpers import make_deps
-from tests.test_judge import MODELS, claims_answer, judge, report_answer
+from tests.test_judge import MODELS, PRICED_JUDGE, claims_answer, judge, report_answer
 from tests.test_research_flow import SOURCE, ResearchFixtureModel
 from tests.test_web_research import _page, _web
 
@@ -88,7 +88,7 @@ def _run(
             [CASE],
             repeats=repeats,
             client=client,
-            judge=judge_session(judge(*judged), MODELS),
+            judge=judge_session(judge(*judged), MODELS, route=PRICED_JUDGE),
             out_dir=tmp_path / name,
             max_usd=max_usd,
             request_cap_usd=0.25,
@@ -106,7 +106,7 @@ def test_suite_run_scores_regrades_and_stops_at_its_spend_cap(tmp_path) -> None:
     assert case["meanScore"] == 92.5 and case["stdevScore"] == 0.0 and case["minScore"] == 92.5
     assert case["passAt1"] == 1.0 and case["passAllK"] is True
     assert card["overall"]["passHatK"] == 1.0 and card["stoppedEarly"] is None
-    assert card["judgeRoute"] == ["deepseek.v3.2", "mistral.mistral-large-3-675b-instruct"]
+    assert card["judgeRoute"] == ["deepseek.v3.2"]
     assert card["judgeCostUsd"] > 0 and case["research"]["meanCostUsd"] > 0
     assert case["research"]["meanLatencySeconds"] is not None
     assert "| bench | 2 | 92.5 |" in (suite_dir / "scorecard.md").read_text()
@@ -172,8 +172,7 @@ def test_suite_run_without_yes_prints_the_estimate_and_calls_nothing(
     def refuse(*args: object, **kwargs: object) -> None:
         raise AssertionError("no live call may be made without --yes")
 
-    monkeypatch.setattr(suite_cli, "bedrock_model", refuse)
-    monkeypatch.setattr(suite_cli, "aws_session", refuse)
+    monkeypatch.setattr(suite_cli, "judge_model_client", refuse)
     monkeypatch.setattr(httpx, "Client", refuse)
     monkeypatch.setenv("CONTEXTFORGE_REQUEST_MAX_USD", "0.25")
     suite = tmp_path / "suite.yaml"
