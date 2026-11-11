@@ -8,7 +8,13 @@ from contextforge.core.context.prompts import prompt_version
 from contextforge.core.entities.model_call import CallMetadata, ModelCall, Outcome
 from contextforge.core.ids import new_ulid, now_iso_ms
 from contextforge.core.models.base import ModelClient, ModelRequest, ModelResponse, ToolSpec
-from contextforge.core.models.errors import ModelError, ModelTimeout, ModelUnreachable
+from contextforge.core.models.errors import (
+    ModelAccessDenied,
+    ModelError,
+    ModelThrottled,
+    ModelTimeout,
+    ModelUnreachable,
+)
 from contextforge.core.models.transcript import TranscriptWriter, transcript
 from contextforge.core.repositories.base import ModelCallRepository
 from contextforge.core.values import Usage
@@ -17,6 +23,10 @@ from contextforge.core.values import Usage
 PriceTable = Mapping[str, Mapping[str, float]]
 # The usage of a call that never reached the provider: known, and zero.
 _NOT_SENT = Usage(input_tokens=0, output_tokens=0)
+# Failures the provider raises before it generates anything: no connection was made, the call
+# was throttled (429), or the account may not invoke the model. Such an attempt used no tokens,
+# so a fallback that follows it does not leave a reserve charged behind.
+_NEVER_GENERATED = (ModelUnreachable, ModelThrottled, ModelAccessDenied)
 
 
 def price_row(prices: PriceTable, model: str) -> Mapping[str, float] | None:
@@ -38,6 +48,12 @@ def cost_usd(prices: PriceTable, model: str, usage: Usage | None) -> float | Non
         + (usage.cache_write_tokens or 0) * row.get("cacheWritePerMTok", row["inputPerMTok"])
     )
     return per_million / 1_000_000
+
+
+def is_free(prices: PriceTable, model: str) -> bool:
+    """Whether ``model`` has a price row and every price in it is zero (a free tier)."""
+    row = price_row(prices, model)
+    return row is not None and not any(row.values())
 
 
 def worst_case_usd(prices: PriceTable, request: ModelRequest, input_tokens: int) -> float | None:
@@ -71,8 +87,9 @@ class RecordingModelClient:
 
     ``estimated_cost_usd`` is priced from the reported usage and ``prices``, so it can be
     recomputed later; a call whose usage is unknown (a timeout, an error) or whose model has no
-    price is charged ``unknown_cost_usd``, since unknown is never zero. A call that never
-    reached the provider (``ModelUnreachable``) used no tokens, so it is charged nothing.
+    price is charged ``unknown_cost_usd``, since unknown is never zero for a paid model. A
+    zero-priced model costs nothing whatever its usage. A call the provider refused before
+    generating (unreachable, throttled, access denied) used no tokens, so it is charged nothing.
     ``model`` is recorded as ``<provider>/<model id>`` (spec 3.5); ``provider`` is a name or,
     for a client over several providers, a function of the model id. With ``transcripts``, each
     record also gets its call's transcript (the exact request and the response or error).
@@ -115,7 +132,7 @@ class RecordingModelClient:
                     model_call_id,
                     started_at,
                     outcome=Outcome.TIMEOUT if isinstance(exc, ModelTimeout) else Outcome.ERROR,
-                    usage=_NOT_SENT if isinstance(exc, ModelUnreachable) else None,
+                    usage=_NOT_SENT if isinstance(exc, _NEVER_GENERATED) else None,
                     failure_reason=str(exc),
                     langsmith_run_id=exc.langsmith_run_id if isinstance(exc, ModelError) else None,
                 )
@@ -151,8 +168,12 @@ class RecordingModelClient:
         # Taken first, so the latency never includes the transcript write.
         ended_at = None if outcome == Outcome.TIMEOUT else now_iso_ms()
         context_version = f"mem:{self._memory_version}|prompt:{prompt_version(request.stage)}"
-        # A call never sent costs nothing, whether or not its model has a price.
-        cost = 0.0 if usage is _NOT_SENT else cost_usd(self._prices, request.model, usage)
+        # A call never sent costs nothing, whether or not its model has a price; nor does any
+        # call to a free model, so unknown usage there is not charged the reserve.
+        if usage is _NOT_SENT or is_free(self._prices, request.model):
+            cost: float | None = 0.0
+        else:
+            cost = cost_usd(self._prices, request.model, usage)
         provider = self._provider
         if not isinstance(provider, str):
             provider = provider(request.model)

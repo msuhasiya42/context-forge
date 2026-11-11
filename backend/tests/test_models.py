@@ -245,6 +245,62 @@ def test_spend_cap_admits_more_than_ten_cheap_calls() -> None:
     assert len(calls) == 12 and sum(c.estimated_cost_usd or 0 for c in calls) < 0.01
 
 
+def test_forty_calls_on_a_free_model_never_trip_the_spend_cap(monkeypatch) -> None:
+    """Live finding (F17, Gemini free tier): throttled and usage-less calls to a $0 model were
+    each charged the $0.10 reserve, so 33 free calls exhausted a $0.25 cap. A free model now
+    reserves and costs $0 whatever its usage; throttles that fall back cost nothing."""
+    flash, lite = "gemini-3.5-flash", "gemini-3.5-flash-lite"
+    no_usage = ModelResponse(text="ok", usage=None)
+    throttled = ModelThrottled("429 RESOURCE_EXHAUSTED")
+    model = ByModel({flash: [no_usage, throttled, throttled] * 20, lite: [no_usage] * 20})
+    worker_dependencies = make_deps(model, call_budget=200)
+    worker_dependencies.settings = Settings(
+        _env_file=None, request_max_usd=0.25, call_reserve_usd=0.10, model_retries=1
+    )
+    worker_dependencies.prices = load_models_config().prices
+    worker_dependencies.routes = {Stage.EXECUTE: ModelRoute(flash, (lite,))}
+    monkeypatch.setattr(calls.time, "sleep", lambda seconds: None)
+    request = ModelRequest(stage="execute", model=flash, system=[], messages=[], max_tokens=4000)
+    for _ in range(40):
+        worker_dependencies.cooldown = ModelCooldown()  # flash first every call
+        assert worker_dependencies.model_for("m1").invoke(request).text == "ok"
+    records = worker_dependencies.repositories.model_calls.list_by_request("m1")
+    assert len(records) == 80 and {c.estimated_cost_usd for c in records} == {0.0}
+    assert worker_dependencies.pending_calls["m1"] == []
+
+
+def test_a_throttled_call_that_falls_back_leaves_no_reserve_but_unknown_paid_usage_does(
+    monkeypatch,
+) -> None:
+    """A paid model refused for rate never generated, so it is charged $0 and its fallback
+    runs at its own price. A paid call whose usage is unknown after it may have generated (a
+    timeout) is still charged the reserve, and the cap counts it."""
+    pro, lite = "apac.amazon.nova-pro-v1:0", "apac.amazon.nova-lite-v1:0"
+    answer = ModelResponse(text="ok", usage=Usage(input_tokens=1_000, output_tokens=100))
+    throttled = ModelThrottled("ThrottlingException")
+    model = ByModel({pro: [throttled, throttled] + [ModelTimeout("no answer")] * 4, lite: [answer]})
+    worker_dependencies = _capped_deps(model, 0.25, call_reserve_usd=0.10, model_retries=1)
+    worker_dependencies.routes = {Stage.PLAN: ModelRoute(pro, (lite,))}
+    monkeypatch.setattr(calls.time, "sleep", lambda seconds: None)
+    request = ModelRequest(stage="plan", model=pro, system=[], messages=[], max_tokens=4000)
+    assert worker_dependencies.model_for("m1").invoke(request).text == "ok"
+    first, second, served = worker_dependencies.repositories.model_calls.list_by_request("m1")
+    assert first.estimated_cost_usd == second.estimated_cost_usd == 0.0
+    assert served.model == f"bedrock/{lite}" and served.estimated_cost_usd < 0.001
+    assert worker_dependencies.pending_calls["m1"] == []
+
+    worker_dependencies.routes = {Stage.PLAN: ModelRoute(pro, ())}
+    worker_dependencies.cooldown = ModelCooldown()
+    # A call and its retry time out: $0.20. The next call's worst case still fits the $0.25
+    # cap, so it is sent and times out too; at $0.30 its retry is refused before it is sent.
+    with pytest.raises(ModelTimeout):
+        worker_dependencies.model_for("m1").invoke(request)
+    with pytest.raises(ModelError, match="^Request spend budget exhausted\\.$"):
+        worker_dependencies.model_for("m1").invoke(request)
+    timeouts = worker_dependencies.repositories.model_calls.list_by_request("m1")[3:]
+    assert [c.estimated_cost_usd for c in timeouts] == [0.10, 0.10, 0.10]
+
+
 def _capped_deps(model: ModelClient, max_usd: float, **settings: float) -> WorkerDependencies:
     """Deps on the production call path at ``max_usd`` per request, with config prices."""
     worker_dependencies = make_deps(model)

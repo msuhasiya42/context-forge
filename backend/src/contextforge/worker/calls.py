@@ -23,6 +23,8 @@ class BudgetedModel:
     reservation of its own worst case: the context cap in and its ``max_tokens`` out at its
     model's ``prices`` (``reserve_usd`` for a model without a price). So concurrent calls cannot
     overrun the cap between them, yet a cheap call does not hold a planner-sized reservation.
+    A zero-priced model reserves $0. ``RoutedModel`` admits each fallback as its own attempt, so
+    the model that actually runs is the one reserved for, at its own prices.
     ``pending`` maps each request to the reservations of its calls in flight.
     """
 
