@@ -3,7 +3,7 @@
 import math
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any
@@ -58,7 +58,9 @@ class WorkerDependencies:
     # The reservations of each request's model calls in flight (``BudgetedModel``).
     pending_calls: dict[str, list[float]] = field(default_factory=dict)
     activity: ActivityBus = field(default_factory=ActivityBus)
-    # time.monotonic() at the start of each request's current segment (see ``segment``).
+    # The monotonic clock deadlines are measured on; a test injects its own.
+    clock: Callable[[], float] = time.monotonic
+    # ``clock()`` at the start of each request's current segment (see ``segment``).
     segment_started: dict[str, float] = field(default_factory=dict)
     # Opens the trace runs; the default traces nothing. The runtime's LangSmith tracer also
     # wraps ``model`` and ``tools`` before they get here (infra.tracing.RequestTracer).
@@ -100,7 +102,7 @@ class WorkerDependencies:
         deadline = None
         if settings is not None:
             # A stage run outside a segment (a direct call in a test) gets the whole deadline.
-            started = self.segment_started.get(request_message_id, time.monotonic())
+            started = self.segment_started.get(request_message_id, self.clock())
             deadline = started + settings.request_deadline_seconds
         # Without settings (tests, offline tools) the call budget is the only limit.
         budgeted = BudgetedModel(
@@ -116,6 +118,7 @@ class WorkerDependencies:
             lock=self.budget_lock,
             pending=self.pending_calls,
             deadline=deadline,
+            clock=self.clock,
         )
         return RoutedModel(budgeted, self.routes, self.cooldown)
 
@@ -136,7 +139,7 @@ class WorkerDependencies:
         The request deadline counts from the segment's start, so the time a request waits on
         the user, between segments, never counts against it. The segment is one trace root.
         """
-        self.segment_started[request_message_id] = time.monotonic()
+        self.segment_started[request_message_id] = self.clock()
         try:
             with self.tracer.request(
                 request_message_id,

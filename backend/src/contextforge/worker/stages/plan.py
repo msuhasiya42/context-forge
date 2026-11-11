@@ -233,6 +233,13 @@ def validate_and_save_tasks(
         tasks = _new_tasks(planned_tasks, request_message_id, research_round)
         worker_dependencies.repositories.tasks.save_all(tasks)
         logger.info("plan gate created %d round-%d tasks", len(tasks), research_round)
+        if research_round > 1:  # announced only once the round is accepted and saved
+            researchers = "researcher" if len(tasks) == 1 else "researchers"
+            worker_dependencies.activity.emit(
+                request_message_id,
+                "",
+                f"Round {research_round}: {len(tasks)} more {researchers}",
+            )
         return [_plan_entry(task) for task in tasks]
 
 

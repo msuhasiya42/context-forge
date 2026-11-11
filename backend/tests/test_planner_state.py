@@ -2,7 +2,7 @@
 import pytest
 from pydantic import ValidationError
 
-from contextforge.core.planner import PlannedTask, PlannerOutput
+from contextforge.core.planner import LeadDecision, PlannedTask, PlannerOutput
 
 
 def _task(ref: str, worker_dependencies: list[str] | None = None) -> PlannedTask:
@@ -110,3 +110,12 @@ def test_plan_rejects_dependency_cycle() -> None:
         tasks=[_task("t1"), _task("t2", ["t1"]), _task("t3", ["t2"])],
         next_action="n",
     )
+
+
+def test_the_lead_may_not_start_a_reconcile_follow_up() -> None:
+    # Review I2: a follow-up depends only on its own round, so a reconcile would reconcile
+    # nothing; cite and report reconcile every round's findings.
+    reconcile = PlannedTask(ref="f1", kind="reconcile", goal="g", input_artifact_ids=[])
+    with pytest.raises(ValidationError, match="may not be a reconcile"):
+        LeadDecision(action="run_subagents", reason="sources disagree", tasks=[reconcile])
+    assert LeadDecision(action="run_subagents", reason="gap", tasks=[_task("f1")]).tasks

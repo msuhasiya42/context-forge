@@ -8,6 +8,7 @@ import math
 import random
 import threading
 import time
+from collections.abc import Callable
 
 from contextforge.core.models.base import ModelClient, ModelRequest, ModelResponse
 from contextforge.core.models.errors import ModelError
@@ -40,14 +41,15 @@ class BudgetedModel:
         lock: "threading.RLock | None" = None,
         pending: dict[str, list[float]] | None = None,
         deadline: float | None = None,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self.inner, self.calls, self.request_id = inner, calls, request_id
         self.call_budget, self.max_usd, self.reserve_usd = call_budget, max_usd, reserve_usd
         self.prices, self.cap_input_tokens = prices or {}, cap_input_tokens
         self.retries, self.lock = retries, lock or threading.RLock()
         self.pending = pending if pending is not None else {}
-        # A time.monotonic() value; None means no deadline.
-        self.deadline = deadline
+        # A ``clock()`` value; None means no deadline.
+        self.deadline, self.clock = deadline, clock
 
     def invoke(self, request: ModelRequest) -> ModelResponse:
         attempt = 0
@@ -73,7 +75,7 @@ class BudgetedModel:
             inflight = self.pending.setdefault(self.request_id, [])
             if len(records) + len(inflight) >= self.call_budget:
                 raise ModelError("Request model-call budget exhausted.")
-            if self.deadline is not None and time.monotonic() >= self.deadline:
+            if self.deadline is not None and self.clock() >= self.deadline:
                 raise ModelError("Request deadline exceeded.")
             # A record without a cost (written before calls were priced) is charged the reserve.
             spent = sum(

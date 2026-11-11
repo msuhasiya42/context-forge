@@ -32,7 +32,8 @@ from contextforge.worker.stages.citation_checks import (
 
 logger = logging.getLogger(__name__)
 _NUMBERS = re.compile(r"(?<![\w])[+-]?\d+(?:[.,]\d+)*")
-_BATCH_SIZE = 8
+# Statements per support-review call; the lead loop sizes its cite reserve with it.
+CITE_BATCH_SIZE = 8
 
 
 class SupportAssessment(Entity):
@@ -42,7 +43,7 @@ class SupportAssessment(Entity):
 
 
 class SupportReview(Entity):
-    reviews: list[SupportAssessment] = Field(max_length=_BATCH_SIZE)
+    reviews: list[SupportAssessment] = Field(max_length=CITE_BATCH_SIZE)
 
 
 def validate_research_findings(
@@ -102,8 +103,8 @@ def review_statement_support(
             )
         else:
             ready.append(packet)
-    for start in range(0, len(ready), _BATCH_SIZE):
-        batch = ready[start : start + _BATCH_SIZE]
+    for start in range(0, len(ready), CITE_BATCH_SIZE):
+        batch = ready[start : start + CITE_BATCH_SIZE]
         request = ModelRequest(
             stage=Stage.CITE,
             model=worker_dependencies.model_id(Stage.CITE),

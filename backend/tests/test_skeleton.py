@@ -1,7 +1,10 @@
+import dataclasses
 from pathlib import Path
 
+import pytest
 import yaml
 
+from contextforge.core.context.budgets import load_budgets
 from contextforge.core.models.recording import price_row
 
 
@@ -47,3 +50,9 @@ def test_models_yaml_covers_every_stage() -> None:
 def test_models_yaml_has_price_version() -> None:
     m = yaml.safe_load(Path("config/models.yaml").read_text())
     assert m["priceVersion"] == "2026-11-07"
+
+
+@pytest.mark.parametrize("key", ["research_rounds", "tasks_per_round", "tasks_per_request"])
+def test_round_limits_must_be_at_least_one(key) -> None:
+    with pytest.raises(ValueError, match="must be at least 1"):
+        dataclasses.replace(load_budgets(), **{key: 0})

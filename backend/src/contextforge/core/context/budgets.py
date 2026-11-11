@@ -38,6 +38,13 @@ class Budgets:
     def __post_init__(self) -> None:
         if not 1 <= self.web_tool_call_budget <= 50:
             raise ValueError("webToolCallBudget must be between 1 and 50")
+        for key, value in (
+            ("researchRounds", self.research_rounds),
+            ("tasksPerRound", self.tasks_per_round),
+            ("tasksPerRequest", self.tasks_per_request),
+        ):
+            if value < 1:
+                raise ValueError(f"{key} must be at least 1, got {value}")
 
     def messages_budget(self, fixed_tokens: int) -> int:
         """Tokens left for section 8 (the loop messages) after sections 1 to 7.

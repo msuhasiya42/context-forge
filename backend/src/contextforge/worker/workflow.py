@@ -275,6 +275,11 @@ def _research_rounds(
             ).result()
         except PlanFailed as rejected:  # the report is written from the rounds already run
             logger.warning("round %d rejected by the gate: %s", research_round, rejected.reason)
+            worker_dependencies.activity.emit(
+                request_state["request_message_id"],
+                "",
+                f"Research stopped: round {research_round} rejected: {rejected.reason}",
+            )
             return request_state, list(finished.values())
         request_state = {**request_state, "plan": [*request_state["plan"], *entries]}
 

@@ -19,7 +19,9 @@ Brief each new researcher as in the plan: goal (a short title), objective (the o
 it answers), outputFormat, toolsAndSources (primary sources over SEO pages and content
 farms), boundaries (what earlier researchers already covered, so it does not redo it), kind,
 inputArtifactIds and dependsOn (refs of other new tasks only; it reads earlier findings
-without depending on them). Never give a researcher an objective an earlier one had, and
+without depending on them). Never start a reconcile task: reconciling the findings of every
+round is done after research, when they are cited and reported. To settle a contradiction,
+start a web_search researcher that looks for the primary source. Never give a researcher an objective an earlier one had, and
 never ask it to repeat a search in searchesRun: name what is still missing and where else to
 look. brief is your revised research plan when the findings changed it, else null.
 

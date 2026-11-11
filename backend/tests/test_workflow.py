@@ -10,6 +10,7 @@ from contextforge.core.entities.model_call import Stage
 from contextforge.core.models.base import ModelRequest, ModelResponse, ToolCall
 from contextforge.core.models.errors import ModelError
 from contextforge.core.models.scripted import ScriptedModel
+from contextforge.core.settings import Settings
 from contextforge.core.tools.base import ToolContext
 from contextforge.infra.bedrock import converse_payload
 from contextforge.worker.dependencies import WorkerDependencies
@@ -978,9 +979,9 @@ def test_an_invalid_lead_twice_completes_with_the_findings_so_far() -> None:
     ("limit", "stopped"),
     [
         ({"tasks_per_request": 1}, "tasks per request reached"),
-        # plan and one researcher spent 2 of 10: no room for the lead, a researcher and the
-        # report's calls
-        ({"call_budget": 10}, "model-call budget reached"),
+        # plan and one researcher spent 2 of 9: one more researcher (1 call, as observed)
+        # plus the lead, cite and report reserve (1 + 1 + 5) does not fit in the 7 left
+        ({"call_budget": 9}, "budget: the model-call budget would not cover"),
     ],
 )
 def test_caps_stop_the_loop_before_the_lead_is_called(limit, stopped) -> None:
@@ -1000,6 +1001,113 @@ def test_caps_stop_the_loop_before_the_lead_is_called(limit, stopped) -> None:
     calls = worker_dependencies.repositories.model_calls.list_by_request(req.message_id)
     assert "lead" not in [c.stage for c in calls]
     assert len(worker_dependencies.repositories.tasks.list_by_request(req.message_id)) == 1
-    assert f"Research stopped: {stopped}" in [
-        a["text"] for _, a in worker_dependencies.activity.since(req.message_id, 0)
+    activity = [a["text"] for _, a in worker_dependencies.activity.since(req.message_id, 0)]
+    assert any(text.startswith(f"Research stopped: {stopped}") for text in activity)
+
+
+def _sql_researcher(queries: int) -> list[ModelResponse]:
+    """A sql researcher's calls: ``queries`` distinct queries, then its result."""
+    calls = [
+        ModelResponse(
+            tool_calls=[
+                ToolCall(
+                    id=f"q{limit}",
+                    name="sql_query",
+                    arguments={"dataset_id": "a2", "sql": f"SELECT * FROM t LIMIT {limit}"},
+                )
+            ],
+            stop_reason="tool_use",
+        )
+        for limit in range(1, queries + 1)
     ]
+    return [*calls, ModelResponse(structured=t1_result())]
+
+
+def _cheap_settings(**overrides) -> Settings:
+    """Settings that turn on the spend cap and deadline; unpriced calls cost a cent each."""
+    values = {"request_max_usd": 5.0, "call_reserve_usd": 0.01, **overrides}
+    return Settings(_env_file=None, **values)
+
+
+def test_a_round_that_would_starve_cite_and_report_is_skipped() -> None:
+    # Review C1, the reviewer's shape: plan, a web researcher and three sql researchers use
+    # 19 of the 50 calls. Another web researcher may cost (12 tool calls + 1) x 2 attempts =
+    # 26 calls; with the lead call and cite and report (8) that is 34 > 31 left: no round 2,
+    # and round 1's claims are cited and reported.
+    web = {**_briefed_plan()["tasks"][0], "ref": "w1", "kind": "web_search", "inputArtifactIds": []}
+    plan = {
+        **_briefed_plan(),
+        "tasks": [web, *({**_briefed_plan()["tasks"][0], "ref": f"s{i}"} for i in range(1, 4))],
+    }
+    worker_dependencies = make_deps(
+        ScriptedModel(
+            {
+                "plan": [ModelResponse(structured=plan)],
+                "execute": [
+                    ModelResponse(structured={"summary": "No page was read."}),
+                    *_sql_researcher(5),
+                    *_sql_researcher(5),
+                    *_sql_researcher(4),
+                ],
+                "lead": [_lead("run_subagents", "x", [_follow_up("f1", "Settlements.")])],
+            }
+        ),
+        tasks_in_flight=1,
+        research_rounds=3,
+        settings=_cheap_settings(),
+    )
+    req = seed_chat_with_dataset(worker_dependencies, chat_id="c1", user_id="u1", dataset_id="a2")
+    assert _run(worker_dependencies, req) == "COMPLETED"
+    stages = [
+        c.stage
+        for c in worker_dependencies.repositories.model_calls.list_by_request(req.message_id)
+    ]
+    assert stages[:19].count("execute") == 18 and "lead" not in stages
+    report = next(
+        m
+        for m in worker_dependencies.repositories.messages.list_by_chat("c1")
+        if isinstance(m, ReportMessage)
+    )
+    assert report.report.claims
+    activity = [a["text"] for _, a in worker_dependencies.activity.since(req.message_id, 0)]
+    assert "Research stopped: budget: the model-call budget would not cover another round " in (
+        " ".join(activity) + " "
+    )
+
+
+@pytest.mark.parametrize(
+    ("settings", "clock", "limit"),
+    [
+        # Plan and one researcher cost 2 cents of 9: one more (1 cent, as observed) plus the
+        # lead, cite and report reserve (7 calls at the 1 cent the plan cost) is 8 > 7 left.
+        (_cheap_settings(request_max_usd=0.09), None, "spend cap"),
+        # 500 s of the 900 s deadline are gone: another round may take as long again.
+        (_cheap_settings(), 500.0, "request deadline"),
+    ],
+)
+def test_spend_cap_and_deadline_skip_a_round_that_would_not_leave_room_to_report(
+    settings, clock, limit
+) -> None:
+    worker_dependencies = make_deps(
+        ScriptedModel(
+            {
+                "plan": [ModelResponse(structured=_briefed_plan())],
+                "execute": [ModelResponse(structured=t1_result())],
+                "lead": [_lead("run_subagents", "x", [_follow_up("f1", "Settlements.")])],
+            }
+        ),
+        research_rounds=3,
+        settings=settings,
+    )
+    req = seed_chat_with_dataset(worker_dependencies, chat_id="c1", user_id="u1", dataset_id="a2")
+    if clock is not None:  # the injected clock, never wall time
+        worker_dependencies.clock = lambda: clock
+        worker_dependencies.segment_started[req.message_id] = 0.0
+    assert _run(worker_dependencies, req) == "COMPLETED"
+    calls = worker_dependencies.repositories.model_calls.list_by_request(req.message_id)
+    assert "lead" not in [c.stage for c in calls]
+    activity = [a["text"] for _, a in worker_dependencies.activity.since(req.message_id, 0)]
+    assert (
+        f"Research stopped: budget: the {limit} would not cover another round and the report"
+        in (activity)
+    )

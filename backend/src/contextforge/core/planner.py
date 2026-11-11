@@ -99,6 +99,14 @@ class LeadDecision(Entity):
                 f"run_subagents needs {MIN_PLANNED_TASKS} to {MAX_PLANNED_TASKS} tasks, "
                 f"got {len(self.tasks)}"
             )
+        # A follow-up depends only on tasks of its own round, so a reconcile would have
+        # nothing to reconcile; reconciling across rounds is cite and report's job.
+        reconciles = [task.ref for task in self.tasks if task.kind == TaskKind.RECONCILE]
+        if reconciles:
+            raise ValueError(
+                f"a follow-up may not be a reconcile task ({', '.join(reconciles)}); cite and "
+                "report reconcile the findings of every round"
+            )
         check_task_graph(self.tasks)
         return self
 
