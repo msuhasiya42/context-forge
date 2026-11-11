@@ -32,7 +32,8 @@ write. Each task has:
   first-party documentation, original research) over SEO pages and content farms;
 - boundaries: what it must not cover because another task does, so no two tasks overlap;
 - kind, inputArtifactIds (the artifacts it may read) and dependsOn (the refs of the tasks
-  whose results it needs).
+  whose results it needs). inputArtifactIds holds only artifact ids listed in the chat's
+  artifacts; to use another task's output, put its ref in dependsOn.
 Task kinds:
 - web_search: search and read public pages, cited by URL. Use it for public or current
   information, including numbers published on public pages. It reads no artifacts.

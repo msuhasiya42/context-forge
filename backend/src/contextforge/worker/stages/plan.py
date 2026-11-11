@@ -37,6 +37,7 @@ from contextforge.core.models.errors import ModelError
 from contextforge.core.planner import (
     PlannedTask,
     PlannerOutput,
+    check_task_graph,
     read_plan_leniently,
     with_inferred_dependencies,
 )
@@ -225,7 +226,9 @@ def validate_and_save_tasks(
         if existing:
             logger.info("plan gate found %d tasks already created", len(existing))
             return [_plan_entry(task) for task in existing]
-        planned_tasks = [PlannedTask.model_validate(task) for task in planned["tasks"]]
+        planned_tasks = _refs_as_dependencies(
+            [PlannedTask.model_validate(task) for task in planned["tasks"]]
+        )
         _check_plan(
             planned_tasks,
             worker_dependencies.repositories.artifacts.list_by_chat(request_state["chat_id"]),
@@ -470,6 +473,37 @@ def _clarification(
         created_at=now,
         updated_at=now,
     )
+
+
+def _refs_as_dependencies(planned_tasks: list[PlannedTask]) -> list[PlannedTask]:
+    """Move every ``input_artifact_ids`` entry that is a ref of a task in the same plan into
+    that task's ``depends_on``: models (live: Gemini) sometimes list another task's ref as an
+    input to say they need its output. The graph is checked again, as a moved ref may close a
+    cycle; raises ``PlanFailed`` if it does."""
+    refs = {task.ref for task in planned_tasks}
+    if not any(
+        artifact_id in refs for task in planned_tasks for artifact_id in task.input_artifact_ids
+    ):
+        return planned_tasks
+    moved = []
+    for task in planned_tasks:
+        named_refs = [item for item in task.input_artifact_ids if item in refs]
+        if named_refs:
+            logger.warning("planned task %s lists task refs %s as inputs", task.ref, named_refs)
+            task = task.model_copy(
+                update={
+                    "input_artifact_ids": [
+                        item for item in task.input_artifact_ids if item not in refs
+                    ],
+                    "depends_on": list(dict.fromkeys([*task.depends_on, *named_refs])),
+                }
+            )
+        moved.append(task)
+    try:
+        check_task_graph(moved)
+    except ValueError as error:
+        raise PlanFailed(str(error)) from error
+    return moved
 
 
 def _check_plan(planned_tasks: list[PlannedTask], chat_artifacts: list[Artifact]) -> None:

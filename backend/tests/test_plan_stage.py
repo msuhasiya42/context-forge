@@ -9,7 +9,12 @@ from contextforge.core.entities.user import User
 from contextforge.core.models.base import ModelResponse
 from contextforge.core.models.config import ModelRoute
 from contextforge.core.models.scripted import ScriptedModel
-from contextforge.core.planner import PlannerOutput, read_plan_leniently, with_inferred_dependencies
+from contextforge.core.planner import (
+    PlannedTask,
+    PlannerOutput,
+    read_plan_leniently,
+    with_inferred_dependencies,
+)
 from contextforge.core.services.memory import memory_snapshot
 from contextforge.worker.stages.guards import Cancelled
 from contextforge.worker.stages.plan import (
@@ -102,6 +107,26 @@ def test_gate_rejects_artifact_from_another_chat() -> None:
         "a9" in e.value.reason
         and worker_dependencies.repositories.tasks.list_by_request(req.message_id) == []
     )
+
+
+def test_gate_reads_a_task_ref_in_inputs_as_a_dependency_and_rejects_unknown_ids() -> None:
+    # live (Gemini): the synthesis task listed t1 as an input artifact instead of in dependsOn
+    worker_dependencies = make_deps(ScriptedModel({}))
+    req = seed_chat_with_dataset(worker_dependencies, chat_id="c1", user_id="u1", dataset_id="a2")
+    request_state = create_initial_request_state(req)
+
+    def plan(t2_inputs: list[str]) -> dict:
+        tasks = _plan_research_tasks(["a2"])["tasks"]
+        tasks[1] = {**tasks[1], "inputArtifactIds": t2_inputs, "dependsOn": []}
+        return {"tasks": [PlannedTask.model_validate(task).model_dump() for task in tasks]}
+
+    with pytest.raises(PlanFailed, match="zz"):
+        validate_and_save_tasks(request_state, plan(["t1", "zz"]), worker_dependencies)
+    assert worker_dependencies.repositories.tasks.list_by_request(req.message_id) == []
+    validate_and_save_tasks(request_state, plan(["a2", "t1", "t1"]), worker_dependencies)
+    first, second = worker_dependencies.repositories.tasks.list_by_request(req.message_id)
+    assert second.input_artifact_ids == ["a2"]
+    assert second.depends_on_task_ids == [first.task_id]
 
 
 def test_clarification_writes_one_message_and_pending_payload() -> None:
