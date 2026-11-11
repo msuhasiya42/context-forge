@@ -131,6 +131,8 @@ class RequestMessage(_MessageFields):
     failure_reason: str | None = None
     # Durable request-wide search/fetch admissions; never reset by a retry or resume.
     web_tool_calls: int = Field(default=0, ge=0)
+    # The lead researcher's plan for the request (F16), set once planned; None before.
+    brief: str | None = None
 
 
 class ClarificationMessage(_RequestEntryFields):

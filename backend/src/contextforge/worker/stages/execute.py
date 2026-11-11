@@ -565,7 +565,7 @@ def _execute_inputs(
             request_state["request_message_id"],
         ),
         preferences=request_state["memory"]["preferences"],
-        constraints=[*task_state["constraints"], f"Task goal: {task_context.task.goal}"],
+        constraints=[*task_state["constraints"], *task_spec_lines(task_context.task)],
         facts=request_state["facts"],
         open_questions=request_state["open_questions"],
         next_action=request_state["next_action"],
@@ -576,6 +576,18 @@ def _execute_inputs(
         prior_messages=[],
         loop_messages=task_state["messages"],
     )
+
+
+def task_spec_lines(task: Task) -> list[str]:
+    """The lead's brief for this researcher as constraint lines: the goal always, each spec
+    field when the planner wrote one (a task planned before F16 has none)."""
+    spec = (
+        ("Task objective", task.objective),
+        ("Output format", task.output_format),
+        ("Tools and sources", task.tools_and_sources),
+        ("Boundaries", task.boundaries),
+    )
+    return [f"Task goal: {task.goal}", *(f"{label}: {text}" for label, text in spec if text)]
 
 
 def _handle_response(

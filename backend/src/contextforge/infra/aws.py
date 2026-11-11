@@ -222,6 +222,22 @@ class DynamoMessages:
                 raise LookupError(f"no request {message_id} in chat {chat_id}") from exc
             return None
 
+    def set_request_brief(self, chat_id: str, message_id: str, brief: str) -> None:
+        """One update of the brief attribute alone, guarded to an existing request."""
+        try:
+            self.store.client.update_item(
+                TableName=self.store.table,
+                Key=self.store.key(f"CHAT#{chat_id}", f"MSG#{message_id}"),
+                UpdateExpression="SET #brief = :brief",
+                ConditionExpression="attribute_exists(PK) AND #kind = :kind",
+                ExpressionAttributeNames={"#brief": "brief", "#kind": "kind"},
+                ExpressionAttributeValues={":brief": {"S": brief}, ":kind": {"S": "request"}},
+            )
+        except ClientError as exc:
+            if error_code(exc) != _CONDITION_FAILED:
+                raise
+            raise LookupError(f"no request {message_id} in chat {chat_id}") from exc
+
     def save(self, message: Message) -> None:
         self.store.put(f"CHAT#{message.chat_id}", f"MSG#{message.message_id}", message)
 

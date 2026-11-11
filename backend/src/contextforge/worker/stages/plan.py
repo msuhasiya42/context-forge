@@ -95,6 +95,8 @@ class PlanResult(TypedDict):
 
     kind: str
     goal: str
+    # The lead's research plan, also saved on the request record; empty for a clarification.
+    brief: str
     constraints: list[str]
     open_questions: list[str]
     next_action: str
@@ -157,14 +159,15 @@ def create_research_plan(
             )
             if output.kind == "clarification":
                 raise PlanFailed("planner asked a question after being told to plan")
-        pending = (
-            None
-            if output.kind == "plan"
-            else _ask_user(request_state, attempt, output, worker_dependencies)
-        )
+        if output.kind == "plan":
+            pending = None
+            _save_brief(request_state, output.brief, worker_dependencies)
+        else:
+            pending = _ask_user(request_state, attempt, output, worker_dependencies)
         return PlanResult(
             kind=output.kind,
             goal=output.goal,
+            brief=output.brief if output.kind == "plan" else "",
             constraints=output.constraints,
             open_questions=output.open_questions,
             next_action=output.next_action,
@@ -175,6 +178,18 @@ def create_research_plan(
             else None,
             assumption=assumption,
         )
+
+
+def _save_brief(
+    request_state: RequestState, brief: str, worker_dependencies: WorkerDependencies
+) -> None:
+    """Keep the lead's brief on the request record, where the UI reads it; none is no write."""
+    if not brief:
+        return
+    worker_dependencies.repositories.messages.set_request_brief(
+        request_state["chat_id"], request_state["request_message_id"], brief
+    )
+    logger.info("brief saved (%d chars)", len(brief))
 
 
 def _may_ask(attempt: int, artifacts: list[Artifact]) -> bool:
@@ -244,7 +259,10 @@ def _planner_inputs(
     preferences."""
     return ContextInputs(
         memory=request_state["memory"]["text"],
-        stage_prompt=load_prompt(prompt_version(Stage.PLAN)),
+        stage_prompt=load_prompt(
+            prompt_version(Stage.PLAN),
+            tasks_per_round=worker_dependencies.budgets.tasks_per_round,
+        ),
         chat_id=request_state["chat_id"],
         request=request,
         preferences=request_state["memory"]["preferences"],
@@ -471,6 +489,10 @@ def _new_tasks(planned_tasks: list[PlannedTask], request_message_id: str) -> lis
             goal=task.goal,
             input_artifact_ids=task.input_artifact_ids,
             depends_on_task_ids=[task_ids[ref] for ref in task.depends_on],
+            objective=task.objective,
+            output_format=task.output_format,
+            tools_and_sources=task.tools_and_sources,
+            boundaries=task.boundaries,
             status=TaskStatus.PLANNED,
             attempt=1,
             created_at=now,

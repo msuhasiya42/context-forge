@@ -57,7 +57,7 @@ def test_dry_run_writes_a_report_comparing_two_models(tmp_path: Path) -> None:
         ["--models", models, "--query-file", str(query_file), "--dry-run", "--out", str(out)]
     )
     report = out.read_text(encoding="utf-8")
-    assert "- Mode: dry run" in report and "prompt plan.5" in report and f"> {QUERY}" in report
+    assert "- Mode: dry run" in report and "prompt plan.6" in report and f"> {QUERY}" in report
     assert "- Expected cost, stated before the run: $0." in report and "Cap: $0.50" in report
     for model in models.split(","):
         assert f"| `{model}` | plan | yes | forced tool → tool call | 3 | 2 | 1 |" in report
@@ -69,13 +69,13 @@ def test_dry_run_writes_a_report_comparing_two_models(tmp_path: Path) -> None:
 def test_a_run_records_the_refused_field_the_rejected_first_answer_and_the_run_cap() -> None:
     """Live (F8): Kimi K3.1 refuses temperature; a first plan may break the schema and be
     retried once; a model whose worst case no longer fits the run cap is never called."""
-    one_task = {**copy.deepcopy(SAMPLE_PLAN), "tasks": SAMPLE_PLAN["tasks"][:1]}
+    no_task = {**copy.deepcopy(SAMPLE_PLAN), "tasks": []}
     temperature = "This model doesn't support the temperature field. Remove temperature."
     runtime = FakeRuntime(
         {
             "qwen.qwen3-235b-a22b-2507-v1:0": [
                 _refusal("ValidationException", temperature),
-                _answer(one_task),
+                _answer(no_task),
                 _answer(SAMPLE_PLAN),
             ],
             "global.moonshotai.kimi-k3.1": [],
@@ -102,7 +102,7 @@ def test_a_run_records_the_refused_field_the_rejected_first_answer_and_the_run_c
     assert "Call 1 refused: ValidationException: This model doesn't support the temperature" in (
         report
     )
-    assert "**First answer:** invalid plan: Value error, a plan needs 2 to 6 tasks, got 1" in report
+    assert "**First answer:** invalid plan: Value error, a plan needs 1 to 6 tasks, got 0" in report
     assert "| `global.moonshotai.kimi-k3.1` | failed | no | – |" in report
 
 

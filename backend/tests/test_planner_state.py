@@ -15,14 +15,17 @@ def _task(ref: str, worker_dependencies: list[str] | None = None) -> PlannedTask
     )
 
 
-def test_plan_requires_two_to_six_tasks() -> None:
+def test_plan_requires_one_to_six_tasks() -> None:
+    # F16 effort scaling: a simple fact is one researcher.
+    one = PlannerOutput(kind="plan", goal="g", tasks=[_task("t1")], next_action="n")
+    assert one.brief == "" and one.tasks and one.tasks[0].objective == ""
     with pytest.raises(ValidationError):
         PlannerOutput(
             kind="plan",
             goal="g",
             constraints=[],
             open_questions=[],
-            tasks=[_task("t1")],
+            tasks=[],
             next_action="n",
         )
     with pytest.raises(ValidationError):

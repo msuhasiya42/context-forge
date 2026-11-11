@@ -60,7 +60,7 @@ def test_recording_client_writes_one_model_call_per_invocation() -> None:
     client.invoke(_req("execute"))
     calls = repositories.model_calls.list_by_request("m1")
     assert [c.stage for c in calls] == ["plan"]
-    assert calls[0].context_version == "mem:1|prompt:plan.5"
+    assert calls[0].context_version == "mem:1|prompt:plan.6"
 
 
 def test_recording_client_records_error_and_reraises() -> None:
@@ -322,7 +322,7 @@ def test_deadline_refuses_a_call_once_the_segment_has_run_past_it() -> None:
 
 def test_prompt_version_mapping() -> None:
     stages = (Stage.PLAN, Stage.EXECUTE, Stage.COMPRESS, Stage.CITE)
-    assert [prompt_version(s) for s in stages] == ["plan.5", "execute.8", "compress.2", "cite.1"]
+    assert [prompt_version(s) for s in stages] == ["plan.6", "execute.9", "compress.2", "cite.1"]
 
 
 def test_load_prompt_reads_file() -> None:

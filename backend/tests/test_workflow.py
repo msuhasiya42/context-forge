@@ -803,3 +803,62 @@ def test_report_constraints_keep_the_users_facts_with_provenance_and_drop_plan_r
     assert kept["Exclude transfers between the user's own accounts from spending."][0] == "request"
     assert not [text for text in kept if "plan" in text.lower() or "task" in text.lower()]
     assert not set(leaked) & set(kept)
+
+
+def _briefed_plan() -> dict:
+    """A one-researcher plan with a brief and a full researcher spec (F16)."""
+    return {
+        "kind": "plan",
+        "goal": "Find the own-account transfers.",
+        "brief": "One part: the transfers between the user's accounts. Simple fact: 1.",
+        "tasks": [
+            {
+                "ref": "t1",
+                "kind": "sql_analysis",
+                "goal": "Transfers between own accounts.",
+                "objective": "List each transfer pair so spending can exclude it.",
+                "outputFormat": "Pairs of row ids with amount and date.",
+                "toolsAndSources": "sql_query over a2 only.",
+                "boundaries": "Transfers only; card bills are out of scope.",
+                "inputArtifactIds": ["a2"],
+            }
+        ],
+        "nextAction": "Run t1.",
+    }
+
+
+def test_the_lead_brief_is_kept_and_each_researcher_gets_its_full_spec() -> None:
+    # F16 commit 1: effort scaling allows one researcher; the brief is saved on the request
+    # record; the researcher's call carries objective, output format, sources and boundaries.
+    worker_dependencies = make_deps(
+        ScriptedModel(
+            {
+                "plan": [ModelResponse(structured=_briefed_plan())],
+                "execute": [ModelResponse(structured=t1_result())],
+            }
+        )
+    )
+    requests: list[ModelRequest] = []
+    worker_dependencies.model.on_request = requests.append  # type: ignore[attr-defined]
+    req = seed_chat_with_dataset(worker_dependencies, chat_id="c1", user_id="u1", dataset_id="a2")
+    _start(worker_dependencies, req)
+    out = build_research_workflow(worker_dependencies, checkpointer=None).invoke(
+        {"chat_id": "c1", "message_id": req.message_id}, _cfg(req)
+    )
+    assert out["status"] == "COMPLETED"
+    stored = worker_dependencies.repositories.messages.get("c1", req.message_id)
+    assert stored.brief == _briefed_plan()["brief"]
+    (task,) = worker_dependencies.repositories.tasks.list_by_request(req.message_id)
+    assert task.boundaries == "Transfers only; card bills are out of scope."
+    plan_call = next(r for r in requests if r.stage == "plan")
+    # the configured round ceiling is stated; the attribution comment is never sent
+    assert "up to 5 researchers" in plan_call.system[-1] and "<!--" not in plan_call.system[-1]
+    execute_text = next(r for r in requests if r.stage == "execute").messages[0].content
+    for line in (
+        "Task goal: Transfers between own accounts.",
+        "Task objective: List each transfer pair so spending can exclude it.",
+        "Output format: Pairs of row ids with amount and date.",
+        "Tools and sources: sql_query over a2 only.",
+        "Boundaries: Transfers only; card bills are out of scope.",
+    ):
+        assert line in execute_text

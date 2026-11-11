@@ -11,7 +11,9 @@ from pydantic import ValidationError, model_validator
 from contextforge.core.entities import Entity
 from contextforge.core.entities.task import TaskKind
 
-MIN_PLANNED_TASKS = 2
+# Effort scales with the question (F16): one researcher for a simple fact, more for a
+# comparison or a broad question. Six stays the schema ceiling for a sql plan with a reconcile.
+MIN_PLANNED_TASKS = 1
 MAX_PLANNED_TASKS = 6
 # A task goal that says it works on earlier tasks' results.
 _USES_EARLIER = re.compile(
@@ -23,20 +25,32 @@ _REF_RANGE = re.compile(r"\bt(\d+)\s*(?:-|–|—|to|through)\s*t(\d+)\b", re.IG
 
 class PlannedTask(Entity):
     """One task the planner proposes. ``ref`` is local to the plan; the plan gate maps refs to
-    Task ids when it creates the Task records."""
+    Task ids when it creates the Task records.
+
+    ``goal`` is the short title; the four spec fields brief the researcher (Anthropic's
+    subagent description: objective, output format, tools and sources, boundaries). They
+    default to empty so an answer or a record from before F16 still reads.
+    """
 
     ref: str
     kind: TaskKind
     goal: str
     input_artifact_ids: list[str]
     depends_on: list[str] = []
+    objective: str = ""
+    output_format: str = ""
+    tools_and_sources: str = ""
+    boundaries: str = ""
 
 
 class PlannerOutput(Entity):
-    """Either a plan of 2 to 6 tasks or a single clarification question for the user."""
+    """Either a plan of 1 to 6 tasks or a single clarification question for the user."""
 
     kind: Literal["plan", "clarification"]
     goal: str
+    # The lead's research plan: how the question decomposes, what a complete answer needs and
+    # the effort chosen. Empty when a model leaves it out; a clarification has none.
+    brief: str = ""
     # Lists a model may leave out when it has nothing for them (live: constraints).
     constraints: list[str] = []
     open_questions: list[str] = []
@@ -58,22 +72,28 @@ class PlannerOutput(Entity):
             raise ValueError(
                 f"a plan needs {MIN_PLANNED_TASKS} to {MAX_PLANNED_TASKS} tasks, got {len(tasks)}"
             )
-        refs = [task.ref for task in tasks]
-        if len(set(refs)) != len(refs):
-            raise ValueError(f"task refs must be unique, got {refs}")
-        for task in tasks:
-            for dependency in task.depends_on:
-                if dependency == task.ref:
-                    raise ValueError(f"task {task.ref} depends on itself")
-                if dependency not in refs:
-                    raise ValueError(f"task {task.ref} depends on unknown ref {dependency}")
-        cycle = _find_dependency_cycle(tasks)
-        if cycle:
-            raise ValueError(
-                f"tasks depend on each other in a cycle: {' -> '.join(cycle)} "
-                "(each task depends on the next)"
-            )
+        check_task_graph(tasks)
         return self
+
+
+def check_task_graph(tasks: list[PlannedTask]) -> None:
+    """Raise ``ValueError`` unless refs are unique and ``depends_on`` names other tasks of the
+    same list without a cycle."""
+    refs = [task.ref for task in tasks]
+    if len(set(refs)) != len(refs):
+        raise ValueError(f"task refs must be unique, got {refs}")
+    for task in tasks:
+        for dependency in task.depends_on:
+            if dependency == task.ref:
+                raise ValueError(f"task {task.ref} depends on itself")
+            if dependency not in refs:
+                raise ValueError(f"task {task.ref} depends on unknown ref {dependency}")
+    cycle = _find_dependency_cycle(tasks)
+    if cycle:
+        raise ValueError(
+            f"tasks depend on each other in a cycle: {' -> '.join(cycle)} "
+            "(each task depends on the next)"
+        )
 
 
 def _find_dependency_cycle(tasks: list[PlannedTask]) -> list[str] | None:

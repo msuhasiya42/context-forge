@@ -169,6 +169,25 @@ def test_web_tool_admission_is_atomic_and_reads_legacy_requests(db, store) -> No
         stub.assert_no_pending_responses()
 
 
+def test_the_brief_is_set_alone_on_an_existing_request(db, store) -> None:
+    # F16: one attribute update, so a status a cancel wrote meanwhile is never overwritten.
+    params = {
+        "TableName": TABLE,
+        "Key": key("CHAT#c1", "MSG#m1"),
+        "UpdateExpression": "SET #brief = :brief",
+        "ConditionExpression": "attribute_exists(PK) AND #kind = :kind",
+        "ExpressionAttributeNames": {"#brief": "brief", "#kind": "kind"},
+        "ExpressionAttributeValues": {":brief": {"S": "Two parts."}, ":kind": {"S": "request"}},
+    }
+    with Stubber(db) as stub:
+        stub.add_response("update_item", {}, params)
+        stub.add_client_error("update_item", CONDITION_FAILED, expected_params=params)
+        DynamoMessages(store).set_request_brief("c1", "m1", "Two parts.")
+        with pytest.raises(LookupError):
+            DynamoMessages(store).set_request_brief("c1", "m1", "Two parts.")
+        stub.assert_no_pending_responses()
+
+
 def test_request_status_update_is_conditional_and_a_moved_status_is_stale(db, store) -> None:
     conditional_update = {
         "TableName": TABLE,

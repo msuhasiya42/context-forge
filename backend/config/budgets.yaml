@@ -18,3 +18,7 @@ tasksInFlight: 5
 toolCallsPerTask: 6
 taskRetries: 1
 noProgressTurns: 3
+
+# Lead researcher (F16). The most researchers the lead starts in one round; the plan prompt
+# states it as the ceiling for a complex or broad question.
+tasksPerRound: 5

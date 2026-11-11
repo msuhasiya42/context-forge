@@ -3,7 +3,7 @@ import pytest
 from pydantic import ValidationError
 
 from contextforge.core.entities.message import ActionResponseMessage, MessageAdapter, RequestMessage
-from contextforge.core.entities.task import TaskKind, validate_structured_data
+from contextforge.core.entities.task import Task, TaskKind, validate_structured_data
 from contextforge.core.entities.user import User
 from contextforge.core.ids import new_ulid
 
@@ -24,7 +24,7 @@ def test_request_message_round_trips_camel_case() -> None:
     m = MessageAdapter.validate_python(raw)
     assert isinstance(m, RequestMessage)
     assert m.web_tool_calls == 0  # Older request records still load.
-    assert m.model_dump(by_alias=True) == {**raw, "webToolCalls": 0}
+    assert m.model_dump(by_alias=True) == {**raw, "webToolCalls": 0, "brief": None}
 
 
 def test_message_without_kind_is_rejected() -> None:
@@ -99,3 +99,26 @@ def test_user_instructions_capped() -> None:
 def test_ulids_sort_by_creation() -> None:
     a, b = new_ulid(), new_ulid()
     assert a < b and len(a) == 26
+
+
+def test_a_task_record_from_before_researcher_specs_still_loads() -> None:
+    # F16: the spec fields are new; a stored Task without them reads with empty defaults.
+    task = Task.model_validate(
+        {
+            "taskId": "t1",
+            "requestMessageId": "m1",
+            "kind": "web_search",
+            "goal": "Gold price",
+            "inputArtifactIds": [],
+            "status": "COMPLETED",
+            "attempt": 1,
+            "createdAt": "t",
+            "updatedAt": "t",
+        }
+    )
+    assert (task.objective, task.output_format, task.tools_and_sources, task.boundaries) == (
+        "",
+        "",
+        "",
+        "",
+    )

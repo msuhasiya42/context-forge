@@ -49,6 +49,11 @@ class InMemoryMessages:
             )
             return count
 
+    def set_request_brief(self, chat_id: str, message_id: str, brief: str) -> None:
+        with self._lock:
+            current = self._request(chat_id, message_id)
+            self._messages[(chat_id, message_id)] = current.model_copy(update={"brief": brief})
+
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._messages: dict[tuple[str, str], Message] = {}

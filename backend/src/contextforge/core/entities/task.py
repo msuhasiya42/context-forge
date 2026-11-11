@@ -71,6 +71,11 @@ class Task(Entity):
     goal: str
     input_artifact_ids: list[str]
     depends_on_task_ids: list[str] = []
+    # The researcher's spec (F16), copied from the planned task; empty on records from before.
+    objective: str = ""
+    output_format: str = ""
+    tools_and_sources: str = ""
+    boundaries: str = ""
     status: TaskStatus
     attempt: int = Field(ge=1)
     result: TaskResult | None = None
