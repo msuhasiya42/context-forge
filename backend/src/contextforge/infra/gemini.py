@@ -1,22 +1,33 @@
-"""Google Gemini through its OpenAI-compatible chat completions API, for the offline judge.
+"""Google Gemini through its OpenAI-compatible chat completions API: every research stage while
+the Gemini profile of config/models.yaml is active (F17), and the offline judge.
 
-The structured result is the Bedrock adapter's: a ``return_result`` tool the call is forced to
-use, read back as ``ModelResponse.structured``. Failures map to the provider-neutral model
-errors so ``worker.routing`` moves to the next model while Gemini is throttled or down.
+A tool loop sends each assistant turn back with its tool calls, and each tool result as a
+``tool`` message with the call's id. Gemini 3 also returns a thought signature on a function
+call (``extra_content``) that must come back with that call on the next turn; it travels as the
+ToolCall's ``provider_data``. The structured result is the Bedrock adapter's: a
+``return_result`` tool the call is forced to use, read back as ``ModelResponse.structured``.
+Failures map to the provider-neutral model errors so ``worker.routing`` moves to the next model
+while Gemini is throttled or down.
 Neither the API key nor a request body is ever logged or put in an error.
 """
 
 import json
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import Any
 
 import httpx
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 from pydantic import SecretStr
 
-from contextforge.core.models.base import ModelRequest, ModelResponse, ToolCall
+from contextforge.core.entities.model_call import Stage
+from contextforge.core.models.base import (
+    PROVIDER_DATA_KEY,
+    ModelRequest,
+    ModelResponse,
+    ToolCall,
+)
 from contextforge.core.models.errors import (
     ModelAccessDenied,
     ModelError,
@@ -35,6 +46,11 @@ from contextforge.infra.bedrock import (
 )
 
 _MODEL_PREFIX = "gemini-"
+# Google's stand-in for a function call whose thought signature was not kept (a turn another
+# model wrote, or a reply without one): Gemini 3 refuses a function call in the current turn
+# that carries none. The value is from Google's thought-signature guide as recalled at F17; the
+# live run confirms it (a refusal is ModelRejected, HTTP 400).
+_SKIP_SIGNATURE = {"google": {"thought_signature": "skip_thought_signature_validator"}}
 
 
 def is_gemini_model(model_id: str) -> bool:
@@ -79,19 +95,20 @@ class GeminiModel:
         *,
         base_url: str,
         pacer: RequestPacer | None = None,
-        reasoning_effort: str | None = None,
+        efforts: Mapping[Stage, str] | None = None,
     ) -> None:
         self._http = http
         self._api_key = api_key
         self._url = f"{base_url.rstrip('/')}/chat/completions"
         self._pacer = pacer
-        # Gemini 3 always thinks, and its thinking counts against max_tokens; a low effort keeps
-        # the token cap for the answer.
-        self._reasoning_effort = reasoning_effort
+        # Each stage's config/models.yaml effort, sent as ``reasoning_effort``. Gemini 3 always
+        # thinks, and its thinking counts against max_tokens; a low effort keeps the token cap
+        # for the answer.
+        self._efforts = efforts or {}
 
     def invoke(self, request: ModelRequest) -> ModelResponse:
         try:
-            payload = chat_payload(request, self._reasoning_effort)
+            payload = chat_payload(request, self._efforts.get(request.stage))
         except (KeyError, TypeError, ValueError) as exc:
             raise ModelError(
                 f"Could not build the Gemini request for {request.stage}: {exc}"
@@ -158,18 +175,31 @@ def _message(message: BaseMessage) -> dict[str, Any]:
     if isinstance(message, AIMessage):
         turn: dict[str, Any] = {"role": "assistant", "content": text or None}
         if message.tool_calls:
-            turn["tool_calls"] = [
-                {
-                    "id": call["id"],
-                    "type": "function",
-                    "function": {"name": call["name"], "arguments": json.dumps(call["args"])},
-                }
-                for call in message.tool_calls
-            ]
+            turn["tool_calls"] = _assistant_calls(message)
         return turn
     if isinstance(message, HumanMessage):
         return {"role": "user", "content": text or "(empty)"}
     return {"role": "user", "content": history_block(text)}
+
+
+def _assistant_calls(message: AIMessage) -> list[dict[str, Any]]:
+    """An assistant turn's tool calls as sent back, each with the ``extra_content`` it came
+    with. Only the first call of a turn carries a signature, so the stand-in goes on the first
+    call alone when the turn kept none."""
+    kept: dict[str, Any] = message.additional_kwargs.get(PROVIDER_DATA_KEY) or {}
+    calls: list[dict[str, Any]] = []
+    for call in message.tool_calls:
+        sent: dict[str, Any] = {
+            "id": call["id"],
+            "type": "function",
+            "function": {"name": call["name"], "arguments": json.dumps(call["args"])},
+        }
+        if call["id"] in kept:
+            sent.update(kept[call["id"]])
+        calls.append(sent)
+    if not kept:
+        calls[0]["extra_content"] = _SKIP_SIGNATURE
+    return calls
 
 
 def http_error(response: httpx.Response) -> ModelError:
@@ -221,13 +251,24 @@ def _response(
     text = message.get("content") or None
     calls: list[ToolCall] = []
     structured = None
-    for call in message.get("tool_calls") or []:
+    for index, call in enumerate(message.get("tool_calls") or []):
         function = call["function"]
         arguments = _arguments(function)
         if function["name"] == RESULT_TOOL:
             structured = arguments
         else:
-            calls.append(ToolCall(id=call["id"], name=function["name"], arguments=arguments))
+            # An id is how the tool result is paired with its call; one Gemini left out is
+            # made up, and sent back with the result the same way.
+            call_id = call.get("id") or f"call_{index}"
+            extra = call.get("extra_content")
+            calls.append(
+                ToolCall(
+                    id=call_id,
+                    name=function["name"],
+                    arguments=arguments,
+                    provider_data={"extra_content": extra} if extra else None,
+                )
+            )
     if structured is not None:
         calls = []  # the result tool wins, as in the Bedrock adapter
     elif expects_result and not calls and text:

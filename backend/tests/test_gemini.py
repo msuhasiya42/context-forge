@@ -2,14 +2,19 @@
 
 import json
 import logging
+import sqlite3
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import httpx
 import pytest
-from langchain_core.messages import HumanMessage
+from fastapi.testclient import TestClient
+from langchain_core.messages import AIMessage, HumanMessage
+from langgraph.checkpoint.sqlite import SqliteSaver
 from pydantic import SecretStr
 
+from contextforge.api.main import create_app
 from contextforge.core.entities.model_call import Stage
 from contextforge.core.models.base import ModelRequest
 from contextforge.core.models.config import ModelRoute
@@ -23,12 +28,18 @@ from contextforge.core.models.errors import (
 from contextforge.core.settings import Settings
 from contextforge.evals import judge_client
 from contextforge.evals.judge import _ClaimJudgements, judge_claims
-from contextforge.evals.judge_client import judge_route, judge_session, usable_route
+from contextforge.evals.judge_client import judge_session, usable_route
 from contextforge.evals.suite_cli import live_judge
-from contextforge.infra.gemini import GeminiModel, RequestPacer
-from contextforge.infra.runtime import ByProvider, model_provider
+from contextforge.infra.gemini import GeminiModel, RequestPacer, chat_payload
+from contextforge.infra.runtime import (
+    ByProvider,
+    build_worker,
+    model_provider,
+    research_providers,
+)
 from contextforge.worker.dependencies import secret_values
-from tests.helpers import ByModel
+from contextforge.worker.runner import RequestRunner
+from tests.helpers import ByModel, make_deps, seed_chat_with_dataset, t1_result
 from tests.test_judge import MODELS, _evidence
 
 KEY = "test-gemini-key-do-not-leak"
@@ -76,7 +87,7 @@ def gemini(handler: Handler, clock: FakeClock | None = None) -> GeminiModel:
         SecretStr(KEY),
         base_url=BASE_URL,
         pacer=RequestPacer(4.5, clock=lambda: clock.now, sleep=clock.sleep),
-        reasoning_effort="low",
+        efforts={Stage.JUDGE: "low"},
     )
 
 
@@ -141,18 +152,18 @@ def test_a_throttled_gemini_falls_back_paced_and_no_key_skips_gemini(
     ]
     assert calls[0].failure_reason is not None and "429" in calls[0].failure_reason
 
-    # Without a key the judge grades with its Bedrock fallback, and says so once.
+    # Without a key a judge route grades with its Bedrock models, and says so once; the
+    # all-Gemini judge (F17) has none, so the eval CLI refuses to start.
     monkeypatch.delenv("CONTEXTFORGE_GEMINI_API_KEY", raising=False)
     judge_client._warn_gemini_skipped.cache_clear()
     caplog.set_level(logging.WARNING, logger="contextforge.evals.judge_client")
-    route = judge_route(MODELS)
-    assert usable_route(route, gemini_key_set=True) == route
-    assert usable_route(route, gemini_key_set=False) == ModelRoute("deepseek.v3.2")
-    no_key = Settings(_env_file=None, record_transcripts=False)
-    assert live_judge(no_key, tmp_path).route == ModelRoute("deepseek.v3.2")
+    mixed = ModelRoute("gemini-3.5-flash", ("gemini-3.5-flash-lite", "deepseek.v3.2"))
+    assert usable_route(mixed, gemini_key_set=True) == mixed
+    assert usable_route(mixed, gemini_key_set=False) == ModelRoute("deepseek.v3.2")
     assert caplog.text.count("skips its Gemini models") == 1
-    with pytest.raises(ValueError, match="CONTEXTFORGE_GEMINI_API_KEY"):
-        usable_route(ModelRoute("gemini-3.5-flash"), gemini_key_set=False)
+    no_key = Settings(_env_file=None, record_transcripts=False)
+    with pytest.raises(SystemExit, match="CONTEXTFORGE_GEMINI_API_KEY"):
+        live_judge(no_key, tmp_path)
 
 
 def test_gemini_failures_route_or_raise_and_never_carry_the_key(
@@ -193,3 +204,130 @@ JUDGE_REQUEST = ModelRequest(
     messages=[HumanMessage("Claims.")],
     output_schema=_ClaimJudgements,
 )
+
+
+def chat_reply(message: dict[str, Any], finish_reason: str = "stop") -> httpx.Response:
+    choice = {"message": {"role": "assistant", **message}, "finish_reason": finish_reason}
+    usage = {"prompt_tokens": 500, "completion_tokens": 50}
+    return httpx.Response(200, json={"choices": [choice], "usage": usage})
+
+
+def function_call(call_id: str, name: str, arguments: dict[str, Any], **extra: Any) -> dict:
+    function = {"name": name, "arguments": json.dumps(arguments)}
+    return {"id": call_id, "type": "function", "function": function, **extra}
+
+
+ONE_TASK_PLAN = {
+    "kind": "plan",
+    "goal": "Count the transactions.",
+    "constraints": [],
+    "openQuestions": [],
+    "tasks": [
+        {
+            "ref": "t1",
+            "kind": "sql_analysis",
+            "goal": "Count the rows.",
+            "inputArtifactIds": ["a2"],
+            "dependsOn": [],
+        }
+    ],
+    "nextAction": "Run t1.",
+}
+SIGNATURE = {"google": {"thought_signature": "sig-from-flash"}}
+
+
+def test_a_research_run_plans_and_runs_its_tool_loop_on_gemini() -> None:
+    """F17: plan's forced structured call falls back from a throttled flash to flash-lite;
+    execute's tool loop sends the assistant's tool call back with its id and thought signature,
+    then the tool result under that id, and reads the result the model returns."""
+    sent: list[dict[str, Any]] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        sent.append(body)
+        tools = {tool["function"]["name"] for tool in body.get("tools", [])}
+        if len(sent) == 1:  # plan, on flash: the free tier's per-minute limit
+            return httpx.Response(429, json={"error": {"message": "Resource exhausted."}})
+        if len(sent) == 2:
+            return chat_reply(
+                {"tool_calls": [function_call("p1", "return_result", ONE_TASK_PLAN)]},
+                "tool_calls",
+            )
+        if "sql_query" in tools and not any(m["role"] == "tool" for m in body["messages"]):
+            query = {"dataset_id": "a2", "sql": "SELECT count(*) AS n FROM t"}
+            call = function_call("fc-1", "sql_query", query, extra_content=SIGNATURE)
+            return chat_reply({"content": None, "tool_calls": [call]}, "tool_calls")
+        if "sql_query" in tools:
+            result = function_call("r1", "return_result", t1_result())
+            return chat_reply({"tool_calls": [result]}, "tool_calls")
+        return httpx.Response(400, json={"error": {"message": "Not scripted."}})
+
+    worker_dependencies = make_deps(gemini(handle), tasks_in_flight=1)
+    worker_dependencies.model_provider = model_provider
+    request = seed_chat_with_dataset(
+        worker_dependencies, chat_id="c1", user_id="u1", dataset_id="a2"
+    )
+    saver = SqliteSaver(sqlite3.connect(":memory:", check_same_thread=False))
+    RequestRunner(worker_dependencies, saver).start("c1", request.message_id)
+
+    plan_429, plan, first_turn, second_turn = sent[:4]
+    assert [plan_429["model"], plan["model"]] == ["gemini-3.5-flash", "gemini-3.5-flash-lite"]
+    assert plan["tool_choice"] == "required"
+    assert "tool_choice" not in first_turn  # tools of its own: the model chooses
+    assistant = next(m for m in second_turn["messages"] if m.get("tool_calls"))
+    [echoed] = assistant["tool_calls"]
+    assert echoed["id"] == "fc-1" and echoed["extra_content"] == SIGNATURE
+    assert json.loads(echoed["function"]["arguments"])["dataset_id"] == "a2"
+    [tool_result] = [m for m in second_turn["messages"] if m["role"] == "tool"]
+    assert tool_result["tool_call_id"] == "fc-1" and tool_result["content"]
+
+    calls = worker_dependencies.repositories.model_calls.list_by_request(request.message_id)
+    executed = [c for c in calls if c.stage == Stage.EXECUTE]
+    assert [c.stop_reason for c in executed][:2] == ["tool_use", "end_turn"]
+    assert all(c.model.startswith("gemini/gemini-3.5-flash") for c in calls)
+    assert all(c.usage is not None and c.usage.input_tokens == 500 for c in executed)
+    [task] = worker_dependencies.repositories.tasks.list_by_request(request.message_id)
+    assert task.status.value == "COMPLETED"
+
+
+def test_a_tool_call_without_a_kept_signature_is_sent_with_googles_stand_in() -> None:
+    """A turn written before F17 or by another model has no signature: the first call carries
+    the stand-in, so Gemini 3 does not refuse the history."""
+    turn = AIMessage(
+        content="",
+        tool_calls=[
+            {"name": "web_search", "args": {"query": "a"}, "id": "x1"},
+            {"name": "web_search", "args": {"query": "b"}, "id": "x2"},
+        ],
+    )
+    request = ModelRequest(
+        stage=Stage.EXECUTE,
+        model="gemini-3.5-flash",
+        system=["Research."],
+        messages=[HumanMessage("Go."), turn],
+    )
+    first, second = chat_payload(request)["messages"][-1]["tool_calls"]
+    stand_in = first["extra_content"]["google"]["thought_signature"]
+    assert stand_in == "skip_thought_signature_validator" and "extra_content" not in second
+
+
+def test_the_worker_needs_the_gemini_key_at_startup_and_health_names_the_provider(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.delenv("CONTEXTFORGE_GEMINI_API_KEY", raising=False)
+    common: dict[str, Any] = {
+        "_env_file": None,
+        "aws_profile": None,
+        "model_backend": "bedrock",
+        "run_worker": False,
+        "checkpoint_path": tmp_path / "checkpoints.sqlite",
+    }
+    with pytest.raises(ValueError, match="CONTEXTFORGE_GEMINI_API_KEY"):
+        build_worker(Settings(**common))
+
+    keyed = Settings(**common, gemini_api_key=SecretStr(KEY))
+    worker_dependencies = build_worker(keyed)
+    assert isinstance(worker_dependencies.model, ByProvider)
+    assert research_providers(worker_dependencies.routes) == {"gemini"}
+    health = TestClient(create_app(keyed, worker_dependencies=worker_dependencies))
+    assert health.get("/health").json()["model"] == "gemini"

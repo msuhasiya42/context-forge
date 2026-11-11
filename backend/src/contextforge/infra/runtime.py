@@ -1,6 +1,7 @@
 """Composition root for the real model, web tools and selectable application persistence."""
 
 import logging
+from collections.abc import Callable, Mapping
 from functools import cache
 from typing import Any
 
@@ -41,9 +42,13 @@ def aws_session(settings: Settings) -> Any:
 def build_worker(settings: Settings) -> WorkerDependencies:
     session = aws_session(settings)
     repositories, blobs, queue = _persistence(session, settings)
+    models = load_models_config()
+    routes = stage_routes(models, settings)
     model: ModelClient = ScriptedModel({})
+    provider: str | Callable[[str], str] = settings.model_backend
     if settings.model_backend == "bedrock":
-        model = bedrock_model(session, settings)
+        model = research_model_client(session, settings, models, routes)
+        provider = model_provider
     web = PublicWebClient(
         provider=settings.search_provider,
         api_key=_secret(settings.serper_api_key),
@@ -53,7 +58,6 @@ def build_worker(settings: Settings) -> WorkerDependencies:
         max_bytes=settings.web_max_bytes,
         max_chars=settings.web_max_chars,
     )
-    models = load_models_config()
     tracer = _tracer(settings, models.prices)
     return WorkerDependencies(
         repositories=repositories,
@@ -70,8 +74,8 @@ def build_worker(settings: Settings) -> WorkerDependencies:
         tracer=tracer,
         price_version=models.price_version,
         prices=models.prices,
-        model_provider=settings.model_backend,
-        routes=stage_routes(models, settings),
+        model_provider=provider,
+        routes=routes,
         settings=settings,
     )
 
@@ -148,6 +152,50 @@ def bedrock_model(session: Any, settings: Settings) -> BedrockModel:
     )
 
 
+def research_model_client(
+    session: Any, settings: Settings, models: ModelsConfig, routes: Mapping[Stage, ModelRoute]
+) -> "ByProvider":
+    """The research stages' provider client: Gemini for gemini-* ids, Bedrock for the rest.
+    ``ValueError`` at startup when a research stage routes to Gemini and no key is set, rather
+    than every request failing on its first call."""
+    gemini = None
+    if "gemini" in research_providers(routes):
+        if settings.gemini_api_key is None:
+            raise ValueError(
+                "A research stage in config/models.yaml routes to Gemini: set "
+                "CONTEXTFORGE_GEMINI_API_KEY, or switch the stages back to the Bedrock profile."
+            )
+        efforts = {Stage(name): stage.effort for name, stage in models.stages.items()}
+        gemini = gemini_model(settings, settings.gemini_api_key, efforts)
+    return ByProvider(bedrock_model(session, settings), gemini)
+
+
+def research_providers(routes: Mapping[Stage, ModelRoute]) -> set[str]:
+    """The providers the research stages may call (the offline judge left out)."""
+    return {
+        model_provider(model)
+        for stage, route in routes.items()
+        if stage != Stage.JUDGE
+        for model in (route.primary, *route.fallbacks)
+    }
+
+
+def gemini_model(
+    settings: Settings, api_key: SecretStr, efforts: Mapping[Stage, str]
+) -> GeminiModel:
+    """Gemini with one read timeout for every stage: the planner's, as plan, lead, report and
+    the judge think at length and a call that times out falls back to the next model. Every
+    client shares the process's pacer."""
+    http = httpx.Client(timeout=httpx.Timeout(settings.planner_timeout_seconds, connect=5))
+    return GeminiModel(
+        http,
+        api_key,
+        base_url=settings.gemini_base_url,
+        pacer=gemini_pacer(settings.gemini_min_interval_seconds),
+        efforts=efforts,
+    )
+
+
 class ByProvider:
     """Sends a call for a Gemini model id to Gemini and every other call to Bedrock."""
 
@@ -169,25 +217,19 @@ def model_provider(model_id: str) -> str:
 
 
 def judge_model_client(settings: Settings, reasoning_effort: str | None = None) -> ByProvider:
-    """The offline judge's provider client: Gemini when a key is set, Bedrock for the rest.
-    Gemini waits like the planner, as the judge reads long reports and page context."""
+    """The offline judge's provider client: Gemini when a key is set, Bedrock for the rest."""
     gemini = None
     if settings.gemini_api_key is not None:
-        http = httpx.Client(timeout=httpx.Timeout(settings.planner_timeout_seconds, connect=5))
-        gemini = GeminiModel(
-            http,
-            settings.gemini_api_key,
-            base_url=settings.gemini_base_url,
-            pacer=gemini_pacer(settings.gemini_min_interval_seconds),
-            reasoning_effort=reasoning_effort,
-        )
+        efforts = {Stage.JUDGE: reasoning_effort} if reasoning_effort else {}
+        gemini = gemini_model(settings, settings.gemini_api_key, efforts)
     return ByProvider(bedrock_model(aws_session(settings), settings), gemini)
 
 
 @cache
 def gemini_pacer(min_interval: float) -> RequestPacer:
-    """One pacer per process, so every judge client built (calibration builds one per model)
-    shares the free tier's request rate."""
+    """One pacer per process, so every Gemini client built (the worker's, and the judge's:
+    calibration builds one per model) shares the free tier's request rate. It spaces call
+    starts across parallel researchers; it does not wait for a call to finish."""
     return RequestPacer(min_interval)
 
 

@@ -109,7 +109,8 @@ authenticate the reviewer's identity or independently certify factual truth.
 
 `backend/evals/cases/core-suite.yaml` holds the core cases (`id`, `question`, `requiredParts`,
 `source`). The judge (`config/models.yaml` stage `judge`: Gemini 3.5 Flash, falling back to
-Gemini 3.5 Flash-Lite and then DeepSeek v3.2 on Bedrock; none serves a research stage) labels each claim `supported`, `partial`,
+Gemini 3.5 Flash-Lite; while every research stage also runs on Gemini (F17) the CLI warns that
+the judge grades its own model family, and without `CONTEXTFORGE_GEMINI_API_KEY` it refuses) labels each claim `supported`, `partial`,
 `unsupported` or `contradicted` against its cited excerpt and the saved page text around it,
 marks each required part `answered`, `partial` or `missing`, and scores quantitative reasoning,
 synthesis and clarity 1-5. These map onto the rubric above; citations and provenance come from

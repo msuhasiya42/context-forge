@@ -25,66 +25,119 @@ prices:
   "moonshotai.kimi-k3.1":                  { inputPerMTok: 4.00,   outputPerMTok: 20.00,  cacheReadPerMTok: 0.0 }
   "minimax.minimax-m2.5":                  { inputPerMTok: 0.31,   outputPerMTok: 1.24,   cacheReadPerMTok: 0.0 }
   "nvidia.nemotron-super-3-120b":          { inputPerMTok: 0.15,   outputPerMTok: 0.67,   cacheReadPerMTok: 0.0 }
-  # Google Gemini (the judge only), through its OpenAI-compatible API, not Bedrock: free tier;
-  # paid prices differ — update if billing is enabled.
+  # Google Gemini, through its OpenAI-compatible API, not Bedrock: free tier; paid prices
+  # differ — update if billing is enabled.
   "gemini-3.5-flash":                      { inputPerMTok: 0.0,    outputPerMTok: 0.0,    cacheReadPerMTok: 0.0 }
   "gemini-3.5-flash-lite":                 { inputPerMTok: 0.0,    outputPerMTok: 0.0,    cacheReadPerMTok: 0.0 }
-# The model per stage on the Bedrock backend, and its fallbacks: any Bedrock model id with a
-# price row above. A call goes to the next fallback while the model before is down (unavailable,
+# The model per stage, and its fallbacks: any model id with a price row above. An id starting
+# "gemini-" is served by Google Gemini (infra/gemini.py, CONTEXTFORGE_GEMINI_API_KEY), every other
+# id by Bedrock. A call goes to the next fallback while the model before is down (unavailable,
 # unreachable, throttled after the retry, or not available for this account); a model that was
 # down is tried last for 60 s. CONTEXTFORGE_PLANNER_MODEL / _FALLBACKS override plan, lead and cite,
 # CONTEXTFORGE_EXECUTOR_MODEL / _FALLBACKS execute; compress keeps its own.
-# Plan (bake-off 7 Nov 2026, docs/evals/plan-bakeoff-2026-11-07.md): gpt-oss-120b, Qwen3-235B
-# and Nova 2 Lite gave valid plans first try. Kimi K3.1 also did, at 45 times the cost and with
-# no dependencies; to plan with it: model "global.moonshotai.kimi-k3.1", fallbacks
-# ["deepseek.v3.2", "apac.amazon.nova-pro-v1:0"].
+#
+# Gemini profile (F17, 12 Nov 2026): the AWS account is refused Bedrock models ("Access to Bedrock
+# models is not allowed for this account"), so every stage runs on Gemini's free tier. The worker
+# refuses to start without CONTEXTFORGE_GEMINI_API_KEY while a stage routes to Gemini.
+# To switch back to Bedrock: delete this `stages:` block and uncomment the Bedrock profile below.
+# The judge then still grades on Gemini, of another model family than the research stages.
 stages:
   plan:
-    model: "openai.gpt-oss-120b-1:0"
-    fallbacks: ["qwen.qwen3-235b-a22b-2507-v1:0", "global.amazon.nova-2-lite-v1:0"]
+    model: "gemini-3.5-flash"
+    fallbacks: ["gemini-3.5-flash-lite"]
     effort: high
     maxTokens: 4000
-  # The lead researcher's review between rounds (F16): the planner's route, as it is the same
-  # role reading the brief again. CONTEXTFORGE_PLANNER_MODEL / _FALLBACKS override it too.
+  # The lead researcher's review between rounds (F16): the planner's route.
   lead:
-    model: "openai.gpt-oss-120b-1:0"
-    fallbacks: ["qwen.qwen3-235b-a22b-2507-v1:0", "global.amazon.nova-2-lite-v1:0"]
+    model: "gemini-3.5-flash"
+    fallbacks: ["gemini-3.5-flash-lite"]
     effort: high
     maxTokens: 4000
-  # Qwen3-235B's tool loop has not been run live yet (the bake-off planned only).
   execute:
-    model: "qwen.qwen3-235b-a22b-2507-v1:0"
-    fallbacks: ["openai.gpt-oss-120b-1:0", "apac.amazon.nova-pro-v1:0"]
+    model: "gemini-3.5-flash"
+    fallbacks: ["gemini-3.5-flash-lite"]
     effort: medium
     maxTokens: 4000
-  # Conservative claim-support review, after deterministic snapshot/quote checks.
   cite:
-    model: "global.amazon.nova-2-lite-v1:0"
-    fallbacks: ["qwen.qwen3-235b-a22b-2507-v1:0"]
+    model: "gemini-3.5-flash-lite"
+    fallbacks: ["gemini-3.5-flash"]
     effort: low
     maxTokens: 2000
   compress:
-    model: "global.amazon.nova-2-lite-v1:0"
-    fallbacks: ["apac.amazon.nova-lite-v1:0"]
+    model: "gemini-3.5-flash-lite"
+    fallbacks: ["gemini-3.5-flash"]
     effort: low
     maxTokens: 1000
-  # The report summary: one short call per completed request, routed like compress.
   summary:
-    model: "global.amazon.nova-2-lite-v1:0"
-    fallbacks: ["apac.amazon.nova-lite-v1:0"]
+    model: "gemini-3.5-flash-lite"
+    fallbacks: ["gemini-3.5-flash"]
     effort: low
     maxTokens: 400
   report:
-    model: "qwen.qwen3-235b-a22b-2507-v1:0"
-    fallbacks: ["global.amazon.nova-2-lite-v1:0"]
+    model: "gemini-3.5-flash"
+    fallbacks: ["gemini-3.5-flash-lite"]
     effort: medium
     maxTokens: 4000
   # The offline eval judge (src/contextforge/evals/judge.py), never called inside a user
-  # request. No model serves a research stage above, so no model grades its own pipeline
-  # (tests/test_judge.py checks it). Gemini (gemini-* ids, CONTEXTFORGE_GEMINI_API_KEY) first,
-  # free and of another model family; without the key the judge uses DeepSeek on Bedrock.
+  # request. With the Gemini profile it shares its models with the research stages; the eval
+  # CLI warns that it then grades its own pipeline's model family.
   judge:
     model: "gemini-3.5-flash"
-    fallbacks: ["gemini-3.5-flash-lite", "deepseek.v3.2"]
+    fallbacks: ["gemini-3.5-flash-lite"]
     effort: low
     maxTokens: 2000
+
+# Bedrock profile (before F17). Plan (bake-off 7 Nov 2026, docs/evals/plan-bakeoff-2026-11-07.md):
+# gpt-oss-120b, Qwen3-235B and Nova 2 Lite gave valid plans first try. Kimi K3.1 also did, at 45
+# times the cost and with no dependencies; to plan with it: model "global.moonshotai.kimi-k3.1",
+# fallbacks ["deepseek.v3.2", "apac.amazon.nova-pro-v1:0"].
+# stages:
+#   plan:
+#     model: "openai.gpt-oss-120b-1:0"
+#     fallbacks: ["qwen.qwen3-235b-a22b-2507-v1:0", "global.amazon.nova-2-lite-v1:0"]
+#     effort: high
+#     maxTokens: 4000
+#   # The lead researcher's review between rounds (F16): the planner's route, as it is the same
+#   # role reading the brief again. CONTEXTFORGE_PLANNER_MODEL / _FALLBACKS override it too.
+#   lead:
+#     model: "openai.gpt-oss-120b-1:0"
+#     fallbacks: ["qwen.qwen3-235b-a22b-2507-v1:0", "global.amazon.nova-2-lite-v1:0"]
+#     effort: high
+#     maxTokens: 4000
+#   # Qwen3-235B's tool loop has not been run live yet (the bake-off planned only).
+#   execute:
+#     model: "qwen.qwen3-235b-a22b-2507-v1:0"
+#     fallbacks: ["openai.gpt-oss-120b-1:0", "apac.amazon.nova-pro-v1:0"]
+#     effort: medium
+#     maxTokens: 4000
+#   # Conservative claim-support review, after deterministic snapshot/quote checks.
+#   cite:
+#     model: "global.amazon.nova-2-lite-v1:0"
+#     fallbacks: ["qwen.qwen3-235b-a22b-2507-v1:0"]
+#     effort: low
+#     maxTokens: 2000
+#   compress:
+#     model: "global.amazon.nova-2-lite-v1:0"
+#     fallbacks: ["apac.amazon.nova-lite-v1:0"]
+#     effort: low
+#     maxTokens: 1000
+#   # The report summary: one short call per completed request, routed like compress.
+#   summary:
+#     model: "global.amazon.nova-2-lite-v1:0"
+#     fallbacks: ["apac.amazon.nova-lite-v1:0"]
+#     effort: low
+#     maxTokens: 400
+#   report:
+#     model: "qwen.qwen3-235b-a22b-2507-v1:0"
+#     fallbacks: ["global.amazon.nova-2-lite-v1:0"]
+#     effort: medium
+#     maxTokens: 4000
+#   # The offline eval judge (src/contextforge/evals/judge.py), never called inside a user
+#   # request. No model serves a research stage above, so no model grades its own pipeline
+#   # (tests/test_judge.py checks it). Gemini (gemini-* ids, CONTEXTFORGE_GEMINI_API_KEY) first,
+#   # free and of another model family; without the key the judge uses DeepSeek on Bedrock.
+#   judge:
+#     model: "gemini-3.5-flash"
+#     fallbacks: ["gemini-3.5-flash-lite", "deepseek.v3.2"]
+#     effort: low
+#     maxTokens: 2000

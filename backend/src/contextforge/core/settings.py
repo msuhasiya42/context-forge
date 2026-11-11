@@ -12,6 +12,8 @@ class Settings(BaseSettings):
         env_prefix="CONTEXTFORGE_", env_file=".env", extra="ignore", protected_namespaces=()
     )
     backend: Literal["memory", "aws"] = "memory"
+    # "bedrock": real models, each call sent to Gemini or Bedrock by its model id (the name is
+    # from before F17 and kept so existing .env files still load); "scripted": no model.
     model_backend: Literal["bedrock", "scripted"] = "bedrock"
     aws_region: str = "ap-southeast-2"
     aws_profile: str | None = None
@@ -27,9 +29,10 @@ class Settings(BaseSettings):
     serper_api_key: SecretStr | None = Field(default=None, validation_alias="SERPER_API_KEY")
     # Tavily search, and Tavily Extract as the fallback reader for pages our own fetch cannot read.
     tavily_api_key: SecretStr | None = Field(default=None, validation_alias="TAVILY_API_KEY")
-    # The offline judge's Gemini models (OpenAI-compatible API). Unset: the judge skips its
-    # Gemini models and uses its Bedrock fallback. The free tier allows a few requests a
-    # minute, so calls are spaced at least the interval apart.
+    # Google Gemini (OpenAI-compatible API) for every gemini-* model in config/models.yaml: all
+    # research stages since F17, and the offline judge. The worker refuses to start without it
+    # while a research stage routes to Gemini. The free tier allows a few requests a minute, so
+    # call starts are spaced at least the interval apart across the process.
     gemini_api_key: SecretStr | None = None
     gemini_base_url: str = "https://generativelanguage.googleapis.com/v1beta/openai"
     gemini_min_interval_seconds: float = Field(default=4.5, ge=0)

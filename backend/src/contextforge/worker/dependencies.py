@@ -49,8 +49,9 @@ class WorkerDependencies:
     routes: dict[Stage, ModelRoute] = field(default_factory=dict)
     # config/models.yaml prices; each ModelCall's cost is computed from its usage with them.
     prices: PriceTable = field(default_factory=dict)
-    # Prefix of ModelCall.model (spec 3.5): every real model of this project is on Bedrock.
-    model_provider: str = "bedrock"
+    # Prefix of ModelCall.model (spec 3.5): a name, or for a client over several providers
+    # (Bedrock and Gemini, by model id) a function of the model id.
+    model_provider: str | Callable[[str], str] = "bedrock"
     # Caps the tasks executing at once across the worker at ``budgets.tasks_in_flight``.
     semaphore: threading.BoundedSemaphore = field(init=False)
     settings: Settings | None = None

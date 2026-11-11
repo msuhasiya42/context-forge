@@ -22,7 +22,7 @@ from contextforge.core.models.scripted import ScriptedModel
 from contextforge.core.planner import PlannerOutput
 from contextforge.core.settings import Settings
 from contextforge.infra.bedrock import BedrockModel, converse_payload, nova_schema, parse_response
-from contextforge.infra.runtime import build_worker
+from contextforge.infra.runtime import aws_session, bedrock_model
 from contextforge.worker import calls
 from contextforge.worker.stages.plan import create_research_plan
 from contextforge.worker.workflow import load_initial_request_state
@@ -326,8 +326,8 @@ def test_nova_schema_resolves_refs_and_planner_forces_result_tool() -> None:
 
 def test_runtime_builds_one_bedrock_client_per_stage_timeout_without_sdk_retries() -> None:
     settings = Settings(_env_file=None, aws_profile=None, model_backend="bedrock")
-    model = build_worker(settings).model
-    assert isinstance(model, BedrockModel)
+    # The worker routes Bedrock model ids here (ByProvider); config/models.yaml's Bedrock profile.
+    model = bedrock_model(aws_session(settings), settings)
     timeouts = {stage: model.runtime_for(stage).meta.config.read_timeout for stage in Stage}
     assert timeouts[Stage.PLAN] == timeouts[Stage.CITE] == 120
     assert timeouts[Stage.EXECUTE] == timeouts[Stage.COMPRESS] == 60

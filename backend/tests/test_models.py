@@ -179,20 +179,17 @@ def test_a_transcript_is_stored_per_call_redacted_and_never_fails_the_call() -> 
 
 
 def test_models_config_loads_the_shipped_routes_each_model_priced() -> None:
-    """F9: the bake-off's planners, Qwen3-235B executing, Nova 2 Lite compressing; every model
-    a stage may call has a price row, so no call is charged the reserve for want of one."""
+    """F17: every stage on Gemini, flash first for the thinking stages and flash-lite first for
+    the short ones, each falling back to the other; every model a stage may call has a price
+    row, so no call is charged the reserve for want of one."""
     config = load_models_config()
     assert config.price_version == "2026-11-07"
-    assert config.stages["plan"].route == ModelRoute(
-        "openai.gpt-oss-120b-1:0",
-        ("qwen.qwen3-235b-a22b-2507-v1:0", "global.amazon.nova-2-lite-v1:0"),
-    )
-    assert config.stages["execute"].route == ModelRoute(
-        "qwen.qwen3-235b-a22b-2507-v1:0", ("openai.gpt-oss-120b-1:0", "apac.amazon.nova-pro-v1:0")
-    )
-    assert config.stages["compress"].route == ModelRoute(
-        "global.amazon.nova-2-lite-v1:0", ("apac.amazon.nova-lite-v1:0",)
-    )
+    flash, lite = "gemini-3.5-flash", "gemini-3.5-flash-lite"
+    for stage in ("plan", "lead", "execute", "report", "judge"):
+        assert config.stages[stage].route == ModelRoute(flash, (lite,))
+    for stage in ("cite", "compress", "summary"):
+        assert config.stages[stage].route == ModelRoute(lite, (flash,))
+    assert config.stages["plan"].effort == "high" and config.stages["compress"].max_tokens == 1000
     routed = {m for stage in config.stages.values() for m in (stage.model, *stage.fallbacks)}
     assert [m for m in routed if price_row(config.prices, m) is None] == []
 

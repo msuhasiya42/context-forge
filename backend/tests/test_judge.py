@@ -166,18 +166,21 @@ def test_judged_grade_maps_weights_human_fields_win_and_errors_make_it_incomplet
     assert errored["judgeErrors"] == 1 and errored["status"] == "incomplete"
 
 
-def test_the_judge_never_grades_its_own_pipeline_and_the_core_suite_is_well_formed() -> None:
+def test_the_judge_and_research_routes_are_valid_and_the_core_suite_is_well_formed() -> None:
     route = judge_route(MODELS)
-    assert route == ModelRoute("gemini-3.5-flash", ("gemini-3.5-flash-lite", "deepseek.v3.2"))
+    assert route == ModelRoute("gemini-3.5-flash", ("gemini-3.5-flash-lite",))
     assert MODELS.prices["gemini-3.5-flash"]["inputPerMTok"] == 0.0  # the free tier
     assert MODELS.stages["judge"].max_tokens == 2000
     for model in (route.primary, *route.fallbacks):
         assert model in MODELS.prices
+    # F17: every research stage is on Gemini too, so the judge shares its models (the eval CLI
+    # warns); on the Bedrock profile it shares none. A geo profile id is the same model.
     routes = stage_routes(MODELS, Settings(_env_file=None))
-    assert shared_with_research(route, routes) == set()
-    # An inference-profile id is the same model, so it is caught too.
+    assert shared_with_research(route, routes) == {"gemini-3.5-flash", "gemini-3.5-flash-lite"}
+    bedrock = {Stage.EXECUTE: ModelRoute("openai.gpt-oss-120b-1:0")}
+    assert shared_with_research(route, bedrock) == set()
     clash = ModelRoute("global.openai.gpt-oss-120b-1:0", ("deepseek.v3.2",))
-    assert shared_with_research(clash, routes) == {"global.openai.gpt-oss-120b-1:0"}
+    assert shared_with_research(clash, bedrock) == {"global.openai.gpt-oss-120b-1:0"}
 
     cases = load_suite(REPO_ROOT / "evals" / "cases" / "core-suite.yaml")
     ids = [case.id for case in cases]

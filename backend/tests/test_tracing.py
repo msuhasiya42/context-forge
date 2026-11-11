@@ -71,11 +71,16 @@ class FakeLangSmith:
         return next(run for run in self.updated if run["name"] == name)
 
 
+PRICED = {"inputPerMTok": 0.2266, "outputPerMTok": 0.9064, "cacheReadPerMTok": 0.0}
+
+
 def _traced(
     worker_dependencies: WorkerDependencies, client: FakeLangSmith, *, content: bool = False
 ) -> WorkerDependencies:
     """``worker_dependencies`` wired the way the runtime wires a tracing tracer."""
-    prices = load_models_config().prices
+    # Gemini's free tier prices every stage at zero (F17), so the executor gets a priced row
+    # here to show the trace carries the call's cost.
+    prices = {**load_models_config().prices, worker_dependencies.model_id(Stage.EXECUTE): PRICED}
     worker_dependencies.tracer = RequestTracer(
         client, "test", include_content=content, prices=prices
     )
@@ -135,7 +140,6 @@ def test_trace_tree_of_a_two_task_run_is_metadata_only_unless_content_is_on(cont
     assert root["requestId"] == req.message_id and root["chatId"] == "c1"
     assert root["status"] == "COMPLETED" and root["attempt"] == 1
     call = client.ended("model:execute")["extra"]["metadata"]
-    # The executor, Qwen3-235B, at its Sydney price (F9)
     total = (1_000 * 0.2266 + 100 * 0.9064) / 1e6
     assert call["usage_metadata"]["total_cost"] == pytest.approx(total)
     assert (

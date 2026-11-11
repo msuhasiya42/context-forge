@@ -3,7 +3,7 @@
 from typing import Any, Literal, Protocol
 
 from langchain_core.messages import AnyMessage
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from contextforge.core.entities import Entity
 from contextforge.core.entities.model_call import CallMetadata, Stage
@@ -25,6 +25,15 @@ class ToolCall(Entity):
     id: str
     name: str
     arguments: dict[str, Any]
+    # Provider fields the call must be sent back with on the next turn, such as Gemini 3's
+    # thought signature; the stage keeps them on its AIMessage (``PROVIDER_DATA_KEY``). Opaque,
+    # so never dumped to the wire, traces or transcripts.
+    provider_data: dict[str, Any] | None = Field(default=None, exclude=True)
+
+
+# The AIMessage ``additional_kwargs`` key holding each tool call's ``provider_data`` by call id,
+# so it survives the checkpointed transcript to the next turn.
+PROVIDER_DATA_KEY = "tool_call_provider_data"
 
 
 class ModelRequest(Entity):

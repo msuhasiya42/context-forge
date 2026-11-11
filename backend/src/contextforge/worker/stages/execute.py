@@ -50,6 +50,7 @@ from contextforge.core.entities.task import (
 from contextforge.core.ids import now_iso
 from contextforge.core.logging import request_context
 from contextforge.core.models.base import (
+    PROVIDER_DATA_KEY,
     ModelClient,
     ModelRequest,
     ModelResponse,
@@ -691,7 +692,9 @@ def _reminded(task_state: TaskState) -> bool:
 
 def _ai_message(response: ModelResponse) -> AIMessage:
     calls = [tool_call(name=c.name, args=c.arguments, id=c.id) for c in response.tool_calls]
-    return AIMessage(content=response.text or "", tool_calls=calls)
+    provider_data = {c.id: c.provider_data for c in response.tool_calls if c.provider_data}
+    extra = {PROVIDER_DATA_KEY: provider_data} if provider_data else {}
+    return AIMessage(content=response.text or "", tool_calls=calls, additional_kwargs=extra)
 
 
 def _parse_result(response: ModelResponse, task: Task, produced: list[str]) -> TaskResult:

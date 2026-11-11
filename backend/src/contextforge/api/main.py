@@ -32,7 +32,7 @@ from contextforge.core.services.application import (
     page,
 )
 from contextforge.core.settings import Settings
-from contextforge.infra.runtime import build_worker
+from contextforge.infra.runtime import build_worker, research_providers
 from contextforge.worker.consumer import QueueConsumer
 from contextforge.worker.dependencies import WorkerDependencies
 from contextforge.worker.runner import RequestRunner
@@ -82,6 +82,13 @@ def create_app(
     runner = RequestRunner(worker_dependencies, SqliteSaver(connection))
     service = Application(worker_dependencies, config.dev_user_id)
     web_tool_limit = str(worker_dependencies.budgets.web_tool_call_budget)
+    # The provider the research stages call ("gemini", "bedrock", or both joined by "+"), or
+    # "scripted" when no real model is used.
+    model_label = (
+        "+".join(sorted(research_providers(worker_dependencies.routes)))
+        if config.model_backend != "scripted"
+        else "scripted"
+    )
     consumer = QueueConsumer(worker_dependencies, runner)
 
     @asynccontextmanager
@@ -120,7 +127,7 @@ def create_app(
             "processId": str(os.getpid()),
             "webToolCallLimit": web_tool_limit,
             "backend": config.backend,
-            "model": config.model_backend,
+            "model": model_label,
             "search": config.search_provider,
         }
 

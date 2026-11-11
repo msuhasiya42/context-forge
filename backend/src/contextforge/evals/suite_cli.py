@@ -5,6 +5,7 @@
 
 import argparse
 import json
+import logging
 import math
 import uuid
 from datetime import UTC, datetime
@@ -42,6 +43,8 @@ from contextforge.evals.web_research import auth_headers
 from contextforge.infra.runtime import judge_model_client, model_provider, stage_routes
 from contextforge.infra.tracing import langsmith_client
 from contextforge.worker.dependencies import secret_values
+
+logger = logging.getLogger(__name__)
 
 SUITE_COMMANDS = ("suite", "calibrate")
 # A refused estimate or a regression: the run did not happen, or the gate failed.
@@ -179,8 +182,8 @@ def live_judge(
     route: ModelRoute | None = None,
     max_usd: float = math.inf,
 ) -> JudgeSession:
-    """The judge on Gemini and Bedrock, refused when one of its models serves a research stage.
-    Transcripts are stored beside the run with every configured secret redacted."""
+    """The judge on Gemini and Bedrock, with a warning when one of its models serves a research
+    stage. Transcripts are stored beside the run with every configured secret redacted."""
     models = load_models_config()
     try:
         route = usable_route(
@@ -190,7 +193,12 @@ def live_judge(
         raise SystemExit(str(exc)) from exc
     shared = shared_with_research(route, stage_routes(models, settings))
     if shared:
-        raise SystemExit(f"Judge model also serves a research stage: {', '.join(sorted(shared))}.")
+        # F17: with every stage on Gemini the judge shares its models; scores then carry that
+        # model family's self-preference, so the run says so instead of refusing.
+        logger.warning(
+            "Judge model also serves a research stage (%s); it grades its own pipeline.",
+            ", ".join(sorted(shared)),
+        )
     transcripts = (
         TranscriptWriter(DirectoryBlobs(transcripts_dir), secret_values(settings))
         if settings.record_transcripts
