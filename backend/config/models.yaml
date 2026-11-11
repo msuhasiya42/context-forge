@@ -45,39 +45,39 @@ stages:
   plan:
     model: "gemini-3.5-flash"
     fallbacks: ["gemini-3.5-flash-lite"]
-    effort: high
-    maxTokens: 4000
+    effort: medium
+    maxTokens: 16000
   # The lead researcher's review between rounds (F16): the planner's route.
   lead:
     model: "gemini-3.5-flash"
     fallbacks: ["gemini-3.5-flash-lite"]
-    effort: high
-    maxTokens: 4000
+    effort: medium
+    maxTokens: 16000
   execute:
     model: "gemini-3.5-flash"
     fallbacks: ["gemini-3.5-flash-lite"]
     effort: medium
-    maxTokens: 4000
+    maxTokens: 8000
   cite:
     model: "gemini-3.5-flash-lite"
     fallbacks: ["gemini-3.5-flash"]
     effort: low
-    maxTokens: 2000
+    maxTokens: 6000
   compress:
     model: "gemini-3.5-flash-lite"
     fallbacks: ["gemini-3.5-flash"]
     effort: low
-    maxTokens: 1000
+    maxTokens: 3000
   summary:
     model: "gemini-3.5-flash-lite"
     fallbacks: ["gemini-3.5-flash"]
     effort: low
-    maxTokens: 400
+    maxTokens: 2000
   report:
     model: "gemini-3.5-flash"
     fallbacks: ["gemini-3.5-flash-lite"]
     effort: medium
-    maxTokens: 4000
+    maxTokens: 12000
   # The offline eval judge (src/contextforge/evals/judge.py), never called inside a user
   # request. With the Gemini profile it shares its models with the research stages; the eval
   # CLI warns that it then grades its own pipeline's model family.

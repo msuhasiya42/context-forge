@@ -189,7 +189,7 @@ def test_models_config_loads_the_shipped_routes_each_model_priced() -> None:
         assert config.stages[stage].route == ModelRoute(flash, (lite,))
     for stage in ("cite", "compress", "summary"):
         assert config.stages[stage].route == ModelRoute(lite, (flash,))
-    assert config.stages["plan"].effort == "high" and config.stages["compress"].max_tokens == 1000
+    assert config.stages["plan"].effort == "medium" and config.stages["compress"].max_tokens == 3000
     routed = {m for stage in config.stages.values() for m in (stage.model, *stage.fallbacks)}
     assert [m for m in routed if price_row(config.prices, m) is None] == []
 
