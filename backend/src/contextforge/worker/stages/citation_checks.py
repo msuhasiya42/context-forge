@@ -5,7 +5,9 @@ holds and a verbatim excerpt of that URL's text: a fetched page's text or a sear
 snippet. The excerpt must have ``MIN_EXCERPT_CHARS`` characters and is matched with whitespace
 collapsed, case folded and pictographs left out on both sides, ignoring a leading or trailing
 ellipsis. A quote differing only in sentence-ending periods can be replaced with the actual
-contiguous source span; changed words, numbers and operators are not repaired. A web fact
+contiguous source span; changed words, numbers and operators are not repaired. A ref that
+quotes no excerpt is checked with the fact's own text as its quote: a fact copied word for
+word from its source is its own evidence, and anything else is dropped. A web fact
 cited with another locator (a model wrote
 ``{"kind": "row", "value": "0"}`` for a search hit) is pointed at the URL whose saved text holds
 its excerpt. A fact failing all that is dropped, and the reason is kept as an uncertainty,
@@ -160,7 +162,7 @@ def _checked(
         return f"unsupported claim without evidence: {fact['text'][:80]}"
     checked: list[EvidenceRef] = []
     for ref in refs:
-        result = _checked_ref(ref, request_state, worker_dependencies)
+        result = _checked_ref(ref, fact["text"], request_state, worker_dependencies)
         if isinstance(result, str):
             return result
         checked.append(result)
@@ -171,7 +173,10 @@ def _checked(
 
 
 def _checked_ref(
-    ref: EvidenceRef, request_state: RequestState, worker_dependencies: WorkerDependencies
+    ref: EvidenceRef,
+    fact_text: str,
+    request_state: RequestState,
+    worker_dependencies: WorkerDependencies,
 ) -> EvidenceRef | str:
     artifact = worker_dependencies.repositories.artifacts.get(
         request_state["chat_id"], ref.artifact_id
@@ -180,27 +185,42 @@ def _checked_ref(
         # Dataset evidence is verified elsewhere; a web snapshot only through a URL it holds.
         if artifact is None or artifact.kind != ArtifactKind.RAW_RESULT:
             return ref
+        quoted = _quoting(ref, fact_text)
         url = _url_quoting(
-            ref.excerpt, _owned_records(artifact, request_state, worker_dependencies)
+            quoted.excerpt, _owned_records(artifact, request_state, worker_dependencies)
         )
         if url is None:
             return (
                 f"unsupported excerpt for artifact {ref.artifact_id}: "
-                "no page or search hit it saved holds it"
+                f"no page or search hit it saved holds it{_unquoted(ref)}"
             )
-        return ref.model_copy(update={"locator": Locator(kind=LocatorKind.URL, value=url)})
+        return quoted.model_copy(update={"locator": Locator(kind=LocatorKind.URL, value=url)})
     url = ref.locator.value
     evidence = _text_for(url, _owned_records(artifact, request_state, worker_dependencies))
     if evidence is None:
         return f"unsupported excerpt for {url}"
-    if _quotes(ref.excerpt, evidence):
-        return ref
-    recovered = _recover_sentence_periods(ref.excerpt, evidence)
+    quoted = _quoting(ref, fact_text)
+    if _quotes(quoted.excerpt, evidence):
+        return quoted
+    recovered = _recover_sentence_periods(quoted.excerpt, evidence)
     if recovered is None:
-        return f"unsupported excerpt for {url}"
+        return f"unsupported excerpt for {url}{_unquoted(ref)}"
     # Store actual source characters, not the model's punctuated reconstruction. The
     # later semantic review and exported evaluation still receive a real source excerpt.
-    return ref.model_copy(update={"excerpt": recovered})
+    return quoted.model_copy(update={"excerpt": recovered})
+
+
+def _quoting(ref: EvidenceRef, fact_text: str) -> EvidenceRef:
+    """``ref``, or, when it quotes no excerpt, ``ref`` quoting the fact's own text. Only a web
+    check uses it, so a ref is stored with that quote only once its source is shown to hold it."""
+    return ref if ref.excerpt else ref.model_copy(update={"excerpt": fact_text})
+
+
+def _unquoted(ref: EvidenceRef) -> str:
+    """Why a ref without an excerpt failed, added to its uncertainty."""
+    return (
+        "" if ref.excerpt else " (no excerpt quoted; the finding's own text is not in the source)"
+    )
 
 
 def _owned_records(

@@ -4,12 +4,16 @@ The model added sentence periods to adjacent source lines. The saved source frag
 was read in Deep Dive; it is not a new claim or an invented full-page replay.
 """
 
+from typing import Any
+
 import pytest
 
+from contextforge.core.entities.model_call import Stage
 from contextforge.core.entities.task import Task, TaskResult
-from contextforge.core.models.base import ModelResponse
+from contextforge.core.models.base import ModelRequest, ModelResponse
 from contextforge.core.models.scripted import ScriptedModel
 from contextforge.core.values import LocatorKind
+from contextforge.infra.gemini import chat_payload
 from contextforge.worker.stages.citation_checks import check_citations, supported_conclusions
 from contextforge.worker.stages.execute import TaskOutcome, _parse_result, execute_task
 from contextforge.worker.stages.report import write_report
@@ -216,3 +220,76 @@ def test_grounding_does_not_silently_shrink_a_comparisons_required_support() -> 
     assert len(result.facts) == 1
     assert result.conclusions == []
     assert any("required supporting findings" in gap for gap in result.uncertainties)
+
+
+def test_a_task_result_schema_asks_every_evidence_ref_for_an_excerpt() -> None:
+    """F18 live run: Gemini flash-lite left out the optional, nullable ``excerpt`` on all 31
+    refs, so every web fact failed the cite check. The schema sent to the model requires a
+    string excerpt; validation still reads a stored ref without one."""
+    schema = chat_payload(
+        ModelRequest(
+            stage=Stage.EXECUTE, model="m", system=[], messages=[], output_schema=TaskResult
+        )
+    )["tools"][-1]["function"]["parameters"]
+    fact_ref = schema["properties"]["facts"]["items"]["properties"]["evidenceRefs"]["items"]
+    assert "excerpt" in fact_ref["required"]
+    assert fact_ref["properties"]["excerpt"]["type"] == "string"
+    assert (
+        TaskResult.model_validate(
+            {
+                "summary": "s",
+                "facts": [
+                    {
+                        "text": "t",
+                        "evidenceRefs": [
+                            {"artifactId": "a", "locator": {"kind": "url", "value": "u"}}
+                        ],
+                    }
+                ],
+            }
+        )
+        .facts[0]
+        .evidence_refs[0]
+        .excerpt
+        is None
+    )
+
+
+def _live_ref_without_excerpt(fact_text: str) -> tuple[list[str], dict[str, Any]]:
+    """A fetched page and a fact citing it the way the F18 live run did: url locator,
+    artifactId, no excerpt."""
+    worker_dependencies = make_deps(ScriptedModel({}))
+    url = "https://pypi.org/project/langgraph-checkpoint-sqlite/"
+    html = "<p>Library with a SQLite implementation of LangGraph checkpoint saver.</p>"
+    fetched = _fetcher(_web(lambda _: _page(html)), worker_dependencies, url).run(
+        {"url": url}, _ctx()
+    )
+    request_state = create_initial_request_state(_request("Which checkpointers exist?"))
+    request_state["facts"] = [
+        {
+            "text": fact_text,
+            "evidence_refs": [
+                {"artifact_id": fetched.artifact_ids[0], "locator": {"kind": "url", "value": url}}
+            ],
+        }
+    ]
+    checked = check_citations(request_state, worker_dependencies)
+    return checked["uncertainties"], {"facts": checked["facts"]}
+
+
+def test_a_fact_without_an_excerpt_passes_only_when_its_own_text_is_in_the_source() -> None:
+    gaps, checked = _live_ref_without_excerpt(
+        "Library with a SQLite implementation of LangGraph checkpoint saver."
+    )
+    [fact] = checked["facts"]
+    assert fact["evidence_refs"][0]["excerpt"] == (
+        "Library with a SQLite implementation of LangGraph checkpoint saver."
+    )
+    assert gaps == []
+
+    gaps, checked = _live_ref_without_excerpt("LangGraph ships a SQLite checkpointer library.")
+    assert checked["facts"] == []
+    assert gaps == [
+        "unsupported excerpt for https://pypi.org/project/langgraph-checkpoint-sqlite/ "
+        "(no excerpt quoted; the finding's own text is not in the source)"
+    ]
