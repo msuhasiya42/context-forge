@@ -182,18 +182,28 @@ def test_a_transcript_is_stored_per_call_redacted_and_never_fails_the_call() -> 
 
 def test_models_config_loads_the_shipped_routes_each_model_priced() -> None:
     """F17: every stage on Gemini, flash first for the thinking stages and flash-lite first for
-    the short ones, each falling back to the other; every model a stage may call has a price
-    row, so no call is charged the reserve for want of one."""
+    execute and the short ones, each falling back to the other; every model a stage may call
+    has a price row, so no call is charged the reserve for want of one."""
     config = load_models_config()
     assert config.price_version == "2026-11-07"
     flash, lite = "gemini-3.5-flash", "gemini-3.5-flash-lite"
-    for stage in ("plan", "lead", "execute", "report", "judge"):
+    for stage in ("plan", "lead", "report", "judge"):
         assert config.stages[stage].route == ModelRoute(flash, (lite,))
-    for stage in ("cite", "compress", "summary"):
+    for stage in ("execute", "cite", "compress", "summary"):
         assert config.stages[stage].route == ModelRoute(lite, (flash,))
     assert config.stages["plan"].effort == "medium" and config.stages["compress"].max_tokens == 3000
     routed = {m for stage in config.stages.values() for m in (stage.model, *stage.fallbacks)}
     assert [m for m in routed if price_row(config.prices, m) is None] == []
+    assert config.prices[flash] == {
+        "inputPerMTok": 1.50,
+        "outputPerMTok": 9.00,
+        "cacheReadPerMTok": 0.15,
+    }
+    assert config.prices[lite] == {
+        "inputPerMTok": 0.30,
+        "outputPerMTok": 2.50,
+        "cacheReadPerMTok": 0.03,
+    }
 
 
 def test_a_call_is_priced_from_its_usage_and_unknown_usage_is_charged_the_reserve() -> None:
@@ -250,8 +260,10 @@ def test_spend_cap_admits_more_than_ten_cheap_calls() -> None:
 def test_forty_calls_on_a_free_model_never_trip_the_spend_cap(monkeypatch) -> None:
     """Live finding (F17, Gemini free tier): throttled and usage-less calls to a $0 model were
     each charged the $0.10 reserve, so 33 free calls exhausted a $0.25 cap. A free model now
-    reserves and costs $0 whatever its usage; throttles that fall back cost nothing."""
+    reserves and costs $0 whatever its usage; throttles that fall back cost nothing. The models
+    get their own $0 rows: the shipped Gemini rows are paid now."""
     flash, lite = "gemini-3.5-flash", "gemini-3.5-flash-lite"
+    free = {"inputPerMTok": 0.0, "outputPerMTok": 0.0, "cacheReadPerMTok": 0.0}
     no_usage = ModelResponse(text="ok", usage=None)
     throttled = ModelThrottled("429 RESOURCE_EXHAUSTED")
     model = ByModel({flash: [no_usage, throttled, throttled] * 20, lite: [no_usage] * 20})
@@ -263,7 +275,7 @@ def test_forty_calls_on_a_free_model_never_trip_the_spend_cap(monkeypatch) -> No
     worker_dependencies.settings = Settings(
         _env_file=None, request_max_usd=0.25, call_reserve_usd=0.10, model_retries=1
     )
-    worker_dependencies.prices = load_models_config().prices
+    worker_dependencies.prices = {flash: free, lite: free}
     worker_dependencies.routes = {Stage.EXECUTE: ModelRoute(flash, (lite,))}
     monkeypatch.setattr(calls.time, "sleep", lambda seconds: None)
     request = ModelRequest(stage="execute", model=flash, system=[], messages=[], max_tokens=4000)

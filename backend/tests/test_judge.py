@@ -169,7 +169,7 @@ def test_judged_grade_maps_weights_human_fields_win_and_errors_make_it_incomplet
 def test_the_judge_and_research_routes_are_valid_and_the_core_suite_is_well_formed() -> None:
     route = judge_route(MODELS)
     assert route == ModelRoute("gemini-3.5-flash", ("gemini-3.5-flash-lite",))
-    assert MODELS.prices["gemini-3.5-flash"]["inputPerMTok"] == 0.0  # the free tier
+    assert MODELS.prices["gemini-3.5-flash"]["inputPerMTok"] == 1.50  # the paid tier
     assert MODELS.stages["judge"].max_tokens == 2000
     for model in (route.primary, *route.fallbacks):
         assert model in MODELS.prices

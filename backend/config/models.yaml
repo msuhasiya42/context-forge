@@ -25,10 +25,10 @@ prices:
   "moonshotai.kimi-k3.1":                  { inputPerMTok: 4.00,   outputPerMTok: 20.00,  cacheReadPerMTok: 0.0 }
   "minimax.minimax-m2.5":                  { inputPerMTok: 0.31,   outputPerMTok: 1.24,   cacheReadPerMTok: 0.0 }
   "nvidia.nemotron-super-3-120b":          { inputPerMTok: 0.15,   outputPerMTok: 0.67,   cacheReadPerMTok: 0.0 }
-  # Google Gemini, through its OpenAI-compatible API, not Bedrock: free tier; paid prices
-  # differ — update if billing is enabled.
-  "gemini-3.5-flash":                      { inputPerMTok: 0.0,    outputPerMTok: 0.0,    cacheReadPerMTok: 0.0 }
-  "gemini-3.5-flash-lite":                 { inputPerMTok: 0.0,    outputPerMTok: 0.0,    cacheReadPerMTok: 0.0 }
+  # Google Gemini, through its OpenAI-compatible API, not Bedrock: paid tier (Tier 1), billed
+  # against credits from the Google Developer Program.
+  "gemini-3.5-flash":                      { inputPerMTok: 1.50,   outputPerMTok: 9.00,   cacheReadPerMTok: 0.15 }
+  "gemini-3.5-flash-lite":                 { inputPerMTok: 0.30,   outputPerMTok: 2.50,   cacheReadPerMTok: 0.03 }
 # The model per stage, and its fallbacks: any model id with a price row above. An id starting
 # "gemini-" is served by Google Gemini (infra/gemini.py, CONTEXTFORGE_GEMINI_API_KEY), every other
 # id by Bedrock. A call goes to the next fallback while the model before is down (unavailable,
@@ -37,8 +37,9 @@ prices:
 # CONTEXTFORGE_EXECUTOR_MODEL / _FALLBACKS execute; compress keeps its own.
 #
 # Gemini profile (F17, 12 Nov 2026): the AWS account is refused Bedrock models ("Access to Bedrock
-# models is not allowed for this account"), so every stage runs on Gemini's free tier. The worker
-# refuses to start without CONTEXTFORGE_GEMINI_API_KEY while a stage routes to Gemini.
+# models is not allowed for this account"), so every stage runs on Gemini's paid tier (Tier 1,
+# credits from the Google Developer Program). The worker refuses to start without
+# CONTEXTFORGE_GEMINI_API_KEY while a stage routes to Gemini.
 # To switch back to Bedrock: delete this `stages:` block and uncomment the Bedrock profile below.
 # The judge then still grades on Gemini, of another model family than the research stages.
 stages:
@@ -54,8 +55,8 @@ stages:
     effort: medium
     maxTokens: 16000
   execute:
-    model: "gemini-3.5-flash"
-    fallbacks: ["gemini-3.5-flash-lite"]
+    model: "gemini-3.5-flash-lite"
+    fallbacks: ["gemini-3.5-flash"]
     effort: medium
     maxTokens: 8000
   cite:

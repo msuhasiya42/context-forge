@@ -92,7 +92,7 @@ def gemini(handler: Handler, clock: FakeClock | None = None) -> GeminiModel:
     )
 
 
-def test_a_structured_judge_call_round_trips_through_gemini_at_no_cost() -> None:
+def test_a_structured_judge_call_round_trips_through_gemini_priced_at_its_row() -> None:
     sent: list[httpx.Request] = []
 
     def handle(request: httpx.Request) -> httpx.Response:
@@ -118,7 +118,10 @@ def test_a_structured_judge_call_round_trips_through_gemini_at_no_cost() -> None
     [call] = session.calls.list_by_request(session.session_id)
     assert call.model == "gemini/gemini-3.5-flash"
     assert call.usage is not None and call.usage.input_tokens == 900
-    assert call.estimated_cost_usd == 0.0 and session.spent_usd() == 0.0
+    # gemini-3.5-flash, paid tier: $1.50 in / $9.00 out per million tokens.
+    cost = 900 * 1.50e-6 + 80 * 9.00e-6
+    assert call.estimated_cost_usd == pytest.approx(cost)
+    assert session.spent_usd() == pytest.approx(cost)
 
 
 def test_a_throttled_gemini_falls_back_paced_and_no_key_skips_gemini(
