@@ -10,7 +10,7 @@ import logging
 import re
 from collections import Counter
 from decimal import Decimal, InvalidOperation
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from langchain_core.messages import HumanMessage
 from pydantic import Field, ValidationError
@@ -21,7 +21,7 @@ from contextforge.core.entities.message import ReportBody
 from contextforge.core.entities.model_call import Stage
 from contextforge.core.llm.base import ModelRequest
 from contextforge.core.llm.errors import ModelError
-from contextforge.core.llm.fit import fit_to_schema
+from contextforge.core.llm.fit import TRIM, fit_to_schema
 from contextforge.core.state import Fact, RequestState
 from contextforge.worker.dependencies import WorkerDependencies
 from contextforge.worker.stages.citation_checks import (
@@ -41,7 +41,9 @@ CITE_BATCH_SIZE = 8
 class SupportAssessment(Entity):
     id: str
     verdict: Literal["supported", "unsupported", "uncertain"]
-    reason: str = Field(max_length=500)
+    # Read in logs only; a model that thinks out loud here (live, 13 Nov 2026) is cut, not
+    # rejected, so its verdict still counts.
+    reason: Annotated[str, TRIM] = Field(max_length=500)
 
 
 class SupportReview(Entity):

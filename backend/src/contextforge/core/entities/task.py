@@ -1,11 +1,12 @@
 """Task entity (implementation plan section 3.4) and the structured-data guard."""
 
 from enum import StrEnum
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import Field, NonNegativeInt
 
 from contextforge.core.entities import Entity
+from contextforge.core.llm.fit import TRIM
 from contextforge.core.values import ArtifactRef, EvidenceRef
 
 MAX_FACTS_PER_RESULT = 6
@@ -55,8 +56,11 @@ class TaskResult(Entity):
 
     summary: str
     # Findings accumulated in request state; the caller checks refs against inputArtifactIds.
-    facts: list[Fact] = Field(default=[], max_length=MAX_FACTS_PER_RESULT)
-    conclusions: list[Conclusion] = Field(default=[], max_length=MAX_CONCLUSIONS_PER_RESULT)
+    # Over the cap, a result keeps its first items (``fit_to_schema``) instead of failing.
+    facts: Annotated[list[Fact], TRIM] = Field(default=[], max_length=MAX_FACTS_PER_RESULT)
+    conclusions: Annotated[list[Conclusion], TRIM] = Field(
+        default=[], max_length=MAX_CONCLUSIONS_PER_RESULT
+    )
     structured_data: dict[str, Any] = {}
     evidence_refs: list[EvidenceRef] = []
     artifact_refs: list[ArtifactRef] = []

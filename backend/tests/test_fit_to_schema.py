@@ -60,3 +60,17 @@ def test_real_schema_breaks_are_left_for_validation():
     assert fixes == []
     with pytest.raises(ValidationError):
         SupportReview.model_validate(fitted)
+
+
+def test_report_text_a_user_reads_is_never_cut_so_the_draft_falls_back():
+    from contextforge.worker.stages.research_report import ResearchDraft
+
+    paragraph = {"text": "Meta refused to sign because " + "x" * 1700, "claimIds": ["c1"]}
+    answer = {"sections": [{"heading": "Signatories", "paragraphs": [paragraph]}], "note": 1}
+
+    fitted, fixes = fit_to_schema(ResearchDraft, answer)
+
+    assert fixes == ["dropped unknown field note"]
+    assert fitted["sections"][0]["paragraphs"][0]["text"] == paragraph["text"]
+    with pytest.raises(ValidationError):
+        ResearchDraft.model_validate(fitted)

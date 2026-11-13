@@ -3,10 +3,14 @@
 Models slip on strict schemas in ways that lose no meaning: a field the schema does not have
 (Gemini, live 13 Nov 2026: ``conclusions[0].staged``, ``sessionId``, ``nativeElement``), a list
 longer than its cap (11 facts for 6), a reason that thinks out loud past its length limit. Any
-one of these used to fail the whole answer. ``fit_to_schema`` drops unknown fields, keeps the
-first items of an over-long list, and cuts an over-long string, guided by the schema itself.
-Everything else (a missing required field, a wrong type, a bad enum value) is left for
-validation to reject.
+one of these used to fail the whole answer.
+
+``fit_to_schema`` always drops unknown fields: nothing reads them. Shortening is opt-in per
+field, with the ``TRIM`` marker (``Annotated[str, TRIM]``): only there is an over-long string
+cut or an over-long list cut to its first items. Text a user reads (a report paragraph or
+heading) is never marked: cut mid-sentence it would be published wrong, so it still fails and
+the stage falls back. Everything else (a missing field, a wrong type, a bad enum value, an
+unmarked field over its limit) is left for validation to reject.
 """
 
 import types
@@ -15,6 +19,16 @@ from typing import Any, Union, get_args, get_origin
 from annotated_types import MaxLen
 from pydantic import BaseModel
 from pydantic.fields import FieldInfo
+
+
+class Trim:
+    """Marks a field ``fit_to_schema`` may shorten: a string cut, a list cut to its first items."""
+
+    def __repr__(self) -> str:
+        return "TRIM"
+
+
+TRIM = Trim()
 
 
 def fit_to_schema(schema: type[BaseModel], answer: Any) -> tuple[Any, list[str]]:
@@ -41,7 +55,8 @@ def _fit_model(schema: type[BaseModel], value: Any, path: str, fixes: list[str])
                 continue
             fitted[key] = item
             continue
-        fitted[key] = _fit_value(field.annotation, _max_length(field), item, f"{path}{key}", fixes)
+        limit = _max_length(field) if TRIM in field.metadata else None
+        fitted[key] = _fit_value(field.annotation, limit, item, f"{path}{key}", fixes)
     return fitted
 
 
