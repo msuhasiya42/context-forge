@@ -21,6 +21,7 @@ from contextforge.core.entities.message import ReportBody
 from contextforge.core.entities.model_call import Stage
 from contextforge.core.llm.base import ModelRequest
 from contextforge.core.llm.errors import ModelError
+from contextforge.core.llm.fit import fit_to_schema
 from contextforge.core.state import Fact, RequestState
 from contextforge.worker.dependencies import WorkerDependencies
 from contextforge.worker.stages.citation_checks import (
@@ -29,6 +30,7 @@ from contextforge.worker.stages.citation_checks import (
     _record_text,
     check_citations,
 )
+from contextforge.worker.stages.errors import one_line
 
 logger = logging.getLogger(__name__)
 _NUMBERS = re.compile(r"(?<![\w])[+-]?\d+(?:[.,]\d+)*")
@@ -118,9 +120,15 @@ def review_statement_support(
                 request_state["request_message_id"],
                 memory_version=request_state["memory"]["version"],
             ).invoke(request)
-            reviewed = SupportReview.model_validate(response.structured)
+            answer, fixes = fit_to_schema(SupportReview, response.structured)
+            if fixes:
+                logger.info("support review fitted to schema: %s", "; ".join(fixes))
+            reviewed = SupportReview.model_validate(answer)
         except (ModelError, ValidationError) as exc:
-            logger.warning("support review unavailable: %s", type(exc).__name__)
+            logger.warning(
+                "support review unavailable: %s",
+                one_line(exc) if isinstance(exc, ValidationError) else exc,
+            )
             continue
         expected = {p["id"] for p in batch}
         counts = Counter(r.id for r in reviewed.reviews)

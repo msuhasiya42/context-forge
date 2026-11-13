@@ -19,9 +19,11 @@ from contextforge.core.entities.message import Claim, ReportBody
 from contextforge.core.entities.model_call import Stage
 from contextforge.core.llm.base import ModelRequest
 from contextforge.core.llm.errors import ModelError
+from contextforge.core.llm.fit import fit_to_schema
 from contextforge.core.state import RequestState
 from contextforge.core.values import LocatorKind
 from contextforge.worker.dependencies import WorkerDependencies
+from contextforge.worker.stages.errors import one_line
 from contextforge.worker.stages.review import review_statement_support
 
 logger = logging.getLogger(__name__)
@@ -79,9 +81,15 @@ def compose_research(
                 max_tokens=4000,
             )
         )
-        draft = ResearchDraft.model_validate(response.structured)
+        answer, fixes = fit_to_schema(ResearchDraft, response.structured)
+        if fixes:
+            logger.info("research draft fitted to schema: %s", "; ".join(fixes))
+        draft = ResearchDraft.model_validate(answer)
     except (ModelError, ValidationError) as exc:
-        logger.warning("research draft unavailable: %s", type(exc).__name__)
+        logger.warning(
+            "research draft unavailable: %s",
+            one_line(exc) if isinstance(exc, ValidationError) else exc,
+        )
         return None
     claims = {c.claim_id: c for c in body.claims}
     packets = _review_packets(draft, claims)

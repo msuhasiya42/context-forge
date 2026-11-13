@@ -57,6 +57,7 @@ from contextforge.core.llm.base import (
     ToolSpec,
 )
 from contextforge.core.llm.errors import ModelError
+from contextforge.core.llm.fit import fit_to_schema
 from contextforge.core.logging import request_context
 from contextforge.core.repositories.base import StaleStatusError
 from contextforge.core.state import Conclusion, Fact, RequestState, TaskState
@@ -710,10 +711,14 @@ def _parse_result(response: ModelResponse, task: Task, produced: list[str]) -> T
     """The response's TaskResult, keeping only facts grounded in the task's own inputs or in
     ``produced``: what its tools saved, and the evidence its dependencies cite.
 
-    Raises ``ValueError`` (``ValidationError`` included) when it breaks the result schema; the
-    schema already caps the facts at six.
+    Unknown fields, extra facts and over-long strings are fitted to the schema first
+    (``fit_to_schema``); raises ``ValueError`` (``ValidationError`` included) when the answer
+    still breaks it.
     """
-    result = TaskResult.model_validate(response.structured)
+    answer, fixes = fit_to_schema(TaskResult, response.structured)
+    if fixes:
+        logger.info("result fitted to schema: %s", "; ".join(fixes))
+    result = TaskResult.model_validate(answer)
     validate_structured_data(task.kind, result.structured_data)
     citable = [*task.input_artifact_ids, *produced]
     grounded = [i for i, fact in enumerate(result.facts) if _is_grounded(fact, citable)]
