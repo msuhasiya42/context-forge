@@ -39,13 +39,14 @@ def price_row(prices: PriceTable, model: str) -> Mapping[str, float] | None:
 
 def cost_usd(prices: PriceTable, model: str, usage: Usage | None) -> float | None:
     """What ``usage`` costs at ``model``'s prices; None when the usage is unknown or the model has
-    no price. Cache writes without a price of their own are charged as input."""
+    no price. Cache writes without a price of their own are charged as input; thinking tokens,
+    which providers bill as output, at the output price."""
     row = price_row(prices, model)
     if usage is None or row is None:
         return None
     per_million = (
         usage.input_tokens * row["inputPerMTok"]
-        + usage.output_tokens * row["outputPerMTok"]
+        + (usage.output_tokens + (usage.thinking_tokens or 0)) * row["outputPerMTok"]
         + (usage.cache_read_tokens or 0) * row["cacheReadPerMTok"]
         + (usage.cache_write_tokens or 0) * row.get("cacheWritePerMTok", row["inputPerMTok"])
     )

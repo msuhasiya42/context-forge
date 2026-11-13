@@ -335,3 +335,26 @@ def test_the_worker_needs_the_gemini_key_at_startup_and_health_names_the_provide
     assert research_providers(worker_dependencies.routes) == {"gemini"}
     health = TestClient(create_app(keyed, worker_dependencies=worker_dependencies))
     assert health.get("/health").json()["model"] == "gemini"
+
+
+def test_thinking_hidden_in_the_total_is_recorded_and_billed_as_output():
+    """Measured 13 Nov 2026 on gemini-3.5-flash-lite: the OpenAI-compatible API reported
+    completion 1 of total 330; the thinking is only in the gap, and Google bills it."""
+    from contextforge.core.llm.recording import cost_usd
+    from contextforge.infra.gemini import _usage
+
+    usage = _usage({"prompt_tokens": 14, "completion_tokens": 1, "total_tokens": 330})
+    assert usage is not None and usage.thinking_tokens == 315
+    prices = {
+        "gemini-3.5-flash-lite": {
+            "inputPerMTok": 0.30,
+            "outputPerMTok": 2.50,
+            "cacheReadPerMTok": 0.03,
+        }
+    }
+    assert cost_usd(prices, "gemini-3.5-flash-lite", usage) == pytest.approx(
+        (14 * 0.30 + (1 + 315) * 2.50) / 1_000_000
+    )
+
+    no_total = _usage({"prompt_tokens": 14, "completion_tokens": 1})
+    assert no_total is not None and no_total.thinking_tokens is None

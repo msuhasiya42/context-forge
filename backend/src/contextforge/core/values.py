@@ -69,4 +69,6 @@ class Usage(Entity):
     output_tokens: int
     cache_read_tokens: int | None = None
     cache_write_tokens: int | None = None
+    # Reasoning tokens not included in ``output_tokens`` but billed at the output price (Gemini
+    # reports them only inside its total).
     thinking_tokens: int | None = None

@@ -301,7 +301,20 @@ def _arguments(function: dict[str, Any]) -> dict[str, Any]:
 
 
 def _usage(raw: dict[str, Any] | None) -> Usage | None:
-    """Usage when both token counts were reported; missing or partial usage stays unknown."""
+    """Usage when both token counts were reported; missing or partial usage stays unknown.
+
+    Gemini's OpenAI-compatible API leaves thinking out of ``completion_tokens``: it shows only
+    in ``total_tokens`` (measured 13 Nov 2026: completion 1, prompt 14, total 330, where the
+    native API reported 449 thought tokens). Google bills thinking as output, so the gap is
+    kept as ``thinking_tokens``; without ``total_tokens`` it stays unknown.
+    """
     if not raw or "prompt_tokens" not in raw or "completion_tokens" not in raw:
         return None
-    return Usage(input_tokens=raw["prompt_tokens"], output_tokens=raw["completion_tokens"])
+    prompt, completion = raw["prompt_tokens"], raw["completion_tokens"]
+    total = raw.get("total_tokens")
+    thinking = total - prompt - completion if isinstance(total, int) else None
+    return Usage(
+        input_tokens=prompt,
+        output_tokens=completion,
+        thinking_tokens=thinking if thinking is None or thinking >= 0 else None,
+    )
