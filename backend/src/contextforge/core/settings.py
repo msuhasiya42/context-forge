@@ -21,6 +21,8 @@ class Settings(BaseSettings):
     s3_bucket: str = "contextforge-441186132531-apse2"
     sqs_queue_url: str | None = None
     checkpoint_path: Path = Path(".data/checkpoints.sqlite")
+    # The model per stage and the price table; the eval harness points this at a config's file.
+    models_config_path: Path = Path("config/models.yaml")
     backend_log_path: Path = Path("backend.log")
     dev_user_id: str = "local-user"
     dev_token: SecretStr | None = None

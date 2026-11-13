@@ -256,15 +256,26 @@ def _research_rounds(
     outcomes."""
     finished: dict[str, TaskOutcome] = {}
     research_round = 1
+    tracer, request_id = worker_dependencies.tracer, request_state["request_message_id"]
     while True:
-        request_state = _execute_planned_tasks(
-            request_state, finished, workflow_stages, worker_dependencies
-        )
+        with tracer.stage(request_id, f"round {research_round}", {"round": research_round}):
+            request_state = _execute_planned_tasks(
+                request_state, finished, workflow_stages, worker_dependencies
+            )
         if research_round >= worker_dependencies.budgets.research_rounds:
             return request_state, list(finished.values())
-        review = workflow_stages.lead_review(
-            request_state, list(finished.values()), research_round
-        ).result()
+        with tracer.stage(request_id, f"lead_review {research_round}", {"round": research_round}):
+            review = workflow_stages.lead_review(
+                request_state, list(finished.values()), research_round
+            ).result()
+            tracer.annotate(
+                request_id,
+                {
+                    "action": review["action"],
+                    "reason": review["reason"],
+                    "tasksStarted": len(review["tasks"]),
+                },
+            )
         if review["brief"]:
             request_state = {**request_state, "brief": review["brief"]}
         if review["action"] == "complete_task":

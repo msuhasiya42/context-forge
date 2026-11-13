@@ -42,7 +42,7 @@ def aws_session(settings: Settings) -> Any:
 def build_worker(settings: Settings) -> WorkerDependencies:
     session = aws_session(settings)
     repositories, blobs, queue = _persistence(session, settings)
-    models = load_models_config()
+    models = load_models_config(settings.models_config_path)
     routes = stage_routes(models, settings)
     model: ModelClient = ScriptedModel({})
     provider: str | Callable[[str], str] = settings.model_backend

@@ -108,6 +108,10 @@ def write_report(
             )
             if not summary_held:
                 summary = fallback_summary(task_outcomes, body)
+            worker_dependencies.tracer.annotate(
+                request_state["request_message_id"],
+                {"summary": "written" if summary_held else "fallback"},
+            )
             report = report.model_copy(
                 update={
                     "report": body,
@@ -125,6 +129,10 @@ def write_report(
             and web_research
         ):
             narrative = compose_research(request_state, report.report, worker_dependencies)
+            worker_dependencies.tracer.annotate(
+                request_state["request_message_id"],
+                {"narrative": "written" if narrative else "fallback"},
+            )
             if narrative:
                 claims = report.report.claims
                 numbers = {claim.claim_id: number for number, claim in enumerate(claims, 1)}

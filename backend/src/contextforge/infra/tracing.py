@@ -2,12 +2,19 @@
 
     request                      requestId, chatId, status, attempt; thread_id groups segments
     ├─ plan
-    │  └─ model:plan             usage, estimatedCostUsd, model, requestedModel, stopReason
-    ├─ task:<kind>:<taskId>
-    │  ├─ model:execute / model:compress
-    │  └─ tool:<name>            status, rowCount, artifactIds
+    │  └─ model:plan             usage (thinking as reasoning), input/output/total cost, model,
+    │                            requestedModel (differs when a fallback answered), stopReason
+    ├─ round 1                   round
+    │  └─ task:<kind>:<taskId>
+    │     ├─ model:execute / model:compress
+    │     └─ tool:<name>         status, rowCount, artifactIds
+    ├─ lead_review 1             action, reason, tasksStarted
+    │  └─ model:lead
+    ├─ round 2 …                 (rounds and reviews alternate while the lead starts researchers)
     ├─ cite
-    └─ report
+    │  └─ model:cite
+    └─ report                    narrative (written | fallback), summary (written | fallback)
+       └─ model:summary / model:report
 
 Parents are explicit: each run is created as a child of a RunTree looked up by request id and
 task id, not through LangSmith's implicit context or LangChain callbacks, so the tree holds
@@ -34,7 +41,7 @@ from langsmith.schemas import ExtractedUsageMetadata
 
 from contextforge.core.llm.base import ModelClient, ModelRequest, ModelResponse
 from contextforge.core.llm.errors import ModelError
-from contextforge.core.llm.recording import PriceTable, cost_usd
+from contextforge.core.llm.recording import PriceTable, cost_usd, price_row
 from contextforge.core.state import RequestState
 from contextforge.core.tools.base import Tool, ToolContext, ToolPermission, ToolResult
 from contextforge.core.values import Usage
@@ -69,10 +76,11 @@ class RequestTracer:
         self._project = project
         self.include_content = include_content
         self._prices: PriceTable = prices or {}
-        # Open runs: the root and the open stage by request id, tasks by (request id, task id).
-        # Each key is written by one thread at a time; single dict operations need no lock.
+        # Open runs: the root and the stack of open stages by request id, tasks by (request id,
+        # task id). Stages open and close on the request's workflow thread only; tasks read the
+        # top from their own threads. Single list and dict operations need no lock.
         self._roots: dict[str, RunTree] = {}
-        self._stages: dict[str, RunTree] = {}
+        self._stages: dict[str, list[RunTree]] = {}
         self._tasks: dict[tuple[str, str], RunTree] = {}
 
     def model(self, inner: ModelClient) -> ModelClient:
@@ -110,16 +118,34 @@ class RequestTracer:
                 self._safely(lambda: root.add_metadata(dict(summary())))
 
     @contextmanager
-    def stage(self, request_message_id: str, name: str) -> Iterator[None]:
-        """A stage run (plan, cite, report) under the request's root."""
-        parent = self._roots.get(request_message_id)
-        with self._span(self.start(parent, name, "chain", {"stage": name})) as run:
+    def stage(
+        self, request_message_id: str, name: str, metadata: Mapping[str, Any] | None = None
+    ) -> Iterator[None]:
+        """A stage run under the innermost open stage of the request, else its root."""
+        parent = self._open_stage(request_message_id) or self._roots.get(request_message_id)
+        with self._span(
+            self.start(parent, name, "chain", {"stage": name, **(metadata or {})})
+        ) as run:
+            stack = self._stages.setdefault(request_message_id, [])
             if run is not None:
-                self._stages[request_message_id] = run
+                stack.append(run)
             try:
                 yield
             finally:
-                self._stages.pop(request_message_id, None)
+                if run is not None and stack and stack[-1] is run:
+                    stack.pop()
+                if not stack:
+                    self._stages.pop(request_message_id, None)
+
+    def annotate(self, request_message_id: str, metadata: Mapping[str, Any]) -> None:
+        """Add ``metadata`` to the innermost open stage of the request; nothing when untraced."""
+        run = self._open_stage(request_message_id)
+        if run is not None:
+            self._safely(lambda: run.add_metadata(dict(metadata)))
+
+    def _open_stage(self, request_message_id: str) -> RunTree | None:
+        stack = self._stages.get(request_message_id)
+        return stack[-1] if stack else None
 
     @contextmanager
     def task(self, request_state: RequestState, task_id: str) -> Iterator[None]:
@@ -129,7 +155,7 @@ class RequestTracer:
             (e["kind"] for e in request_state["plan"] if e["task_id"] == task_id), "unknown"
         )
         metadata = {"taskId": task_id, "taskKind": kind}
-        parent = self._roots.get(request_id)
+        parent = self._open_stage(request_id) or self._roots.get(request_id)
         with self._span(self.start(parent, f"task:{kind}:{task_id}", "chain", metadata)) as run:
             if run is not None:
                 self._tasks[(request_id, task_id)] = run
@@ -145,7 +171,7 @@ class RequestTracer:
             return None
         if task_id is not None and (task := self._tasks.get((request_message_id, task_id))):
             return task
-        if stage := self._stages.get(request_message_id):
+        if stage := self._open_stage(request_message_id):
             return stage
         innermost = _innermost.get()
         return innermost if innermost is not None and innermost.trace_id == root.trace_id else root
@@ -195,6 +221,9 @@ class RequestTracer:
     def cost_usd(self, model: str, usage: Usage | None) -> float | None:
         """The estimated cost of ``usage``, priced as the ModelCall record prices it."""
         return cost_usd(self._prices, model, usage)
+
+    def price_row(self, model: str) -> Mapping[str, float] | None:
+        return price_row(self._prices, model)
 
     @contextmanager
     def _span(self, run: RunTree | None) -> Iterator[RunTree | None]:
@@ -284,7 +313,7 @@ class _TracedModel:
             run,
             metadata={"stopReason": response.stop_reason, "estimatedCostUsd": cost},
             outputs=_model_outputs(response),
-            usage=_usage_metadata(response.usage, cost),
+            usage=_usage_metadata(response.usage, cost, tracer.price_row(request.model)),
         )
         if run is None:
             return response
@@ -351,15 +380,28 @@ def _model_outputs(response: ModelResponse) -> dict[str, Any]:
     }
 
 
-def _usage_metadata(usage: Usage | None, cost: float | None) -> ExtractedUsageMetadata | None:
-    """Token counts and cost where LangSmith shows them; None when usage is unknown."""
+def _usage_metadata(
+    usage: Usage | None, cost: float | None, prices: Mapping[str, float] | None = None
+) -> ExtractedUsageMetadata | None:
+    """Token counts and cost where LangSmith shows them; None when usage is unknown.
+
+    Thinking is billed as output, so it is counted in ``output_tokens`` and named in
+    ``output_token_details.reasoning``. With the model's prices, the input and output costs are
+    sent too, so LangSmith's cost breakdown adds up to the total."""
     if usage is None:
         return None
+    thinking = usage.thinking_tokens or 0
+    output = usage.output_tokens + thinking
     counts = ExtractedUsageMetadata(
         input_tokens=usage.input_tokens,
-        output_tokens=usage.output_tokens,
-        total_tokens=usage.input_tokens + usage.output_tokens,
+        output_tokens=output,
+        total_tokens=usage.input_tokens + output,
     )
+    if usage.thinking_tokens is not None:
+        counts["output_token_details"] = {"reasoning": thinking}
     if cost is not None:
         counts["total_cost"] = cost
+    if prices is not None:
+        counts["output_cost"] = output * prices["outputPerMTok"] / 1_000_000
+        counts["input_cost"] = cost - counts["output_cost"] if cost is not None else 0.0
     return counts

@@ -108,7 +108,7 @@ def _two_task_script() -> dict[str, list[ModelResponse]]:
         "tasks": planned,
         "nextAction": "Run t1 and t2.",
     }
-    usage = Usage(input_tokens=1_000, output_tokens=100)
+    usage = Usage(input_tokens=1_000, output_tokens=100, thinking_tokens=50)
     query = ToolCall(id="q1", name="sql_query", arguments={"dataset_id": "a2", "sql": SQL})
     per_task = [
         ModelResponse(tool_calls=[query], stop_reason="tool_use", usage=usage),
@@ -130,9 +130,10 @@ def test_trace_tree_of_a_two_task_run_is_metadata_only_unless_content_is_on(cont
     )
 
     tree = client.children()
-    tasks = [name for name in tree["request"] if name.startswith("task:sql_analysis:")]
+    tasks = [name for name in tree["round 1"] if name.startswith("task:sql_analysis:")]
     assert tree[None] == ["request"] and len(tasks) == 2
-    assert tree["request"] == sorted(["plan", "cite", "report", *tasks])
+    assert tree["request"] == sorted(["plan", "round 1", "cite", "report"])
+    assert tree["round 1"] == sorted(tasks)
     assert tree["plan"] == ["model:plan"]
     for task in tasks:
         assert tree[task] == ["model:execute", "model:execute", "tool:sql_query"]
@@ -140,8 +141,14 @@ def test_trace_tree_of_a_two_task_run_is_metadata_only_unless_content_is_on(cont
     assert root["requestId"] == req.message_id and root["chatId"] == "c1"
     assert root["status"] == "COMPLETED" and root["attempt"] == 1
     call = client.ended("model:execute")["extra"]["metadata"]
-    total = (1_000 * 0.2266 + 100 * 0.9064) / 1e6
-    assert call["usage_metadata"]["total_cost"] == pytest.approx(total)
+    # Thinking is billed as output: counted in the output tokens, named as reasoning, and
+    # the input and output costs add up to the total.
+    total = (1_000 * 0.2266 + (100 + 50) * 0.9064) / 1e6
+    usage_sent = call["usage_metadata"]
+    assert usage_sent["total_cost"] == pytest.approx(total)
+    assert usage_sent["output_tokens"] == 150 and usage_sent["total_tokens"] == 1_150
+    assert usage_sent["output_token_details"] == {"reasoning": 50}
+    assert usage_sent["input_cost"] + usage_sent["output_cost"] == pytest.approx(total)
     assert (
         call["model"] == worker_dependencies.model_id(Stage.EXECUTE)
         and call["stopReason"] == "tool_use"
@@ -154,6 +161,27 @@ def test_trace_tree_of_a_two_task_run_is_metadata_only_unless_content_is_on(cont
 
     sent = json.dumps([client.created, client.updated], default=str)
     assert (req.content.splitlines()[0] in sent) is content and (SQL in sent) is content
+
+
+def test_a_lead_review_is_its_own_span_with_the_decision_and_reason() -> None:
+    client = FakeLangSmith()
+    script = _two_task_script()
+    script["lead"] = [ModelResponse(structured={"action": "complete_task", "reason": "enough"})]
+    worker_dependencies = _traced(
+        make_deps(ScriptedModel(script), tasks_in_flight=1, research_rounds=3), client
+    )
+    req = seed_chat_with_dataset(worker_dependencies, chat_id="c1", user_id="u1", dataset_id="a2")
+    saver = SqliteSaver(sqlite3.connect(":memory:", check_same_thread=False))
+    assert (
+        RequestRunner(worker_dependencies, saver).start("c1", req.message_id).status == "COMPLETED"
+    )
+
+    tree = client.children()
+    assert tree["request"] == sorted(["plan", "round 1", "lead_review 1", "cite", "report"])
+    assert tree["lead_review 1"] == ["model:lead"]
+    review = client.ended("lead_review 1")["extra"]["metadata"]
+    assert review["action"] == "complete_task" and review["reason"] == "enough"
+    assert review["tasksStarted"] == 0 and review["round"] == 1
 
 
 def test_runtime_traces_only_with_its_own_switch_and_hides_content_by_default(

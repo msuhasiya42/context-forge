@@ -22,12 +22,20 @@ class Tracer(Protocol):
         """The root of one segment; ``summary()`` (status, attempt) is recorded as it ends."""
         ...
 
-    def stage(self, request_message_id: str, name: str) -> AbstractContextManager[None]:
-        """A stage (plan, cite, report) under the request's root."""
+    def stage(
+        self, request_message_id: str, name: str, metadata: Mapping[str, Any] | None = None
+    ) -> AbstractContextManager[None]:
+        """A stage (plan, a research round, a lead review, cite, report) under the innermost
+        stage open for the request, else its root."""
         ...
 
     def task(self, request_state: RequestState, task_id: str) -> AbstractContextManager[None]:
-        """One task's execution under the request's root."""
+        """One task's execution under the innermost open stage (its round), else the root."""
+        ...
+
+    def annotate(self, request_message_id: str, metadata: Mapping[str, Any]) -> None:
+        """Add ``metadata`` to the innermost stage open for the request: a decision and its
+        reason, or which path a stage took."""
         ...
 
 
@@ -44,9 +52,14 @@ class NullTracer:
         yield
 
     @contextmanager
-    def stage(self, request_message_id: str, name: str) -> Iterator[None]:
+    def stage(
+        self, request_message_id: str, name: str, metadata: Mapping[str, Any] | None = None
+    ) -> Iterator[None]:
         yield
 
     @contextmanager
     def task(self, request_state: RequestState, task_id: str) -> Iterator[None]:
         yield
+
+    def annotate(self, request_message_id: str, metadata: Mapping[str, Any]) -> None:
+        return None
