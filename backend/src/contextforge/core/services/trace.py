@@ -18,7 +18,7 @@ from contextforge.core.entities.message import (
 )
 from contextforge.core.entities.model_call import ModelCall, Stage
 from contextforge.core.entities.task import Task, TaskStatus
-from contextforge.core.models.transcript import Transcript, content_text, tool_results, tool_uses
+from contextforge.core.llm.transcript import Transcript, content_text, tool_results, tool_uses
 
 # Enough of a tool result to recognise it; the whole result is in the next call's transcript.
 RESULT_SUMMARY_CHARS = 300

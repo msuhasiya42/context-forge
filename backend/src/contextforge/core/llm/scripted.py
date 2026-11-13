@@ -4,8 +4,8 @@ import threading
 from collections import deque
 from collections.abc import Callable
 
-from contextforge.core.models.base import ModelRequest, ModelResponse
-from contextforge.core.models.errors import ModelError
+from contextforge.core.llm.base import ModelRequest, ModelResponse
+from contextforge.core.llm.errors import ModelError
 
 
 class ScriptExhausted(ModelError):

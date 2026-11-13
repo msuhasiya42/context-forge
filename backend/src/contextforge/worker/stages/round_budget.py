@@ -15,7 +15,7 @@ from dataclasses import dataclass
 
 from contextforge.core.entities.model_call import ModelCall
 from contextforge.core.entities.task import MAX_FACTS_PER_RESULT, Task, TaskKind
-from contextforge.core.models.recording import refused_before_generation
+from contextforge.core.llm.recording import refused_before_generation
 from contextforge.core.state import RequestState
 from contextforge.worker.calls import calls_used
 from contextforge.worker.dependencies import WorkerDependencies

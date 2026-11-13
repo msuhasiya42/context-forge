@@ -17,8 +17,8 @@ from pydantic.alias_generators import to_camel
 from contextforge.core.context.prompts import load_prompt
 from contextforge.core.entities import Entity
 from contextforge.core.entities.model_call import Stage
-from contextforge.core.models.base import ModelClient, ModelRequest
-from contextforge.core.models.errors import ModelError
+from contextforge.core.llm.base import ModelClient, ModelRequest
+from contextforge.core.llm.errors import ModelError
 from contextforge.worker.stages.errors import one_line
 
 logger = logging.getLogger(__name__)

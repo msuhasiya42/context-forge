@@ -7,9 +7,9 @@ from langchain_core.messages import AIMessage, SystemMessage, ToolMessage
 
 from contextforge.core.entities.message import ReportMessage
 from contextforge.core.entities.model_call import Stage
-from contextforge.core.models.base import ModelRequest, ModelResponse, ToolCall
-from contextforge.core.models.errors import ModelError
-from contextforge.core.models.scripted import ScriptedModel
+from contextforge.core.llm.base import ModelRequest, ModelResponse, ToolCall
+from contextforge.core.llm.errors import ModelError
+from contextforge.core.llm.scripted import ScriptedModel
 from contextforge.core.settings import Settings
 from contextforge.core.tools.base import ToolContext
 from contextforge.infra.bedrock import converse_payload

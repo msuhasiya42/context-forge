@@ -15,7 +15,7 @@ import httpx
 from pydantic import ValidationError
 
 from contextforge.core.entities.message import ReportMessage, RequestMessage
-from contextforge.core.models.base import ModelClient
+from contextforge.core.llm.base import ModelClient
 from contextforge.core.settings import Settings
 from contextforge.evals.bundle import bundle_hash, normalized, snapshot_texts
 from contextforge.evals.scoring import FLAGS, WEIGHTS, judged_grade, judged_status

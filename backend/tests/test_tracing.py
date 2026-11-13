@@ -6,10 +6,10 @@ import pytest
 from langgraph.checkpoint.sqlite import SqliteSaver
 
 from contextforge.core.entities.model_call import Stage
-from contextforge.core.models.base import ModelRequest, ModelResponse, ToolCall
-from contextforge.core.models.config import ModelRoute, load_models_config
-from contextforge.core.models.errors import ModelTimeout, ModelUnavailable
-from contextforge.core.models.scripted import ScriptedModel
+from contextforge.core.llm.base import ModelRequest, ModelResponse, ToolCall
+from contextforge.core.llm.config import ModelRoute, load_models_config
+from contextforge.core.llm.errors import ModelTimeout, ModelUnavailable
+from contextforge.core.llm.scripted import ScriptedModel
 from contextforge.core.settings import Settings
 from contextforge.core.tools.base import ToolContext
 from contextforge.core.values import Usage

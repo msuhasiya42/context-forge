@@ -16,8 +16,8 @@ from langchain_core.messages import HumanMessage
 from contextforge.core.context.prompts import load_prompt, prompt_version
 from contextforge.core.entities.message import ReportBody
 from contextforge.core.entities.model_call import Stage
-from contextforge.core.models.base import ModelRequest
-from contextforge.core.models.errors import ModelError
+from contextforge.core.llm.base import ModelRequest
+from contextforge.core.llm.errors import ModelError
 from contextforge.core.state import RequestState
 from contextforge.worker.dependencies import WorkerDependencies
 from contextforge.worker.stages.citation_checks import claim_key

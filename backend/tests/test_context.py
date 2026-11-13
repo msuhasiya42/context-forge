@@ -25,7 +25,7 @@ from contextforge.core.entities.message import (
     Sender,
     TextMessage,
 )
-from contextforge.core.models.base import ToolSpec
+from contextforge.core.llm.base import ToolSpec
 from contextforge.core.repositories.memory import Repositories
 from contextforge.core.storage import MemoryBlobStore
 from contextforge.core.values import EvidenceRef, Locator, LocatorKind

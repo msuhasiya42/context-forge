@@ -5,7 +5,7 @@ import math
 from typing import Any
 
 from contextforge.core.entities.message import ReportMessage
-from contextforge.core.models.base import ModelClient
+from contextforge.core.llm.base import ModelClient
 from contextforge.evals.bundle import bundle_hash, claim_evidence, report_text
 from contextforge.evals.judge import (
     JUDGE_ERROR,

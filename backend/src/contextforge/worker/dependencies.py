@@ -17,10 +17,10 @@ from contextforge.core.entities.message import (
     RequestMessage,
 )
 from contextforge.core.entities.model_call import Stage
-from contextforge.core.models.base import ModelClient
-from contextforge.core.models.config import ModelRoute
-from contextforge.core.models.recording import PriceTable, RecordingModelClient
-from contextforge.core.models.transcript import TranscriptWriter
+from contextforge.core.llm.base import ModelClient
+from contextforge.core.llm.config import ModelRoute
+from contextforge.core.llm.recording import PriceTable, RecordingModelClient
+from contextforge.core.llm.transcript import TranscriptWriter
 from contextforge.core.queue import Queue
 from contextforge.core.repositories.memory import Repositories
 from contextforge.core.settings import Settings

@@ -12,9 +12,9 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 
 from contextforge.core.entities.model_call import Stage
-from contextforge.core.models.base import ModelClient, ModelRequest, ModelResponse
-from contextforge.core.models.config import ModelRoute
-from contextforge.core.models.errors import ModelAccessDenied, ModelThrottled, ModelUnavailable
+from contextforge.core.llm.base import ModelClient, ModelRequest, ModelResponse
+from contextforge.core.llm.config import ModelRoute
+from contextforge.core.llm.errors import ModelAccessDenied, ModelThrottled, ModelUnavailable
 
 logger = logging.getLogger(__name__)
 

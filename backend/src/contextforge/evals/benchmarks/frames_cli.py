@@ -9,7 +9,7 @@ from pathlib import Path
 
 import httpx
 
-from contextforge.core.models.config import load_models_config
+from contextforge.core.llm.config import load_models_config
 from contextforge.core.settings import Settings
 from contextforge.evals.benchmarks.frames import (
     DATASET,

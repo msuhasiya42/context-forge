@@ -9,7 +9,7 @@ from typing import Any
 import duckdb
 
 from contextforge.core.entities.artifact import Artifact, ArtifactKind, ArtifactStatus
-from contextforge.core.models.base import ToolSpec
+from contextforge.core.llm.base import ToolSpec
 from contextforge.core.repositories.base import ArtifactRepository
 from contextforge.core.storage import BlobStore
 from contextforge.core.tools.base import ToolContext, ToolPermission, ToolResult

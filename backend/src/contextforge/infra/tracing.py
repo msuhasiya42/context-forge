@@ -32,9 +32,9 @@ from langsmith import Client
 from langsmith.run_trees import RunTree
 from langsmith.schemas import ExtractedUsageMetadata
 
-from contextforge.core.models.base import ModelClient, ModelRequest, ModelResponse
-from contextforge.core.models.errors import ModelError
-from contextforge.core.models.recording import PriceTable, cost_usd
+from contextforge.core.llm.base import ModelClient, ModelRequest, ModelResponse
+from contextforge.core.llm.errors import ModelError
+from contextforge.core.llm.recording import PriceTable, cost_usd
 from contextforge.core.state import RequestState
 from contextforge.core.tools.base import Tool, ToolContext, ToolPermission, ToolResult
 from contextforge.core.values import Usage

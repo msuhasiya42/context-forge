@@ -11,8 +11,8 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMe
 from pydantic import BaseModel
 
 from contextforge.core.entities.model_call import CallMetadata, Stage
-from contextforge.core.models.base import ModelRequest, ModelResponse, ToolCall
-from contextforge.core.models.errors import ModelError, ModelMalformed, ModelRejected
+from contextforge.core.llm.base import ModelRequest, ModelResponse, ToolCall
+from contextforge.core.llm.errors import ModelError, ModelMalformed, ModelRejected
 from contextforge.core.values import Usage
 from contextforge.infra.boto_errors import error_code, map_boto_error
 

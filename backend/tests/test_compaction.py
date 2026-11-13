@@ -7,8 +7,8 @@ from contextforge.core.context.compaction import (
     stub_old_tool_results,
     summarize_messages,
 )
-from contextforge.core.models.base import ModelResponse
-from contextforge.core.models.scripted import ScriptedModel
+from contextforge.core.llm.base import ModelResponse
+from contextforge.core.llm.scripted import ScriptedModel
 
 
 def _tool(i: int, big: bool = False) -> ToolMessage:

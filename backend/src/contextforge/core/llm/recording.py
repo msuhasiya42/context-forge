@@ -7,8 +7,8 @@ from collections.abc import Callable, Mapping
 from contextforge.core.context.prompts import prompt_version
 from contextforge.core.entities.model_call import CallMetadata, ModelCall, Outcome
 from contextforge.core.ids import new_ulid, now_iso_ms
-from contextforge.core.models.base import ModelClient, ModelRequest, ModelResponse, ToolSpec
-from contextforge.core.models.errors import (
+from contextforge.core.llm.base import ModelClient, ModelRequest, ModelResponse, ToolSpec
+from contextforge.core.llm.errors import (
     ModelAccessDenied,
     ModelError,
     ModelOverloaded,
@@ -16,7 +16,7 @@ from contextforge.core.models.errors import (
     ModelTimeout,
     ModelUnreachable,
 )
-from contextforge.core.models.transcript import TranscriptWriter, transcript
+from contextforge.core.llm.transcript import TranscriptWriter, transcript
 from contextforge.core.repositories.base import ModelCallRepository
 from contextforge.core.values import Usage
 

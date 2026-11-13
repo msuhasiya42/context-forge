@@ -16,9 +16,9 @@ from langchain_core.messages import SystemMessage, ToolMessage
 from contextforge.core.entities.artifact import Artifact, ArtifactKind, ArtifactStatus, IndexStatus
 from contextforge.core.entities.chat import Chat
 from contextforge.core.entities.message import Claim, ReportBody, ReportMessage, RequestMessage
-from contextforge.core.models.base import ModelRequest, ModelResponse, ToolCall
-from contextforge.core.models.errors import ModelError
-from contextforge.core.models.scripted import ScriptedModel
+from contextforge.core.llm.base import ModelRequest, ModelResponse, ToolCall
+from contextforge.core.llm.errors import ModelError
+from contextforge.core.llm.scripted import ScriptedModel
 from contextforge.core.storage import raw_result_key
 from contextforge.core.tools.base import ToolContext, ToolResult
 from contextforge.infra.web import (

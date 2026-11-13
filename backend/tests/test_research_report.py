@@ -1,6 +1,6 @@
 from contextforge.core.entities.message import Claim, ReportBody
-from contextforge.core.models.base import ModelResponse
-from contextforge.core.models.scripted import ScriptedModel
+from contextforge.core.llm.base import ModelResponse
+from contextforge.core.llm.scripted import ScriptedModel
 from contextforge.core.values import EvidenceRef
 from contextforge.worker.stages.research_report import compose_research
 from tests.helpers import create_initial_request_state, make_deps, seed_chat_with_dataset

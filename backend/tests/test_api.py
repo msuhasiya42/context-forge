@@ -9,12 +9,14 @@ import pytest
 from fastapi.testclient import TestClient
 from langgraph.checkpoint.sqlite import SqliteSaver
 
-from contextforge.api import main
-from contextforge.api.main import create_app, event_stream
+from contextforge.api.errors import INTERNAL_MESSAGE
+from contextforge.api.main import create_app
+from contextforge.api.routes import requests as request_routes
+from contextforge.api.streaming import event_stream
 from contextforge.core.entities.message import ClarificationMessage, ClarificationResponseMessage
 from contextforge.core.ids import now_iso
-from contextforge.core.models.base import ModelResponse, ToolCall
-from contextforge.core.models.scripted import ScriptedModel
+from contextforge.core.llm.base import ModelResponse, ToolCall
+from contextforge.core.llm.scripted import ScriptedModel
 from contextforge.core.queue import InProcessQueue, WorkMessage
 from contextforge.core.services.application import Application, title_from
 from contextforge.core.services.memory import memory_snapshot
@@ -27,7 +29,7 @@ from tests.helpers import clarification, make_deps, seed_chat_with_dataset, six_
 @pytest.fixture(autouse=True)
 def _bounded_streams(monkeypatch):
     # A stream that fails to close ends the test in seconds, not after 15 minutes.
-    monkeypatch.setattr(main, "STREAM_MAX_SECONDS", 10.0)
+    monkeypatch.setattr(request_routes, "STREAM_MAX_SECONDS", 10.0)
 
 
 def _settings(tmp_path, **overrides) -> Settings:
@@ -382,7 +384,7 @@ def test_errors_share_one_envelope_without_internals(tmp_path, monkeypatch, capl
         monkeypatch.setattr(app.state.service, "detail", explode)
         crashed = client.get("/chats/c1/requests/r1", headers=auth)
     assert crashed.status_code == 500
-    assert crashed.json() == {"error": {"code": "internal", "message": main.INTERNAL_MESSAGE}}
+    assert crashed.json() == {"error": {"code": "internal", "message": INTERNAL_MESSAGE}}
     for response in (missing, crashed):
         assert response.headers["access-control-allow-origin"] == "http://localhost:5173"
     assert "database password leaked" in caplog.text  # logged with its trace, never sent

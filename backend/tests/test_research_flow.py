@@ -7,7 +7,7 @@ from fastapi.testclient import TestClient
 from langchain_core.messages import ToolMessage
 
 from contextforge.api.main import create_app
-from contextforge.core.models.base import ModelRequest, ModelResponse, ToolCall
+from contextforge.core.llm.base import ModelRequest, ModelResponse, ToolCall
 from contextforge.core.settings import Settings
 from contextforge.evals.web_research import capture_run, grade_bundle
 from contextforge.infra.web import web_tools

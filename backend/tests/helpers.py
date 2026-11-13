@@ -20,8 +20,8 @@ from contextforge.core.entities.message import (
 )
 from contextforge.core.entities.model_call import Stage
 from contextforge.core.ids import new_ulid, now_iso
-from contextforge.core.models.base import ModelClient, ModelRequest, ModelResponse
-from contextforge.core.models.config import load_models_config
+from contextforge.core.llm.base import ModelClient, ModelRequest, ModelResponse
+from contextforge.core.llm.config import load_models_config
 from contextforge.core.queue import InProcessQueue
 from contextforge.core.repositories.memory import Repositories
 from contextforge.core.services.memory import memory_snapshot

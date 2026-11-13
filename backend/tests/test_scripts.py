@@ -7,7 +7,7 @@ from typing import Any
 
 from botocore.exceptions import ClientError
 
-from contextforge.core.models.config import load_models_config
+from contextforge.core.llm.config import load_models_config
 from contextforge.core.settings import Settings
 from scripts import plan_bakeoff
 from scripts.plan_bakeoff import SAMPLE_PLAN, Bakeoff, listed_model_ids, probe, render, run_bakeoff

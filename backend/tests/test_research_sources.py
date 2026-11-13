@@ -1,6 +1,6 @@
 import json
 
-from contextforge.core.models.scripted import ScriptedModel
+from contextforge.core.llm.scripted import ScriptedModel
 from contextforge.infra.web_guard import SeenUrls, urls_in
 from tests.helpers import make_deps
 from tests.test_web_research import _ctx, _fetcher, _page, _web

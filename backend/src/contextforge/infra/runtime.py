@@ -12,11 +12,11 @@ from pydantic import SecretStr
 
 from contextforge.core.context.budgets import load_budgets
 from contextforge.core.entities.model_call import Stage
-from contextforge.core.models.base import ModelClient, ModelRequest, ModelResponse
-from contextforge.core.models.config import ModelRoute, ModelsConfig, load_models_config
-from contextforge.core.models.errors import ModelAccessDenied
-from contextforge.core.models.recording import PriceTable
-from contextforge.core.models.scripted import ScriptedModel
+from contextforge.core.llm.base import ModelClient, ModelRequest, ModelResponse
+from contextforge.core.llm.config import ModelRoute, ModelsConfig, load_models_config
+from contextforge.core.llm.errors import ModelAccessDenied
+from contextforge.core.llm.recording import PriceTable
+from contextforge.core.llm.scripted import ScriptedModel
 from contextforge.core.queue import InProcessQueue, Queue
 from contextforge.core.repositories.memory import Repositories
 from contextforge.core.settings import Settings

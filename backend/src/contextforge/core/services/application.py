@@ -27,7 +27,7 @@ from contextforge.core.entities.message import (
 from contextforge.core.entities.model_call import ModelCall
 from contextforge.core.entities.user import User
 from contextforge.core.ids import new_ulid, now_iso
-from contextforge.core.models.transcript import Transcript
+from contextforge.core.llm.transcript import Transcript
 from contextforge.core.queue import Queue, WorkMessage
 from contextforge.core.repositories.base import StaleStatusError
 from contextforge.core.repositories.memory import Repositories

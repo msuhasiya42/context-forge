@@ -7,7 +7,7 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from pydantic import BaseModel
 
 from contextforge.core.entities.model_call import Stage
-from contextforge.core.models.base import ModelRequest, ToolSpec
+from contextforge.core.llm.base import ModelRequest, ToolSpec
 from contextforge.infra.bedrock import converse_payload, parse_response
 
 

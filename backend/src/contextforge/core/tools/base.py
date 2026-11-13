@@ -3,7 +3,7 @@
 from typing import Any, Literal, Protocol
 
 from contextforge.core.entities import Entity
-from contextforge.core.models.base import ToolSpec
+from contextforge.core.llm.base import ToolSpec
 
 ToolPermission = Literal["READ", "WRITE", "DESTRUCTIVE"]
 

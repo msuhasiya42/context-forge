@@ -14,8 +14,8 @@ from pydantic import Field
 
 from contextforge.core.entities import Entity
 from contextforge.core.entities.message import Claim
-from contextforge.core.models.base import ModelClient
-from contextforge.core.models.errors import ModelError
+from contextforge.core.llm.base import ModelClient
+from contextforge.core.llm.errors import ModelError
 from contextforge.evals.judge import (
     JUDGE_ERROR,
     REASON_WORDS,

@@ -10,8 +10,8 @@ import pytest
 
 from contextforge.core.entities.model_call import Stage
 from contextforge.core.entities.task import Task, TaskResult
-from contextforge.core.models.base import ModelRequest, ModelResponse
-from contextforge.core.models.scripted import ScriptedModel
+from contextforge.core.llm.base import ModelRequest, ModelResponse
+from contextforge.core.llm.scripted import ScriptedModel
 from contextforge.core.values import LocatorKind
 from contextforge.infra.gemini import chat_payload
 from contextforge.worker.stages.citation_checks import check_citations, supported_conclusions

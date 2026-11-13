@@ -13,7 +13,7 @@ from typing import Any
 
 from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
 
-from contextforge.core.models.base import ModelRequest, ModelResponse
+from contextforge.core.llm.base import ModelRequest, ModelResponse
 from contextforge.core.storage import BlobStore, transcript_key
 
 logger = logging.getLogger(__name__)

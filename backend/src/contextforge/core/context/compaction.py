@@ -13,7 +13,7 @@ from langchain_core.messages import AIMessage, AnyMessage, SystemMessage, ToolMe
 from contextforge.core.context.builder import messages_tokens
 from contextforge.core.context.prompts import load_prompt, prompt_version
 from contextforge.core.entities.model_call import Stage
-from contextforge.core.models.base import ModelClient, ModelRequest
+from contextforge.core.llm.base import ModelClient, ModelRequest
 
 # Every stub starts with this; it is how level 1 recognises a result it already stubbed.
 _STUB_PREFIX = "[tool "

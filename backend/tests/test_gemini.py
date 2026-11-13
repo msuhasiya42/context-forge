@@ -16,9 +16,9 @@ from pydantic import SecretStr
 
 from contextforge.api.main import create_app
 from contextforge.core.entities.model_call import Stage
-from contextforge.core.models.base import ModelRequest
-from contextforge.core.models.config import ModelRoute
-from contextforge.core.models.errors import (
+from contextforge.core.llm.base import ModelRequest
+from contextforge.core.llm.config import ModelRoute
+from contextforge.core.llm.errors import (
     ModelAccessDenied,
     ModelOverloaded,
     ModelRejected,

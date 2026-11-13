@@ -14,10 +14,10 @@ from functools import cache
 from pathlib import Path
 
 from contextforge.core.entities.model_call import Stage
-from contextforge.core.models.base import ModelClient, ModelRequest, ModelResponse
-from contextforge.core.models.config import ModelRoute, ModelsConfig
-from contextforge.core.models.recording import RecordingModelClient, cost_usd
-from contextforge.core.models.transcript import TranscriptWriter
+from contextforge.core.llm.base import ModelClient, ModelRequest, ModelResponse
+from contextforge.core.llm.config import ModelRoute, ModelsConfig
+from contextforge.core.llm.recording import RecordingModelClient, cost_usd
+from contextforge.core.llm.transcript import TranscriptWriter
 from contextforge.core.repositories.memory import InMemoryModelCalls
 from contextforge.core.values import Usage
 from contextforge.infra.gemini import is_gemini_model

@@ -14,8 +14,8 @@ from pathlib import Path
 import httpx
 
 from contextforge.core.entities.model_call import Stage
-from contextforge.core.models.config import ModelRoute, ModelsConfig, load_models_config
-from contextforge.core.models.transcript import TranscriptWriter
+from contextforge.core.llm.config import ModelRoute, ModelsConfig, load_models_config
+from contextforge.core.llm.transcript import TranscriptWriter
 from contextforge.core.settings import Settings
 from contextforge.evals.calibration import (
     calibration_markdown,

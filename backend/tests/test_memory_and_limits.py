@@ -2,8 +2,8 @@ import pytest
 from langchain_core.messages import HumanMessage
 
 from contextforge.core.entities.user import User
-from contextforge.core.models.base import ModelRequest, ModelResponse
-from contextforge.core.models.scripted import ScriptedModel
+from contextforge.core.llm.base import ModelRequest, ModelResponse
+from contextforge.core.llm.scripted import ScriptedModel
 from contextforge.core.services.credentials import contains_credential
 from contextforge.core.services.memory import memory_snapshot
 from contextforge.worker.workflow import load_initial_request_state
@@ -44,8 +44,8 @@ def test_memory_is_snapshotted_at_start_and_a_later_edit_changes_its_version():
 
 
 def test_compress_calls_count_against_the_call_budget():
-    from contextforge.core.models.errors import ModelError
-    from contextforge.core.models.recording import RecordingModelClient
+    from contextforge.core.llm.errors import ModelError
+    from contextforge.core.llm.recording import RecordingModelClient
     from contextforge.worker.calls import BudgetedModel
 
     worker_dependencies = make_deps(
@@ -75,8 +75,8 @@ def test_compress_calls_count_against_the_call_budget():
 
 
 def test_timeout_record_preserves_unknown_usage():
-    from contextforge.core.models.errors import ModelTimeout
-    from contextforge.core.models.recording import RecordingModelClient
+    from contextforge.core.llm.errors import ModelTimeout
+    from contextforge.core.llm.recording import RecordingModelClient
 
     class Timeout:
         def invoke(self, request):

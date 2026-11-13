@@ -48,8 +48,7 @@ from contextforge.core.entities.task import (
     validate_structured_data,
 )
 from contextforge.core.ids import now_iso
-from contextforge.core.logging import request_context
-from contextforge.core.models.base import (
+from contextforge.core.llm.base import (
     PROVIDER_DATA_KEY,
     ModelClient,
     ModelRequest,
@@ -57,7 +56,8 @@ from contextforge.core.models.base import (
     ToolCall,
     ToolSpec,
 )
-from contextforge.core.models.errors import ModelError
+from contextforge.core.llm.errors import ModelError
+from contextforge.core.logging import request_context
 from contextforge.core.repositories.base import StaleStatusError
 from contextforge.core.state import Conclusion, Fact, RequestState, TaskState
 from contextforge.core.tools.base import Tool, ToolContext, ToolResult

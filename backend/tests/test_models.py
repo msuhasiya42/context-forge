@@ -9,9 +9,9 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from contextforge.core.context.prompts import load_prompt, prompt_version
 from contextforge.core.entities.model_call import Outcome, Stage
-from contextforge.core.models.base import ModelClient, ModelRequest, ModelResponse, ToolSpec
-from contextforge.core.models.config import ModelRoute, load_models_config
-from contextforge.core.models.errors import (
+from contextforge.core.llm.base import ModelClient, ModelRequest, ModelResponse, ToolSpec
+from contextforge.core.llm.config import ModelRoute, load_models_config
+from contextforge.core.llm.errors import (
     ModelAccessDenied,
     ModelError,
     ModelOverloaded,
@@ -20,9 +20,9 @@ from contextforge.core.models.errors import (
     ModelTimeout,
     ModelUnavailable,
 )
-from contextforge.core.models.recording import RecordingModelClient, price_row
-from contextforge.core.models.scripted import ScriptedModel, ScriptExhausted
-from contextforge.core.models.transcript import TranscriptWriter
+from contextforge.core.llm.recording import RecordingModelClient, price_row
+from contextforge.core.llm.scripted import ScriptedModel, ScriptExhausted
+from contextforge.core.llm.transcript import TranscriptWriter
 from contextforge.core.repositories.memory import Repositories
 from contextforge.core.settings import Settings
 from contextforge.core.storage import MemoryBlobStore

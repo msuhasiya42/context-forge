@@ -2,7 +2,7 @@
 import pytest
 from pydantic import ValidationError
 
-from contextforge.core.planner import LeadDecision, PlannedTask, PlannerOutput
+from contextforge.worker.planner import LeadDecision, PlannedTask, PlannerOutput
 
 
 def _task(ref: str, worker_dependencies: list[str] | None = None) -> PlannedTask:

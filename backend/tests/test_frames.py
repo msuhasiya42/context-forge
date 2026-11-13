@@ -11,9 +11,9 @@ import httpx
 import pytest
 
 from contextforge.core.entities.message import Claim
-from contextforge.core.models.base import ModelResponse
-from contextforge.core.models.errors import ModelAccessDenied
-from contextforge.core.models.scripted import ScriptedModel
+from contextforge.core.llm.base import ModelResponse
+from contextforge.core.llm.errors import ModelAccessDenied
+from contextforge.core.llm.scripted import ScriptedModel
 from contextforge.evals import suite_cli
 from contextforge.evals.benchmarks import frames
 from contextforge.evals.benchmarks.frames import (

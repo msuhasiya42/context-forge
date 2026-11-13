@@ -14,7 +14,7 @@ from langchain_core.messages import AIMessage, AnyMessage
 from contextforge.core.context.budgets import Budgets
 from contextforge.core.context.tokens import estimate_tokens
 from contextforge.core.entities.message import Message, ReportMessage, RequestMessage
-from contextforge.core.models.base import ToolSpec
+from contextforge.core.llm.base import ToolSpec
 from contextforge.core.state import Fact, OpenQuestion
 
 

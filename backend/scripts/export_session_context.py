@@ -16,8 +16,8 @@ from langchain_core.messages import ToolMessage
 from contextforge.core.context.builder import messages_tokens
 from contextforge.core.context.compaction import stub_old_tool_results
 from contextforge.core.entities import wire
-from contextforge.core.models.base import ModelRequest, ModelResponse, ToolCall
-from contextforge.core.models.transcript import message_record, transcript
+from contextforge.core.llm.base import ModelRequest, ModelResponse, ToolCall
+from contextforge.core.llm.transcript import message_record, transcript
 from contextforge.core.services.application import Application
 from contextforge.core.services.memory import memory_snapshot
 from contextforge.infra.bedrock import converse_payload

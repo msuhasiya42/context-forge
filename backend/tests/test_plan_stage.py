@@ -6,16 +6,16 @@ import pytest
 
 from contextforge.core.entities.model_call import Stage
 from contextforge.core.entities.user import User
-from contextforge.core.models.base import ModelResponse
-from contextforge.core.models.config import ModelRoute
-from contextforge.core.models.scripted import ScriptedModel
-from contextforge.core.planner import (
+from contextforge.core.llm.base import ModelResponse
+from contextforge.core.llm.config import ModelRoute
+from contextforge.core.llm.scripted import ScriptedModel
+from contextforge.core.services.memory import memory_snapshot
+from contextforge.worker.planner import (
     PlannedTask,
     PlannerOutput,
     read_plan_leniently,
     with_inferred_dependencies,
 )
-from contextforge.core.services.memory import memory_snapshot
 from contextforge.worker.stages.guards import Cancelled
 from contextforge.worker.stages.plan import (
     PlanFailed,

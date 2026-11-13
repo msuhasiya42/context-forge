@@ -14,7 +14,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from contextforge.api.main import create_app
-from contextforge.core.models.base import ModelRequest, ModelResponse
+from contextforge.core.llm.base import ModelRequest, ModelResponse
 from contextforge.core.settings import Settings
 from contextforge.evals import suite_cli
 from contextforge.evals.calibration import cohen_kappa, export_calibration, score_calibration

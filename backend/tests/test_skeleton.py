@@ -5,7 +5,7 @@ import pytest
 import yaml
 
 from contextforge.core.context.budgets import load_budgets
-from contextforge.core.models.recording import price_row
+from contextforge.core.llm.recording import price_row
 
 
 def test_package_imports() -> None:

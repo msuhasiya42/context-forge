@@ -22,13 +22,13 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMe
 from pydantic import SecretStr
 
 from contextforge.core.entities.model_call import Stage
-from contextforge.core.models.base import (
+from contextforge.core.llm.base import (
     PROVIDER_DATA_KEY,
     ModelRequest,
     ModelResponse,
     ToolCall,
 )
-from contextforge.core.models.errors import (
+from contextforge.core.llm.errors import (
     ModelAccessDenied,
     ModelError,
     ModelOverloaded,

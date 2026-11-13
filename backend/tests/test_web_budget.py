@@ -4,8 +4,8 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from threading import Lock
 
-from contextforge.core.models.base import ToolCall, ToolSpec
-from contextforge.core.models.scripted import ScriptedModel
+from contextforge.core.llm.base import ToolCall, ToolSpec
+from contextforge.core.llm.scripted import ScriptedModel
 from contextforge.core.tools.base import ToolContext, ToolResult
 from contextforge.worker.stages.execute import _invoke_tool
 from tests.helpers import make_deps, seed_chat_with_dataset

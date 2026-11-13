@@ -11,9 +11,9 @@ import time
 from collections.abc import Callable, Sequence
 
 from contextforge.core.entities.model_call import ModelCall
-from contextforge.core.models.base import ModelClient, ModelRequest, ModelResponse
-from contextforge.core.models.errors import ModelError
-from contextforge.core.models.recording import (
+from contextforge.core.llm.base import ModelClient, ModelRequest, ModelResponse
+from contextforge.core.llm.errors import ModelError
+from contextforge.core.llm.recording import (
     PriceTable,
     refused_before_generation,
     worst_case_usd,

@@ -8,7 +8,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from contextforge.api.main import create_app
-from contextforge.core.models.scripted import ScriptedModel
+from contextforge.core.llm.scripted import ScriptedModel
 from contextforge.core.settings import Settings
 from contextforge.evals.api_research import submit_run, watch_run
 from contextforge.infra.web import web_tools

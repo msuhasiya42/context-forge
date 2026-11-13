@@ -14,7 +14,7 @@ from botocore.exceptions import (  # type: ignore[import-untyped]
     ReadTimeoutError,
 )
 
-from contextforge.core.models.errors import (
+from contextforge.core.llm.errors import (
     ModelAccessDenied,
     ModelError,
     ModelOverloaded,

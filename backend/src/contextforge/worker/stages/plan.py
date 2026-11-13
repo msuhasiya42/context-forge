@@ -31,20 +31,20 @@ from contextforge.core.entities.message import (
 from contextforge.core.entities.model_call import Stage
 from contextforge.core.entities.task import Task, TaskStatus
 from contextforge.core.ids import derived_id, new_ulid, now_iso
+from contextforge.core.llm.base import ModelRequest, ModelResponse
+from contextforge.core.llm.errors import ModelError
 from contextforge.core.logging import request_context
-from contextforge.core.models.base import ModelRequest, ModelResponse
-from contextforge.core.models.errors import ModelError
-from contextforge.core.planner import (
+from contextforge.core.services.credentials import contains_credential
+from contextforge.core.services.memory import user_timezone
+from contextforge.core.state import PendingInterrupt, PlanEntry, RequestState
+from contextforge.worker.dependencies import WorkerDependencies
+from contextforge.worker.planner import (
     PlannedTask,
     PlannerOutput,
     check_task_graph,
     read_plan_leniently,
     with_inferred_dependencies,
 )
-from contextforge.core.services.credentials import contains_credential
-from contextforge.core.services.memory import user_timezone
-from contextforge.core.state import PendingInterrupt, PlanEntry, RequestState
-from contextforge.worker.dependencies import WorkerDependencies
 from contextforge.worker.request_state import load_request
 from contextforge.worker.stages.errors import one_line
 from contextforge.worker.stages.guards import check_not_cancelled, leave_running
@@ -381,7 +381,7 @@ def _call_planner(
     request_state: RequestState, inputs: ContextInputs, worker_dependencies: WorkerDependencies
 ) -> PlannerOutput:
     """One guarded, recorded planner call, its answer read leniently and its dependencies
-    checked (``core.planner``); ``ValidationError`` when the answer still breaks the schema."""
+    checked (``worker.planner``); ``ValidationError`` when the answer still breaks the schema."""
     check_not_cancelled(
         worker_dependencies, request_state["chat_id"], request_state["request_message_id"]
     )
