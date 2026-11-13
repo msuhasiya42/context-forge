@@ -1,0 +1,12 @@
+{
+  "source": "github:Ayanami0730/deep_research_bench@f2735b5c3636759c22f9e936c0232de8bf545b67",
+  "files": [
+    "data/criteria_data/criteria.jsonl",
+    "data/prompt_data/query.jsonl",
+    "data/test_data/cleaned_data/reference.jsonl"
+  ],
+  "license": "Apache-2.0",
+  "sampling": "5 of 50 English tasks, seed 42, one per randomly drawn topic",
+  "examples": 5,
+  "sha256": "52e68b8d7209badba1e878cd9f1d0066f1081c7c94acbca158c2c599d460324e"
+}

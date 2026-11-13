@@ -1,0 +1,8 @@
+{
+  "source": "huggingface:google/frames-benchmark",
+  "revision": "58d9fb6330f3ab1316d1eca12e5e8ef23dcc22ef",
+  "license": "Apache-2.0",
+  "sampling": "20 of 824, seed 42, stratified by first reasoning type",
+  "examples": 20,
+  "sha256": "ae1471547341bdab32e874218183749fcf3752b9bbaf5ce6e32506b7e44f23b3"
+}
