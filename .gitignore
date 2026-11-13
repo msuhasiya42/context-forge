@@ -23,3 +23,6 @@ frontend/dist/
 # Understand-Anything knowledge graph output
 .ua/
 .understand-anything/
+
+# Jupyter
+.ipynb_checkpoints/
